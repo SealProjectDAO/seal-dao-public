@@ -1,0 +1,24 @@
+[package]
+name = "seal-crypto"
+description = "Post-quantum cryptographic primitives for Seal DAO (libcrux — formally verified)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+# Formally verified PQC (Cryspen libcrux, verified with hax + F*)
+libcrux-ml-dsa = { workspace = true }
+libcrux-ml-kem = { workspace = true }
+# SHA3 (keeping sha3 crate — libcrux-sha3 has a different API)
+sha3 = { workspace = true }
+serde = { workspace = true }
+borsh = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

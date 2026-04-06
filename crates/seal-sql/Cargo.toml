@@ -1,0 +1,18 @@
+[package]
+name = "seal-sql"
+description = "PostgreSQL-compatible SQL parser and execution engine for Seal DAO"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+seal-crypto = { path = "../seal-crypto" }
+seal-merkle = { path = "../seal-merkle" }
+sqlparser = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -1,0 +1,24 @@
+[package]
+name = "p3-matrix"
+description = "A matrix library providing common matrix operations and traits for finite field elements."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+p3-field = { workspace = true }
+p3-maybe-rayon = { workspace = true }
+p3-util = { workspace = true }
+itertools = "0.12.0"
+rand = "0.8.5"
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1.37"
+
+[[bench]]
+name = "transpose_benchmark"
+path = "benches/transpose_benchmark.rs"
+harness = false

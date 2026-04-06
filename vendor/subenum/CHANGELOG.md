@@ -1,0 +1,31 @@
+# Changelog
+
+This project follows semantic versioning.
+
+### Unreleased
+
+### 1.1.3 (2025-10-01)
+- [changed] Bumped dependency versions
+- [fixed] Improved lifetime handling
+
+### 1.1.2 (2024-03-12)
+- [fixed] Fix error when there's an enum variant called `Error`.
+
+### 1.1.1 (2023-09-18)
+- [fixed] Support for `#![deny(missing_docs)]`.
+
+### 1.1.0 (2023-09-18)
+- [added] Default feature `std` and support for no-std.
+- [added] Support for subenum-specific proc-macros.
+
+### 1.0.1 (2023-02-25)
+- [fixed] References to generic types.
+
+### 1.0.0 (2023-02-20)
+- [fixed] Bug when repeating a type in an unnamed variant.
+- [changed] **BREAKING** All enums to be created must now be declared at the
+  top-level subenum attribute.
+- [added] Support for lifetimes and generics.
+
+### 0.1.0 (2023-02-13)
+- [added] Initial `subenum` macro creation.

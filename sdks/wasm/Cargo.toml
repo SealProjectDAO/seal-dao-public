@@ -1,0 +1,31 @@
+[package]
+name = "seal-dao-wasm"
+version = "0.1.0"
+description = "WASM bindings for Seal DAO — exposes seal-crypto and seal-sql to JavaScript"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/SealProjectDAO/seal-dao-master"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Seal crates
+seal-crypto = { path = "../../crates/seal-crypto" }
+seal-sql = { path = "../../crates/seal-sql" }
+seal-wallet = { path = "../../crates/seal-wallet" }
+
+# WASM bindings
+wasm-bindgen = "0.2"
+
+# Serialization for JS interop
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+# WASM-compatible getrandom
+getrandom = { version = "0.2", features = ["js"] }
+
+[profile.release]
+opt-level = "s"
+lto = true

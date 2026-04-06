@@ -1,0 +1,21 @@
+[package]
+name = "dynasmrt"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+
+description = "A simple runtime for assembling code at runtime. Combined with the plugin crate dynasm it can be used to write JIT compilers easily."
+
+documentation.workspace = true
+repository.workspace = true
+
+readme.workspace = true
+keywords.workspace = true
+license.workspace = true
+
+
+[dependencies]
+memmap2 = "0.9.5"
+byteorder = "1.5.0"
+fnv = "1.0.7"
+dynasm = { version = "=3.2.1", path = "../plugin" }

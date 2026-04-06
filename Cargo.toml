@@ -1,0 +1,89 @@
+[workspace]
+resolver = "2"
+exclude = ["fuzz", "apps/seal-wallet/src-tauri", "apps/seal-wallet-android", "bridges", "sdks/wasm"]
+# Example apps
+# members also includes:
+#   "examples/seal-notes"
+members = [
+    "crates/seal-crypto",
+    "crates/seal-vrf",
+    "crates/seal-merkle",
+    "crates/seal-sql",
+    "crates/seal-storage",
+    "crates/seal-consensus",
+    "crates/seal-p2p",
+    "crates/seal-token",
+    "crates/seal-threshold",
+    "crates/seal-zk",
+    "crates/seal-mpc",
+    "crates/seal-bridge",
+    "crates/seal-wallet",
+    "crates/seal-tee",
+    "crates/seal-node",
+    "crates/seal-app",
+    "crates/seal-cli",
+    "examples/seal-notes",
+    "examples/seal-marketplace",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+repository = "https://github.com/SealProjectDAO/seal-dao-master"
+
+[workspace.dependencies]
+# PQC cryptography (libcrux — formally verified with hax + F*)
+libcrux-ml-dsa = "0.0.8"
+libcrux-ml-kem = "0.0.8"
+libcrux-sha3 = "0.0.8"
+# Legacy PQC (kept as fallback, migrating to libcrux)
+pqcrypto-dilithium = "0.5"
+pqcrypto-kyber = "0.8"
+pqcrypto-traits = "0.3"
+sha3 = "0.10"
+
+# SQL
+sqlparser = { version = "0.53", features = ["visitor"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = "1"
+borsh = { version = "1", features = ["derive"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# Crypto utilities
+rand = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+subtle = "2"
+hex = "0.4"
+
+# HTTP / RPC
+axum = "0.7"
+tower-http = { version = "0.6", features = ["cors"] }
+
+# Networking
+libp2p = { version = "0.56", features = ["gossipsub", "mdns", "noise", "tcp", "yamux", "tokio", "macros", "identify"] }
+
+# Storage
+sled = "0.34"
+tempfile = "3"
+
+# ZK proving backends
+risc0-zkvm = { version = "5.0.0-rc.1", default-features = false }
+sp1-sdk = { version = "6.0.2", default-features = false }
+
+# Testing
+proptest = "1"

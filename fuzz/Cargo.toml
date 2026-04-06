@@ -1,0 +1,64 @@
+[package]
+name = "seal-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+seal-crypto = { path = "../crates/seal-crypto" }
+seal-sql = { path = "../crates/seal-sql" }
+seal-vrf = { path = "../crates/seal-vrf" }
+seal-storage = { path = "../crates/seal-storage" }
+seal-merkle = { path = "../crates/seal-merkle" }
+seal-threshold = { path = "../crates/seal-threshold" }
+seal-node = { path = "../crates/seal-node" }
+bincode = "1"
+
+[[bin]]
+name = "fuzz_sql_parser"
+path = "fuzz_targets/fuzz_sql_parser.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_address_parse"
+path = "fuzz_targets/fuzz_address_parse.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_vrf_verify"
+path = "fuzz_targets/fuzz_vrf_verify.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_block_deserialize"
+path = "fuzz_targets/fuzz_block_deserialize.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_merkle_ops"
+path = "fuzz_targets/fuzz_merkle_ops.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_tx_deserialize"
+path = "fuzz_targets/fuzz_tx_deserialize.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_pqvrf_verify"
+path = "fuzz_targets/fuzz_pqvrf_verify.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_ringtail_verify"
+path = "fuzz_targets/fuzz_ringtail_verify.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_committee_vote"
+path = "fuzz_targets/fuzz_committee_vote.rs"
+doc = false

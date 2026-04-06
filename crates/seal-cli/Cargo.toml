@@ -1,0 +1,27 @@
+[package]
+name = "seal-cli"
+description = "Developer CLI tools for Seal DAO"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "seal"
+path = "src/main.rs"
+
+[dependencies]
+seal-crypto = { path = "../seal-crypto" }
+seal-sql = { path = "../seal-sql" }
+seal-node = { path = "../seal-node" }
+seal-storage = { path = "../seal-storage" }
+seal-vrf = { path = "../seal-vrf" }
+seal-consensus = { path = "../seal-consensus" }
+seal-wallet = { path = "../seal-wallet" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }

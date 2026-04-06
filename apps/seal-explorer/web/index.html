@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Seal Block Explorer</title>
+<link rel="icon" href="../../../apps/seal-wallet/icon.svg" type="image/svg+xml">
+<style>
+:root {
+  --bg: #0A0A0F; --surface: #12121A; --border: #2A2A3A;
+  --text: #E8E8ED; --dim: #9090A0; --muted: #606070;
+  --blue: #4A90D9; --green: #4ADE80; --amber: #FBBF24; --red: #F87171;
+  --code-bg: #0D0D14;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family: 'Inter', -apple-system, sans-serif; background: var(--bg); color: var(--text); font-size: 14px; }
+a { color: var(--blue); text-decoration: none; cursor: pointer; }
+a:hover { color: var(--text); }
+.mono { font-family: 'SF Mono', 'JetBrains Mono', monospace; font-size: 13px; }
+.dim { color: var(--dim); }
+.green { color: var(--green); }
+
+.app { max-width: 900px; margin: 0 auto; padding: 16px; }
+header { display: flex; align-items: center; gap: 12px; padding: 12px 0 20px; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+header h1 { font-family: 'SF Mono', monospace; font-size: 1.3rem; font-weight: 700; }
+header .badge { background: var(--amber); color: #000; font-size: 0.6rem; padding: 2px 8px; border-radius: 4px; font-weight: 700; }
+
+/* Nav tabs */
+.tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin-bottom: 16px; }
+.tabs button { background: none; border: none; color: var(--dim); padding: 8px 16px; font-size: 13px; font-weight: 600; cursor: pointer; border-bottom: 2px solid transparent; }
+.tabs button.active { color: var(--blue); border-bottom-color: var(--blue); }
+.tabs button:hover { color: var(--text); }
+
+/* Cards */
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 12px; }
+.card h2 { font-size: 0.7rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+
+/* Stats row */
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 16px; }
+.stat { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px; text-align: center; }
+.stat .value { font-family: 'SF Mono', monospace; font-size: 1.4rem; font-weight: 700; color: var(--blue); }
+.stat .label { font-size: 0.7rem; color: var(--dim); margin-top: 4px; }
+
+/* Table */
+table { width: 100%; border-collapse: collapse; }
+th { text-align: left; font-size: 0.65rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; padding: 8px; border-bottom: 1px solid var(--border); }
+td { padding: 8px; border-bottom: 1px solid #1a1a26; font-size: 13px; }
+td.mono { font-family: 'SF Mono', monospace; font-size: 12px; }
+tr:hover { background: rgba(74,144,217,0.05); }
+
+/* Connection */
+.connect { display: flex; gap: 8px; margin-bottom: 16px; }
+.connect input { flex: 1; background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: var(--text); font-family: monospace; font-size: 13px; }
+.connect button { background: var(--blue); color: #fff; border: none; border-radius: 6px; padding: 8px 16px; font-weight: 600; cursor: pointer; font-size: 13px; }
+
+.page { display: none; }
+.page.active { display: block; }
+
+.hidden { display: none; }
+@media (max-width: 600px) { .stats { grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1>seal.explorer</h1>
+    <span class="badge">TESTNET</span>
+    <span id="connStatus" class="dim" style="margin-left:auto">Not connected</span>
+  </header>
+
+  <div class="connect">
+    <input id="nodeUrl" value="http://localhost:8545" />
+    <button onclick="connect()">Connect</button>
+  </div>
+
+  <div id="mainContent" class="hidden">
+    <div class="stats">
+      <div class="stat"><div class="value" id="sHeight">—</div><div class="label">Height</div></div>
+      <div class="stat"><div class="value" id="sSupply">—</div><div class="label">SEAL Supply</div></div>
+      <div class="stat"><div class="value" id="sTokens">—</div><div class="label">Tokens</div></div>
+      <div class="stat"><div class="value" id="sPairs">—</div><div class="label">DEX Pairs</div></div>
+    </div>
+
+    <div class="tabs">
+      <button class="active" onclick="showTab('blocks')">Blocks</button>
+      <button onclick="showTab('accounts')">Accounts</button>
+      <button onclick="showTab('tokens')">Tokens</button>
+      <button onclick="showTab('dex')">DEX</button>
+      <button onclick="showTab('sql')">SQL</button>
+    </div>
+
+    <!-- Blocks -->
+    <div id="tab-blocks" class="page active">
+      <div class="card">
+        <h2>Recent Blocks</h2>
+        <table>
+          <tr><th>Height</th><th>Txs</th><th>State Root</th><th>Time</th></tr>
+          <tbody id="blockTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Accounts -->
+    <div id="tab-accounts" class="page">
+      <div class="card">
+        <h2>Lookup Account</h2>
+        <div class="connect">
+          <input id="addrInput" placeholder="seal1... or sealt1..." />
+          <button onclick="lookupAccount()">Lookup</button>
+        </div>
+        <div id="accountResult"></div>
+      </div>
+    </div>
+
+    <!-- Tokens -->
+    <div id="tab-tokens" class="page">
+      <div class="card">
+        <h2>Custom Tokens</h2>
+        <table>
+          <tr><th>Symbol</th><th>Name</th><th>Supply</th><th>Max</th><th>Creator</th></tr>
+          <tbody id="tokenTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- DEX -->
+    <div id="tab-dex" class="page">
+      <div class="card">
+        <h2>Trading Pairs</h2>
+        <table>
+          <tr><th>Pair</th><th>Last Price</th><th>Volume</th><th>Trades</th></tr>
+          <tbody id="pairTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- SQL -->
+    <div id="tab-sql" class="page">
+      <div class="card">
+        <h2>SQL Query</h2>
+        <div class="connect">
+          <input id="sqlInput" placeholder="SELECT * FROM users" onkeydown="if(event.key==='Enter')runSql()" />
+          <button onclick="runSql()">Run</button>
+        </div>
+        <div id="sqlResult"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let url = '';
+let refreshTimer = null;
+
+async function rpc(method, params = {}) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', method, params, id: 1 })
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.result;
+}
+
+async function connect() {
+  url = $('nodeUrl').value;
+  try {
+    const r = await rpc('seal_getHeight');
+    $('connStatus').innerHTML = '<span class="green">●</span> Connected (height: ' + r.height + ')';
+    $('mainContent').classList.remove('hidden');
+    refresh();
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(refresh, 4000);
+  } catch (e) {
+    $('connStatus').textContent = 'Failed: ' + e.message;
+  }
+}
+
+async function refresh() {
+  try {
+    const h = await rpc('seal_getHeight');
+    $('sHeight').textContent = h.height;
+
+    const sr = await rpc('seal_getStateRoot');
+
+    // Load recent blocks
+    const blocks = [];
+    const start = Math.max(1, h.height - 9);
+    for (let i = h.height; i >= start; i--) {
+      try {
+        const b = await rpc('seal_getBlock', { height: i });
+        blocks.push(b);
+      } catch (_) {}
+    }
+    $('blockTable').innerHTML = blocks.map(b =>
+      `<tr><td class="mono">${b.height}</td><td>${b.tx_count}</td><td class="mono dim">${b.state_root.slice(0,16)}...</td><td class="dim">${new Date(b.timestamp*1000).toLocaleTimeString()}</td></tr>`
+    ).join('');
+
+    // Tokens
+    try {
+      const t = await rpc('seal_listTokens');
+      $('sTokens').textContent = t.tokens.length;
+      $('tokenTable').innerHTML = t.tokens.map(tk =>
+        `<tr><td><strong>${tk.symbol}</strong></td><td>${tk.name}</td><td class="mono">${tk.total_supply}</td><td class="mono">${tk.max_supply || '∞'}</td><td class="mono dim">${(tk.creator||'').slice(0,16)}...</td></tr>`
+      ).join('') || '<tr><td colspan="5" class="dim">No custom tokens yet</td></tr>';
+    } catch (_) { $('sTokens').textContent = '0'; }
+
+    // DEX pairs
+    try {
+      const p = await rpc('seal_listPairs');
+      $('sPairs').textContent = p.pairs.length;
+      $('pairTable').innerHTML = p.pairs.map(pr =>
+        `<tr><td><strong>${pr.pair}</strong></td><td class="mono">${pr.last_price}</td><td class="mono">${pr.volume_24h}</td><td>${pr.trade_count}</td></tr>`
+      ).join('') || '<tr><td colspan="4" class="dim">No trading pairs yet</td></tr>';
+    } catch (_) { $('sPairs').textContent = '0'; }
+
+    // Supply
+    try {
+      const b = await rpc('seal_getBalance', { address: 'seal1validators' });
+      $('sSupply').textContent = (b.total_supply / 1e9).toFixed(0) + 'B';
+    } catch (_) { $('sSupply').textContent = '—'; }
+
+  } catch (e) {
+    $('connStatus').textContent = 'Disconnected: ' + e.message;
+  }
+}
+
+async function lookupAccount() {
+  const addr = $('addrInput').value.trim();
+  if (!addr) return;
+  try {
+    const r = await rpc('seal_getBalance', { address: addr });
+    $('accountResult').innerHTML = `
+      <div style="margin-top:12px">
+        <div><span class="dim">Address:</span> <span class="mono">${addr}</span></div>
+        <div><span class="dim">SEAL Balance:</span> <span class="mono green">${r.balance}</span> (${(r.balance/1e9).toFixed(4)} SEAL)</div>
+      </div>`;
+  } catch (e) {
+    $('accountResult').innerHTML = '<div class="dim" style="margin-top:8px">Error: ' + e.message + '</div>';
+  }
+}
+
+async function runSql() {
+  const sql = $('sqlInput').value;
+  if (!sql) return;
+  try {
+    const r = await rpc('seal_querySql', { sql });
+    if (r.columns && r.rows) {
+      let html = '<table style="margin-top:12px"><tr>' + r.columns.map(c => '<th>' + c + '</th>').join('') + '</tr>';
+      for (const row of r.rows) {
+        const cells = Array.isArray(row) ? row : Object.values(row);
+        html += '<tr>' + cells.map(v => {
+          const val = typeof v === 'object' ? (v.BigInt ?? v.Text ?? v.Boolean ?? JSON.stringify(v)) : v;
+          return '<td class="mono">' + val + '</td>';
+        }).join('') + '</tr>';
+      }
+      html += '</table><div class="dim" style="margin-top:4px">(' + r.rows.length + ' rows)</div>';
+      $('sqlResult').innerHTML = html;
+    } else {
+      $('sqlResult').innerHTML = '<div class="mono dim" style="margin-top:8px">' + JSON.stringify(r, null, 2) + '</div>';
+    }
+  } catch (e) {
+    $('sqlResult').innerHTML = '<div style="margin-top:8px;color:var(--red)">Error: ' + e.message + '</div>';
+  }
+}
+
+function showTab(name) {
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tabs button').forEach(b => b.classList.remove('active'));
+  $('tab-' + name).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>
+</body>
+</html>

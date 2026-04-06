@@ -1,0 +1,11 @@
+[package]
+name = "seal-zk-guest"
+version = "0.1.0"
+edition = "2021"
+description = "RISC Zero guest program for Seal DAO state transition proofs"
+
+# When risc0-zkvm is available, add:
+# [dependencies]
+# risc0-zkvm = { version = "1.0", default-features = false, features = ["guest"] }
+
+# For now: compiles as a normal binary (placeholder)

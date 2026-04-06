@@ -1,0 +1,23 @@
+[package]
+name = "seal-app"
+description = "Seal DAO interactive REPL / TUI application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "seal-repl"
+path = "src/main.rs"
+
+[dependencies]
+seal-crypto = { path = "../seal-crypto" }
+seal-sql = { path = "../seal-sql" }
+seal-node = { path = "../seal-node" }
+seal-wallet = { path = "../seal-wallet" }
+seal-consensus = { path = "../seal-consensus" }
+seal-token = { path = "../seal-token" }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+hex = { workspace = true }

@@ -1,0 +1,110 @@
+use core::borrow::Borrow;
+use core::marker::PhantomData;
+
+use crate::hash::Hash;
+use crate::hasher::CryptographicHasher;
+use crate::permutation::CryptographicPermutation;
+
+/// An `n`-to-1 compression function, like `CompressionFunction`, except that it need only be
+/// collision-resistant in a hash tree setting, where the preimage of a non-leaf node must consist
+/// of compression outputs.
+pub trait PseudoCompressionFunction<T, const N: usize>: Clone {
+    fn compress(&self, input: [T; N]) -> T;
+}
+
+/// An `N`-to-1 compression function.
+pub trait CompressionFunction<T, const N: usize>: PseudoCompressionFunction<T, N> {}
+
+#[derive(Clone, Debug)]
+pub struct TruncatedPermutation<InnerP, const N: usize, const CHUNK: usize, const WIDTH: usize> {
+    inner_permutation: InnerP,
+}
+
+impl<InnerP, const N: usize, const CHUNK: usize, const WIDTH: usize>
+    TruncatedPermutation<InnerP, N, CHUNK, WIDTH>
+{
+    pub const fn new(inner_permutation: InnerP) -> Self {
+        Self { inner_permutation }
+    }
+}
+
+impl<T, InnerP, const N: usize, const CHUNK: usize, const WIDTH: usize>
+    PseudoCompressionFunction<[T; CHUNK], N> for TruncatedPermutation<InnerP, N, CHUNK, WIDTH>
+where
+    T: Copy + Default,
+    InnerP: CryptographicPermutation<[T; WIDTH]>,
+{
+    fn compress(&self, input: [[T; CHUNK]; N]) -> [T; CHUNK] {
+        debug_assert!(CHUNK * N <= WIDTH);
+        let mut pre = [T::default(); WIDTH];
+        for i in 0..N {
+            pre[i * CHUNK..(i + 1) * CHUNK]
+                .copy_from_slice(Borrow::<[T; CHUNK]>::borrow(&input[i]).as_slice());
+        }
+        let post = self.inner_permutation.permute(pre);
+        let post_arr: [T; CHUNK] = post[..CHUNK].try_into().unwrap();
+        post_arr.into()
+    }
+}
+
+impl<F, T, InnerP, const N: usize, const CHUNK: usize, const WIDTH: usize>
+    PseudoCompressionFunction<Hash<F, T, CHUNK>, N>
+    for TruncatedPermutation<InnerP, N, CHUNK, WIDTH>
+where
+    T: Copy + Default,
+    InnerP: CryptographicPermutation<[T; WIDTH]>,
+{
+    fn compress(&self, input: [Hash<F, T, CHUNK>; N]) -> Hash<F, T, CHUNK> {
+        debug_assert!(CHUNK * N <= WIDTH);
+        let mut pre = [T::default(); WIDTH];
+        for i in 0..N {
+            pre[i * CHUNK..(i + 1) * CHUNK]
+                .copy_from_slice(Borrow::<[T; CHUNK]>::borrow(&input[i]).as_slice());
+        }
+        let post = self.inner_permutation.permute(pre);
+        let post_arr: [T; CHUNK] = post[..CHUNK].try_into().unwrap();
+        post_arr.into()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct CompressionFunctionFromHasher<T, H, const N: usize, const CHUNK: usize>
+where
+    T: Clone,
+    H: CryptographicHasher<T, [T; CHUNK]>,
+{
+    hasher: H,
+    _phantom: PhantomData<T>,
+}
+
+impl<T, H, const N: usize, const CHUNK: usize> CompressionFunctionFromHasher<T, H, N, CHUNK>
+where
+    T: Clone,
+    H: CryptographicHasher<T, [T; CHUNK]>,
+{
+    pub const fn new(hasher: H) -> Self {
+        Self {
+            hasher,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<T, H, const N: usize, const CHUNK: usize> PseudoCompressionFunction<[T; CHUNK], N>
+    for CompressionFunctionFromHasher<T, H, N, CHUNK>
+where
+    T: Clone,
+    H: CryptographicHasher<T, [T; CHUNK]>,
+{
+    fn compress(&self, input: [[T; CHUNK]; N]) -> [T; CHUNK] {
+        self.hasher.hash_iter(input.into_iter().flatten())
+    }
+}
+
+impl<T, H, const N: usize, const CHUNK: usize> CompressionFunction<[T; CHUNK], N>
+    for CompressionFunctionFromHasher<T, H, N, CHUNK>
+where
+    T: Clone,
+    H: CryptographicHasher<T, [T; CHUNK]>,
+{
+}

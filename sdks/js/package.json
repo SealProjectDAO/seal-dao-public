@@ -1,0 +1,38 @@
+{
+  "name": "@seal-dao/sdk",
+  "version": "0.1.0",
+  "description": "JavaScript/TypeScript SDK for Seal DAO — PQC-native L1 blockchain with distributed SQL",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "seal-dao",
+    "blockchain",
+    "post-quantum",
+    "sql",
+    "wasm"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/SealProjectDAO/seal-dao-master"
+  },
+  "dependencies": {
+    "seal-dao-wasm": "file:../wasm/pkg"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

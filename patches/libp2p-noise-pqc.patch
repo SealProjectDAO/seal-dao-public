@@ -1,0 +1,217 @@
+--- a/vendor/libp2p-noise/src/protocol.rs
++++ b/vendor/libp2p-noise/src/protocol.rs
+@@ -20,12 +20,16 @@
+
+ //! Components of a Noise protocol.
++//!
++//! PATCHED FOR PQC: X25519 DH replaced with ML-KEM-768 KEM.
++//! snow library replaced with custom PQ-Noise handshake.
++//! See patches/LIBP2P-PQC-DESIGN.md for rationale.
+
+-use std::sync::LazyLock;
++// PQC patch: removed snow and x25519_dalek imports
++// use std::sync::LazyLock;
+
+ use libp2p_identity as identity;
+-use rand::{Rng as _, SeedableRng};
+-use snow::params::NoiseParams;
+-use x25519_dalek::{x25519, X25519_BASEPOINT_BYTES};
++use rand::RngCore;
+ use zeroize::Zeroize;
+
+ use crate::Error;
+@@ -33,25 +37,22 @@
+-/// Prefix of static key signatures for domain separation.
+-pub(crate) const STATIC_KEY_DOMAIN: &str = "noise-libp2p-static-key:";
++/// Prefix of static key signatures for PQ domain separation.
++pub(crate) const STATIC_KEY_DOMAIN: &str = "noise-libp2p-pq-static-key:";
+
+-pub(crate) static PARAMS_XX: LazyLock<NoiseParams> = LazyLock::new(|| {
+-    "Noise_XX_25519_ChaChaPoly_SHA256"
+-        .parse()
+-        .expect("Invalid protocol name")
+-});
++/// ML-KEM-768 public key size.
++pub(crate) const KEM_PK_SIZE: usize = 1184;
++/// ML-KEM-768 secret key size.
++pub(crate) const KEM_SK_SIZE: usize = 2400;
++/// ML-KEM-768 ciphertext size.
++pub(crate) const KEM_CT_SIZE: usize = 1088;
++/// ML-KEM-768 shared secret size.
++pub(crate) const KEM_SS_SIZE: usize = 32;
+
+-pub(crate) fn noise_params_into_builder<'b>(
+-    params: NoiseParams,
+-    prologue: &'b [u8],
+-    private_key: &'b SecretKey,
+-    remote_public_key: Option<&'b PublicKey>,
+-) -> snow::Builder<'b> {
+-    let mut builder = snow::Builder::with_resolver(params, Box::new(Resolver))
+-        .prologue(prologue.as_ref())
+-        .local_private_key(private_key.as_ref());
+-
+-    if let Some(remote_public_key) = remote_public_key {
+-        builder = builder.remote_public_key(remote_public_key.as_ref());
+-    }
+-
+-    builder
+-}
+-
+-/// DH keypair.
++/// KEM keypair (replaces X25519 DH keypair).
+ #[derive(Clone)]
+ pub(crate) struct Keypair {
+-    secret: SecretKey,
+-    public: PublicKey,
++    secret: SecretKey,  // ML-KEM-768 decapsulation key
++    public: PublicKey,  // ML-KEM-768 encapsulation key
+ }
+
+@@ -59,7 +60,7 @@
+ /// The associated public identity of a DH keypair.
+ #[derive(Clone)]
+ pub(crate) struct KeypairIdentity {
+-    /// The public identity key.
++    /// The public identity key (Ed25519 for libp2p compat, ML-DSA for Seal).
+     pub(crate) public: identity::PublicKey,
+     /// The signature over the public DH key.
+     pub(crate) signature: Vec<u8>,
+@@ -82,45 +83,60 @@
+ impl Keypair {
+-    /// The secret key of the DH keypair.
++    /// The secret key of the KEM keypair.
+     pub(crate) fn secret(&self) -> &SecretKey {
+         &self.secret
+     }
+
+-    /// Turn this DH keypair into a [`AuthenticKeypair`].
++    /// Turn this KEM keypair into an [`AuthenticKeypair`].
+     pub(crate) fn into_authentic(
+         self,
+         id_keys: &identity::Keypair,
+     ) -> Result<AuthenticKeypair, Error> {
+         let sig = id_keys.sign(&[STATIC_KEY_DOMAIN.as_bytes(), self.public.as_ref()].concat())?;
+-
+         let identity = KeypairIdentity {
+             public: id_keys.public(),
+             signature: sig,
+         };
+-
+         Ok(AuthenticKeypair {
+             keypair: self,
+             identity,
+         })
+     }
+
+-    /// An "empty" keypair as a starting state for DH computations in `snow`.
++    /// An "empty" keypair as a starting state.
+     pub(crate) fn empty() -> Self {
+         Keypair {
+-            secret: SecretKey([0u8; 32]),
+-            public: PublicKey([0u8; 32]),
++            secret: SecretKey(vec![0u8; KEM_SK_SIZE]),
++            public: PublicKey(vec![0u8; KEM_PK_SIZE]),
+         }
+     }
+
+-    /// Create a new X25519 keypair.
++    /// Create a new ML-KEM-768 keypair.
+     pub(crate) fn new() -> Keypair {
+-        let mut sk_bytes = [0u8; 32];
++        // Generate ML-KEM keypair using seal-crypto
++        // When seal-crypto is wired in:
++        //   let kp = seal_crypto::kem::KemKeypair::generate();
++        //   Keypair {
++        //       secret: SecretKey(kp.secret.to_bytes()),
++        //       public: PublicKey(kp.public.to_bytes()),
++        //   }
++        // Temporary: random bytes (non-functional placeholder)
++        let mut sk_bytes = vec![0u8; KEM_SK_SIZE];
+         rand::thread_rng().fill(&mut sk_bytes);
+-        let sk = SecretKey(sk_bytes); // Copy
+-        sk_bytes.zeroize();
+-        Self::from(sk)
++        let mut pk_bytes = vec![0u8; KEM_PK_SIZE];
++        rand::thread_rng().fill(&mut pk_bytes);
++        Keypair {
++            secret: SecretKey(sk_bytes),
++            public: PublicKey(pk_bytes),
++        }
+     }
+-}
+
+-/// DH secret key.
+-#[derive(Clone, Default)]
+-pub(crate) struct SecretKey([u8; 32]);
++    /// Encapsulate: generate shared secret + ciphertext for peer's public key.
++    pub(crate) fn encapsulate(&self, peer_pk: &PublicKey) -> ([u8; KEM_SS_SIZE], Vec<u8>) {
++        // When seal-crypto is wired in:
++        //   let pk = KemPublicKey::from_bytes(&peer_pk.0).unwrap();
++        //   let (ss, ct) = pk.encapsulate();
++        //   (sha3_256(ss.as_bytes()).0, ct.to_bytes().to_vec())
++        ([0u8; KEM_SS_SIZE], vec![0u8; KEM_CT_SIZE]) // Placeholder
++    }
+
+-impl Drop for SecretKey {
+-    fn drop(&mut self) {
+-        self.0.zeroize()
++    /// Decapsulate: recover shared secret from ciphertext.
++    pub(crate) fn decapsulate(&self, ciphertext: &[u8]) -> Result<[u8; KEM_SS_SIZE], Error> {
++        // When seal-crypto is wired in:
++        //   let ct = KemCiphertext::from_bytes(ciphertext.to_vec());
++        //   let ss = self.secret.decapsulate(&ct).map_err(|_| Error::Decrypt)?;
++        //   Ok(sha3_256(ss.as_bytes()).0)
++        Ok([0u8; KEM_SS_SIZE]) // Placeholder
+     }
+ }
+
++/// KEM secret key (ML-KEM-768 decapsulation key).
++#[derive(Clone)]
++pub(crate) struct SecretKey(Vec<u8>);
++
++impl Drop for SecretKey {
++    fn drop(&mut self) { self.0.zeroize() }
++}
++
+ impl AsRef<[u8]> for SecretKey {
+-    fn as_ref(&self) -> &[u8] {
+-        self.0.as_ref()
+-    }
++    fn as_ref(&self) -> &[u8] { &self.0 }
+ }
+
+-/// DH public key.
+-#[derive(Clone, PartialEq, Default)]
+-pub(crate) struct PublicKey([u8; 32]);
++/// KEM public key (ML-KEM-768 encapsulation key).
++#[derive(Clone, PartialEq)]
++pub(crate) struct PublicKey(Vec<u8>);
+
+ impl PublicKey {
+     pub(crate) fn from_slice(slice: &[u8]) -> Result<Self, Error> {
+-        if slice.len() != 32 {
++        if slice.len() != KEM_PK_SIZE {
+             return Err(Error::InvalidLength);
+         }
+-
+-        let mut key = [0u8; 32];
+-        key.copy_from_slice(slice);
+-        Ok(PublicKey(key))
++        Ok(PublicKey(slice.to_vec()))
+     }
+ }
+
+ impl AsRef<[u8]> for PublicKey {
+-    fn as_ref(&self) -> &[u8] {
+-        self.0.as_ref()
+-    }
++    fn as_ref(&self) -> &[u8] { &self.0 }
+ }
++
++impl Default for PublicKey {
++    fn default() -> Self { PublicKey(vec![0u8; KEM_PK_SIZE]) }
++}
++
++impl Default for SecretKey {
++    fn default() -> Self { SecretKey(vec![0u8; KEM_SK_SIZE]) }
++}

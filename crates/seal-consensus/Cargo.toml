@@ -1,0 +1,20 @@
+[package]
+name = "seal-consensus"
+description = "VRF-based consensus engine for Seal DAO (Algorand-style)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+seal-crypto = { path = "../seal-crypto" }
+seal-vrf = { path = "../seal-vrf" }
+seal-storage = { path = "../seal-storage" }
+seal-token = { path = "../seal-token" }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Seal Wallet</title>
+<link rel="icon" href="seal-logo.png" type="image/png">
+<style>
+:root {
+  --bg: #0a0a0f;
+  --surface: #14141f;
+  --border: #2a2a3a;
+  --text: #e0e0e8;
+  --dim: #8888aa;
+  --accent: #4A90D9;
+  --accent-hover: #3a7bc0;
+  --green: #4ADE80;
+  --red: #F87171;
+  --amber: #FBBF24;
+  --code-bg: #0d0d14;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
+.app { max-width: 520px; margin: 0 auto; padding: 20px; min-height: 100vh; }
+header { display: flex; align-items: center; gap: 12px; padding: 12px 0; }
+header h1 { font-size: 1.4rem; font-weight: 700; font-family: 'SF Mono', monospace; }
+.badge { background: var(--amber); color: #000; font-size: 0.65rem; padding: 2px 8px; border-radius: 4px; font-weight: 700; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px; margin-bottom: 12px; }
+.card h2 { font-size: 0.75rem; color: var(--dim); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+.mono { font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8rem; word-break: break-all; }
+.dim { color: var(--dim); font-size: 0.83rem; }
+.address { font-family: 'SF Mono', monospace; font-size: 0.83rem; color: var(--accent); user-select: all; }
+input, textarea, select { width: 100%; background: var(--code-bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; color: var(--text); font-family: 'SF Mono', monospace; font-size: 0.83rem; margin-bottom: 6px; }
+input:focus, textarea:focus { border-color: var(--accent); outline: none; }
+select { appearance: none; cursor: pointer; }
+button { padding: 8px 16px; border: none; border-radius: 6px; font-size: 0.83rem; font-weight: 600; cursor: pointer; }
+.btn { background: var(--accent); color: #fff; }
+.btn:hover { background: var(--accent-hover); }
+.btn-sm { padding: 5px 12px; font-size: 0.78rem; }
+.btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+.btn-outline:hover { border-color: var(--dim); }
+.row { display: flex; gap: 8px; align-items: center; }
+.flex1 { flex: 1; }
+pre { background: var(--code-bg); padding: 10px; border-radius: 6px; font-family: 'SF Mono', monospace; font-size: 0.78rem; overflow-x: auto; white-space: pre-wrap; color: var(--dim); margin-top: 8px; max-height: 200px; overflow-y: auto; }
+.success { color: var(--green); }
+.error-msg { color: var(--red); font-size: 0.83rem; margin: 8px 0; }
+.hidden { display: none; }
+.status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.status-on { background: var(--green); }
+.status-off { background: var(--red); }
+footer { text-align: center; padding: 20px 0; color: var(--dim); font-size: 0.7rem; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <img src="seal-logo.png" alt="Seal" width="32" height="32" style="vertical-align:middle;margin-right:8px"><h1 style="display:inline">seal.wallet</h1>
+    <span class="badge">TESTNET</span>
+  </header>
+
+  <div id="error" class="error-msg hidden"></div>
+
+  <!-- Wallet -->
+  <div class="card">
+    <h2>Wallet</h2>
+    <div id="walletEmpty">
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button class="btn btn-sm" onclick="createWallet()">Create New Wallet</button>
+        <button class="btn-outline btn-sm" onclick="$('importSection').classList.toggle('hidden')">Import</button>
+      </div>
+      <div id="importSection" class="hidden" style="margin-top:10px">
+        <textarea id="importWords" rows="2" placeholder="Enter BIP-39 mnemonic words or hex seed"></textarea>
+        <button class="btn btn-sm" onclick="importWallet()">Import</button>
+      </div>
+    </div>
+    <div id="walletInfo" class="hidden">
+      <div style="margin-bottom:8px">
+        <span class="dim">Address:</span>
+        <div class="address" id="walletAddress">—</div>
+      </div>
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button class="btn-outline btn-sm" onclick="showMnemonic()">Backup</button>
+        <button class="btn-outline btn-sm" onclick="$('signSection').classList.toggle('hidden')">Sign</button>
+        <button class="btn-outline btn-sm" onclick="lockWallet()" style="margin-left:auto;color:var(--red)">Lock</button>
+      </div>
+      <div id="mnemonicSection" class="hidden" style="margin-top:10px">
+        <div class="dim" style="margin-bottom:4px">Recovery phrase — write this down:</div>
+        <pre id="mnemonicText"></pre>
+      </div>
+      <div id="signSection" class="hidden" style="margin-top:10px">
+        <div class="row">
+          <input id="signInput" placeholder="Message to sign" class="flex1" />
+          <button class="btn btn-sm" onclick="signMsg()">Sign</button>
+        </div>
+        <pre id="signResult" class="hidden"></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Node Connection -->
+  <div class="card">
+    <h2>Node</h2>
+    <div class="row">
+      <input id="nodeUrl" value="http://localhost:8545" class="flex1" />
+      <button class="btn btn-sm" onclick="connect()">Connect</button>
+    </div>
+    <div id="nodeStatus" class="dim" style="margin-top:6px">
+      <span class="status status-off"></span>Not connected
+    </div>
+  </div>
+
+  <!-- Chain Info -->
+  <div id="chainCard" class="card hidden">
+    <h2>Chain</h2>
+    <div class="row">
+      <span class="dim">Height:</span>
+      <span id="chainHeight" class="mono">—</span>
+      <span class="dim" style="margin-left:auto">State root:</span>
+      <span id="stateRoot" class="mono" style="max-width:120px;overflow:hidden;text-overflow:ellipsis">—</span>
+    </div>
+  </div>
+
+  <!-- SQL -->
+  <div id="sqlCard" class="card hidden">
+    <h2>SQL Query</h2>
+    <div class="row">
+      <input id="sqlInput" placeholder="SELECT * FROM users" class="flex1" onkeydown="if(event.key==='Enter')runSql()" />
+      <button class="btn btn-sm" onclick="runSql()">Run</button>
+    </div>
+    <pre id="sqlResult" class="hidden"></pre>
+  </div>
+
+  <!-- MPC -->
+  <div id="mpcCard" class="card hidden">
+    <h2>MPC Aggregate</h2>
+    <div class="row">
+      <select id="mpcFunc" style="width:80px">
+        <option>sum</option>
+        <option>count</option>
+        <option>avg</option>
+      </select>
+      <input id="mpcTable" value="users" class="flex1" placeholder="table" />
+      <input id="mpcCol" value="balance" class="flex1" placeholder="column" />
+      <button class="btn btn-sm" onclick="runMpc()">Run</button>
+    </div>
+    <div id="mpcResult" class="dim hidden" style="margin-top:8px"></div>
+  </div>
+
+  <!-- ZK -->
+  <div id="zkCard" class="card hidden">
+    <h2>ZK Proof</h2>
+    <div class="row">
+      <input id="zkTable" value="users" style="width:80px" placeholder="table" />
+      <input id="zkStmt" value="balance > 500" class="flex1" placeholder="condition" />
+      <button class="btn btn-sm" onclick="runZk()">Prove</button>
+    </div>
+    <pre id="zkResult" class="hidden"></pre>
+  </div>
+
+  <!-- Tokens -->
+  <div id="tokenCard" class="card hidden">
+    <h2>Tokens</h2>
+    <div class="row" style="margin-bottom:8px">
+      <input id="tokenSym" placeholder="GOLD" style="width:80px" />
+      <input id="tokenName" placeholder="Gold Token" class="flex1" />
+      <input id="tokenMax" placeholder="max supply" style="width:100px" />
+      <button class="btn btn-sm" onclick="createToken()">Create</button>
+    </div>
+    <div class="row">
+      <input id="mintSym" placeholder="GOLD" style="width:80px" />
+      <input id="mintTo" placeholder="address" class="flex1" />
+      <input id="mintAmt" placeholder="amount" style="width:80px" />
+      <button class="btn btn-sm" onclick="mintToken()">Mint</button>
+      <button class="btn btn-sm" onclick="listTokens()">List</button>
+    </div>
+    <div id="tokenResult" class="dim hidden" style="margin-top:8px"></div>
+  </div>
+
+  <!-- DEX -->
+  <div id="dexCard" class="card hidden">
+    <h2>DEX</h2>
+    <div class="row" style="margin-bottom:8px">
+      <input id="dexBase" placeholder="GOLD" style="width:80px" />
+      <span style="align-self:center;color:var(--dim)">/</span>
+      <input id="dexQuote" placeholder="SEAL" style="width:80px" />
+      <button class="btn btn-sm" onclick="createPair()">Create Pair</button>
+      <button class="btn btn-sm" onclick="listPairs()">Pairs</button>
+    </div>
+    <div class="row" style="margin-bottom:8px">
+      <input id="dexPair" value="GOLD/SEAL" style="width:100px" placeholder="pair" />
+      <select id="dexSide" style="width:70px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px">
+        <option value="bid">BID</option>
+        <option value="ask">ASK</option>
+      </select>
+      <input id="dexPrice" placeholder="price" style="width:80px" />
+      <input id="dexQty" placeholder="qty" style="width:80px" />
+      <button class="btn btn-sm" onclick="placeOrder()">Order</button>
+    </div>
+    <div id="dexResult" class="dim hidden" style="margin-top:8px"></div>
+    <div id="dexBook" class="hidden" style="margin-top:12px"></div>
+  </div>
+
+  <footer>
+    Seal DAO Wallet &mdash; ML-DSA-65 + ML-KEM-768 + SHA3-256<br>
+    Localhost only &mdash; no data leaves your machine
+  </footer>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+async function rpc(method, params = {}) {
+  const url = $('nodeUrl').value;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', method, params, id: 1 })
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.result;
+}
+
+// --- WASM Crypto (real ML-DSA-65) ---
+let wasm = null;
+let walletKeys = null; // { signing_key, verifying_key, address }
+
+async function initWasm() {
+  if (wasm) return;
+  try {
+    const mod = await import('./seal_dao_wasm.js');
+    await mod.default();
+    wasm = mod;
+    console.log('WASM crypto loaded (ML-DSA-65 + SHA3-256)');
+  } catch (e) {
+    console.warn('WASM not available:', e.message);
+  }
+}
+initWasm();
+
+function createWallet() {
+  if (!wasm) { $('error').textContent = 'WASM not loaded — serve this page via HTTP (not file://)'; $('error').classList.remove('hidden'); return; }
+  const json = wasm.generate_keypair(true);
+  walletKeys = JSON.parse(json);
+  showWallet();
+}
+
+function importWallet() {
+  if (!wasm) { $('error').textContent = 'WASM not loaded'; $('error').classList.remove('hidden'); return; }
+  const input = $('importWords').value.trim();
+  if (!input) return;
+  try {
+    let json;
+    if (/^[0-9a-f]{64}$/i.test(input)) {
+      json = wasm.import_from_hex(input, true);
+    } else {
+      json = wasm.import_from_mnemonic(input, true);
+    }
+    walletKeys = JSON.parse(json);
+    showWallet();
+  } catch (e) {
+    $('error').textContent = 'Import failed: ' + e;
+    $('error').classList.remove('hidden');
+  }
+}
+
+function showWallet() {
+  $('walletEmpty').classList.add('hidden');
+  $('walletInfo').classList.remove('hidden');
+  $('walletAddress').textContent = walletKeys.address;
+  $('importSection').classList.add('hidden');
+  $('error').classList.add('hidden');
+}
+
+function lockWallet() {
+  walletKeys = null;
+  $('walletEmpty').classList.remove('hidden');
+  $('walletInfo').classList.add('hidden');
+  $('mnemonicSection').classList.add('hidden');
+  $('signSection').classList.add('hidden');
+}
+
+function showMnemonic() {
+  if (!walletKeys) return;
+  $('mnemonicText').textContent = 'RECOVERY PHRASE (24 words — BIP-39):\n' +
+    (walletKeys.mnemonic || '(no mnemonic)') + '\n\n' +
+    'SEED (hex):\n' +
+    (walletKeys.seed_hex || '(no seed)') + '\n\n' +
+    'ADDRESS:\n' +
+    walletKeys.address;
+  $('mnemonicSection').classList.toggle('hidden');
+}
+
+function signMsg() {
+  const msg = $('signInput').value;
+  if (!msg || !walletKeys || !wasm) return;
+  try {
+    const sk = hexToBytes(walletKeys.signing_key);
+    const msgBytes = new TextEncoder().encode(msg);
+    const sig = wasm.sign(sk, msgBytes);
+    const sigHex = bytesToHex(sig);
+    $('signResult').textContent = 'ML-DSA-65 signature (' + sig.length + ' bytes):\n' + sigHex.slice(0, 64) + '...' + sigHex.slice(-32);
+
+    // Verify
+    const vk = hexToBytes(walletKeys.verifying_key);
+    const valid = wasm.verify(vk, msgBytes, sig);
+    $('signResult').textContent += '\nVerified: ' + (valid ? 'YES ✓' : 'NO ✗');
+    $('signResult').classList.remove('hidden');
+  } catch (e) {
+    $('signResult').textContent = 'Error: ' + e;
+    $('signResult').classList.remove('hidden');
+  }
+}
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return bytes;
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// --- Signed RPC (ML-DSA-65 auth) ---
+function sortKeys(obj) {
+  if (typeof obj !== 'object' || obj === null) return obj;
+  if (Array.isArray(obj)) return obj.map(sortKeys);
+  return Object.keys(obj).sort().reduce((o, k) => { o[k] = sortKeys(obj[k]); return o; }, {});
+}
+
+async function signedRpc(method, params = {}) {
+  if (!walletKeys || !wasm) throw new Error('No wallet loaded');
+  const url = $('nodeUrl').value;
+  // serde_json uses BTreeMap (sorted keys) — must match server's serialization
+  const sortedParams = sortKeys(params);
+  const paramsJson = JSON.stringify(sortedParams);
+  const message = method + paramsJson;
+  console.log('[signedRpc] message:', message);
+  const msgHash = wasm.sha3_256(new TextEncoder().encode(message));
+  console.log('[signedRpc] hash:', bytesToHex(msgHash));
+  const sk = hexToBytes(walletKeys.signing_key);
+  const sig = wasm.sign(sk, msgHash);
+  const vk = walletKeys.verifying_key;
+  const body = JSON.stringify({
+    jsonrpc: '2.0', method, params,
+    signature: bytesToHex(sig),
+    sender: vk,
+    id: 1
+  });
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.result;
+}
+
+// --- Node RPC ---
+async function connect() {
+  try {
+    const r = await rpc('seal_getHeight');
+    $('chainHeight').textContent = r.height;
+    $('nodeStatus').innerHTML = '<span class="status status-on"></span>Connected (height: ' + r.height + ')';
+    $('chainCard').classList.remove('hidden');
+    $('sqlCard').classList.remove('hidden');
+    $('mpcCard').classList.remove('hidden');
+    $('zkCard').classList.remove('hidden');
+    $('tokenCard').classList.remove('hidden');
+    $('dexCard').classList.remove('hidden');
+
+    const sr = await rpc('seal_getStateRoot');
+    $('stateRoot').textContent = sr.state_root.slice(0, 16) + '...';
+    $('error').classList.add('hidden');
+  } catch (e) {
+    $('nodeStatus').innerHTML = '<span class="status status-off"></span>Failed: ' + e.message;
+    $('error').textContent = e.message;
+    $('error').classList.remove('hidden');
+  }
+}
+
+async function runSql() {
+  const sql = $('sqlInput').value;
+  if (!sql) return;
+  try {
+    const isWrite = /^(INSERT|UPDATE|DELETE|CREATE|DROP|ALTER)/i.test(sql.trim());
+    const r = isWrite ? await signedRpc('seal_submitSql', { sql }) : await rpc('seal_querySql', { sql });
+    if (r.columns && r.rows) {
+      $('sqlResult').innerHTML = renderTable(r.columns, r.rows);
+    } else if (r.rows_affected !== undefined) {
+      $('sqlResult').textContent = 'OK (' + r.rows_affected + ' rows affected)';
+    } else {
+      $('sqlResult').textContent = JSON.stringify(r, null, 2);
+    }
+    $('sqlResult').classList.remove('hidden');
+  } catch (e) {
+    $('sqlResult').textContent = 'Error: ' + e.message;
+    $('sqlResult').classList.remove('hidden');
+  }
+}
+
+function renderTable(columns, rows) {
+  function extractValue(v) {
+    if (v === null || v === undefined) return 'NULL';
+    if (typeof v === 'object') {
+      if (v.BigInt !== undefined) return v.BigInt;
+      if (v.Text !== undefined) return v.Text;
+      if (v.Boolean !== undefined) return v.Boolean;
+      if (v.Null !== undefined) return 'NULL';
+      return JSON.stringify(v);
+    }
+    return v;
+  }
+  let html = '<table style="width:100%;border-collapse:collapse;font-size:0.78rem;font-family:monospace">';
+  html += '<tr>' + columns.map(c => '<th style="text-align:left;padding:6px 10px;border-bottom:1px solid var(--border);color:var(--accent);font-weight:600">' + c + '</th>').join('') + '</tr>';
+  for (const row of rows) {
+    const cells = Array.isArray(row) ? row : Object.values(row);
+    html += '<tr>' + cells.map(v => '<td style="padding:5px 10px;border-bottom:1px solid #1a1a26;color:var(--text)">' + extractValue(v) + '</td>').join('') + '</tr>';
+  }
+  html += '</table>';
+  html += '<div style="margin-top:6px;font-size:0.72rem;color:var(--dim)">(' + rows.length + ' rows)</div>';
+  return html;
+}
+
+async function runMpc() {
+  try {
+    const r = await rpc('seal_mpcAggregate', {
+      function: $('mpcFunc').value,
+      table: $('mpcTable').value,
+      column: $('mpcCol').value
+    });
+    $('mpcResult').textContent = `${$('mpcFunc').value}(${$('mpcTable').value}.${$('mpcCol').value}) = ${r.result} (${r.row_count} rows)`;
+    $('mpcResult').classList.remove('hidden');
+  } catch (e) {
+    $('mpcResult').textContent = 'Error: ' + e.message;
+    $('mpcResult').classList.remove('hidden');
+  }
+}
+
+async function runZk() {
+  try {
+    const r = await rpc('seal_zkProve', {
+      table: $('zkTable').value,
+      statement: $('zkStmt').value
+    });
+    const proof = r.proof || '';
+    $('zkResult').textContent = `Satisfied: ${r.satisfied ? 'YES' : 'NO'}\nProof: ${proof.slice(0,32)}...${proof.slice(-16)}\nHeight: ${r.block_height}`;
+    $('zkResult').classList.remove('hidden');
+  } catch (e) {
+    $('zkResult').textContent = 'Error: ' + e.message;
+    $('zkResult').classList.remove('hidden');
+  }
+}
+
+// --- Tokens ---
+async function createToken() {
+  try {
+    const r = await signedRpc('seal_createToken', {
+      symbol: $('tokenSym').value, name: $('tokenName').value,
+      decimals: 9, max_supply: Number($('tokenMax').value) || 0
+    });
+    $('tokenResult').textContent = 'Token created: ' + $('tokenSym').value;
+    $('tokenResult').classList.remove('hidden');
+  } catch (e) {
+    $('tokenResult').textContent = 'Error: ' + e.message;
+    $('tokenResult').classList.remove('hidden');
+  }
+}
+
+async function mintToken() {
+  try {
+    await signedRpc('seal_mintToken', {
+      symbol: $('mintSym').value, to: $('mintTo').value, amount: Number($('mintAmt').value)
+    });
+    $('tokenResult').textContent = `Minted ${$('mintAmt').value} ${$('mintSym').value} to ${$('mintTo').value}`;
+    $('tokenResult').classList.remove('hidden');
+  } catch (e) {
+    $('tokenResult').textContent = 'Error: ' + e.message;
+    $('tokenResult').classList.remove('hidden');
+  }
+}
+
+async function listTokens() {
+  try {
+    const r = await rpc('seal_listTokens');
+    const tokens = r.tokens || [];
+    if (tokens.length === 0) {
+      $('tokenResult').textContent = 'No tokens created yet.';
+    } else {
+      $('tokenResult').textContent = tokens.map(t => `${t.symbol}: ${t.name} (supply: ${t.total_supply}/${t.max_supply})`).join('\n');
+    }
+    $('tokenResult').classList.remove('hidden');
+  } catch (e) {
+    $('tokenResult').textContent = 'Error: ' + e.message;
+    $('tokenResult').classList.remove('hidden');
+  }
+}
+
+// --- DEX ---
+async function createPair() {
+  try {
+    await signedRpc('seal_createPair', { base: $('dexBase').value, quote: $('dexQuote').value });
+    $('dexResult').textContent = 'Pair created: ' + $('dexBase').value + '/' + $('dexQuote').value;
+    $('dexResult').classList.remove('hidden');
+  } catch (e) {
+    $('dexResult').textContent = 'Error: ' + e.message;
+    $('dexResult').classList.remove('hidden');
+  }
+}
+
+async function placeOrder() {
+  try {
+    const r = await signedRpc('seal_placeOrder', {
+      pair: $('dexPair').value, side: $('dexSide').value,
+      price: Number($('dexPrice').value), quantity: Number($('dexQty').value)
+    });
+    $('dexResult').textContent = `Order #${r.order_id} placed (${r.trades} trades matched)`;
+    $('dexResult').classList.remove('hidden');
+    await showOrderBook();
+  } catch (e) {
+    $('dexResult').textContent = 'Error: ' + e.message;
+    $('dexResult').classList.remove('hidden');
+  }
+}
+
+async function listPairs() {
+  try {
+    const r = await rpc('seal_listPairs');
+    const pairs = r.pairs || [];
+    $('dexResult').textContent = pairs.length ? 'Pairs: ' + pairs.join(', ') : 'No pairs yet.';
+    $('dexResult').classList.remove('hidden');
+  } catch (e) {
+    $('dexResult').textContent = 'Error: ' + e.message;
+    $('dexResult').classList.remove('hidden');
+  }
+}
+
+function renderLob(bids, asks) {
+  const maxQty = Math.max(
+    ...bids.map(b => b.quantity || 0),
+    ...asks.map(a => a.quantity || 0),
+    1
+  );
+
+  function row(price, qty, side) {
+    const pct = Math.round((qty / maxQty) * 100);
+    const color = side === 'bid' ? '#4ADE80' : '#F87171';
+    const dimColor = side === 'bid' ? 'rgba(74,222,128,0.12)' : 'rgba(248,113,113,0.12)';
+    const align = side === 'bid' ? 'right' : 'left';
+    const gradient = side === 'bid'
+      ? `linear-gradient(to left, ${dimColor} ${pct}%, transparent ${pct}%)`
+      : `linear-gradient(to right, ${dimColor} ${pct}%, transparent ${pct}%)`;
+    return `<div style="display:flex;justify-content:space-between;padding:3px 10px;background:${gradient};font-family:monospace;font-size:0.8rem">` +
+      `<span style="color:${color};min-width:60px;text-align:${align}">${qty}</span>` +
+      `<span style="color:var(--text);min-width:80px;text-align:center;font-weight:600">${price}</span>` +
+      `<span style="color:var(--dim);min-width:60px;text-align:${side === 'bid' ? 'left' : 'right'}">${(price * qty).toLocaleString()}</span>` +
+      `</div>`;
+  }
+
+  // Asks: lowest at bottom (reversed), bids: highest at top
+  const sortedAsks = [...asks].sort((a, b) => b.price - a.price);
+  const sortedBids = [...bids].sort((a, b) => b.price - a.price);
+
+  let html = '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">';
+  // Header
+  html += '<div style="display:flex;justify-content:space-between;padding:4px 10px;border-bottom:1px solid var(--border);font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:0.5px">';
+  html += '<span>Qty</span><span>Price</span><span>Total</span></div>';
+
+  // Asks (sell side — red)
+  if (sortedAsks.length) {
+    sortedAsks.forEach(a => { html += row(a.price, a.quantity, 'ask'); });
+  } else {
+    html += '<div style="padding:6px 10px;color:var(--dim);font-size:0.78rem;text-align:center">no asks</div>';
+  }
+
+  // Spread
+  const bestBid = sortedBids.length ? sortedBids[0].price : 0;
+  const bestAsk = sortedAsks.length ? sortedAsks[sortedAsks.length - 1].price : 0;
+  const spread = bestAsk && bestBid ? bestAsk - bestBid : 0;
+  html += `<div style="padding:4px 10px;text-align:center;font-size:0.72rem;border-top:1px solid var(--border);border-bottom:1px solid var(--border);color:var(--dim);background:var(--bg)">`;
+  html += spread > 0 ? `Spread: ${spread} (${((spread / bestAsk) * 100).toFixed(2)}%)` : 'Spread: --';
+  html += '</div>';
+
+  // Bids (buy side — green)
+  if (sortedBids.length) {
+    sortedBids.forEach(b => { html += row(b.price, b.quantity, 'bid'); });
+  } else {
+    html += '<div style="padding:6px 10px;color:var(--dim);font-size:0.78rem;text-align:center">no bids</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+async function showOrderBook() {
+  try {
+    const r = await rpc('seal_getOrderBook', { pair: $('dexPair').value });
+    const bids = r.bids || [];
+    const asks = r.asks || [];
+    $('dexBook').innerHTML = renderLob(bids, asks);
+    $('dexBook').classList.remove('hidden');
+  } catch (e) {
+    $('dexBook').innerHTML = '<div style="color:var(--dim);font-size:0.8rem">Error: ' + e.message + '</div>';
+    $('dexBook').classList.remove('hidden');
+  }
+}
+</script>
+</body>
+</html>

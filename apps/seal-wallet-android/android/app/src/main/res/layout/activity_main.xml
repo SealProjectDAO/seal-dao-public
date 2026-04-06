@@ -1,0 +1,231 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0A0A0F">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <!-- Header -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="seal.wallet"
+            android:textColor="#E8E8ED"
+            android:textSize="28sp"
+            android:fontFamily="monospace"
+            android:textStyle="bold"
+            android:layout_marginBottom="8dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Post-quantum secure wallet"
+            android:textColor="#9090A0"
+            android:textSize="14sp"
+            android:layout_marginBottom="32dp" />
+
+        <!-- Status badge -->
+        <TextView
+            android:id="@+id/statusBadge"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="  No wallet  "
+            android:textColor="#FBBF24"
+            android:textSize="12sp"
+            android:fontFamily="monospace"
+            android:background="#33FBBF24"
+            android:paddingHorizontal="12dp"
+            android:paddingVertical="4dp"
+            android:layout_marginBottom="24dp" />
+
+        <!-- Address card -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="#12121A"
+            android:padding="20dp"
+            android:layout_marginBottom="16dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="ADDRESS"
+                android:textColor="#606070"
+                android:textSize="11sp"
+                android:fontFamily="monospace"
+                android:letterSpacing="0.1"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:id="@+id/addressText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="—"
+                android:textColor="#4A90D9"
+                android:textSize="13sp"
+                android:fontFamily="monospace"
+                android:textIsSelectable="true" />
+        </LinearLayout>
+
+        <!-- Buttons -->
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnCreate"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Create New Wallet"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#4A90D9"
+            android:layout_marginBottom="8dp" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnImport"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Import from Mnemonic"
+            android:textColor="#E8E8ED"
+            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+            android:layout_marginBottom="24dp" />
+
+        <!-- Mnemonic card (hidden until wallet created) -->
+        <LinearLayout
+            android:id="@+id/mnemonicCard"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="#12121A"
+            android:padding="20dp"
+            android:layout_marginBottom="16dp"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="RECOVERY PHRASE (BIP-39)"
+                android:textColor="#606070"
+                android:textSize="11sp"
+                android:fontFamily="monospace"
+                android:letterSpacing="0.1"
+                android:layout_marginBottom="8dp" />
+
+            <TextView
+                android:id="@+id/mnemonicText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textColor="#E8E8ED"
+                android:textSize="14sp"
+                android:lineSpacingMultiplier="1.5"
+                android:textIsSelectable="true" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Write this down. It cannot be recovered."
+                android:textColor="#F87171"
+                android:textSize="12sp"
+                android:layout_marginTop="12dp" />
+        </LinearLayout>
+
+        <!-- Sign / Verify section -->
+        <LinearLayout
+            android:id="@+id/cryptoSection"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:visibility="gone">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="SIGN MESSAGE"
+                android:textColor="#606070"
+                android:textSize="11sp"
+                android:fontFamily="monospace"
+                android:letterSpacing="0.1"
+                android:layout_marginBottom="8dp" />
+
+            <EditText
+                android:id="@+id/messageInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Enter message to sign"
+                android:textColor="#E8E8ED"
+                android:textColorHint="#606070"
+                android:background="#1A1A26"
+                android:padding="16dp"
+                android:textSize="14sp"
+                android:fontFamily="monospace"
+                android:layout_marginBottom="8dp"
+                android:inputType="text" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btnSign"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Sign with ML-DSA-65"
+                android:textColor="#FFFFFF"
+                android:backgroundTint="#4A90D9"
+                android:layout_marginBottom="16dp" />
+
+            <!-- Signature output -->
+            <LinearLayout
+                android:id="@+id/signatureCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:background="#12121A"
+                android:padding="20dp"
+                android:visibility="gone">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="SIGNATURE (ML-DSA-65)"
+                    android:textColor="#606070"
+                    android:textSize="11sp"
+                    android:fontFamily="monospace"
+                    android:letterSpacing="0.1"
+                    android:layout_marginBottom="8dp" />
+
+                <TextView
+                    android:id="@+id/signatureText"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text=""
+                    android:textColor="#4ADE80"
+                    android:textSize="11sp"
+                    android:fontFamily="monospace"
+                    android:maxLines="3"
+                    android:ellipsize="end"
+                    android:textIsSelectable="true" />
+
+                <TextView
+                    android:id="@+id/verifyResult"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text=""
+                    android:textSize="12sp"
+                    android:fontFamily="monospace"
+                    android:layout_marginTop="8dp" />
+            </LinearLayout>
+        </LinearLayout>
+
+        <!-- Info footer -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="ML-DSA-65 (FIPS 204) · ML-KEM-768 (FIPS 203) · SHA3-256"
+            android:textColor="#606070"
+            android:textSize="11sp"
+            android:fontFamily="monospace"
+            android:layout_marginTop="32dp"
+            android:layout_gravity="center" />
+
+    </LinearLayout>
+</ScrollView>

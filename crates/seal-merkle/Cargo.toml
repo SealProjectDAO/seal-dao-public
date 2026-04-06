@@ -1,0 +1,16 @@
+[package]
+name = "seal-merkle"
+description = "Merkle B-tree with SHA3 hashed references for Seal DAO state storage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+seal-crypto = { path = "../seal-crypto" }
+serde = { workspace = true }
+borsh = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

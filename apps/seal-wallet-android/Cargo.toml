@@ -1,0 +1,17 @@
+[package]
+name = "seal-wallet-ffi"
+description = "C-ABI FFI bridge for Seal Wallet (Android JNI / iOS)"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+seal-wallet = { path = "../../crates/seal-wallet" }
+seal-crypto = { path = "../../crates/seal-crypto" }
+hex = "0.4"
+serde_json = "1"
+jni = "0.21"

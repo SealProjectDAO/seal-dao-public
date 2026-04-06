@@ -1,0 +1,13 @@
+[package]
+name = "seal-marketplace"
+description = "Demo: decentralized marketplace on Seal DAO"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+seal-crypto = { path = "../../crates/seal-crypto" }
+seal-sql = { path = "../../crates/seal-sql" }
+seal-node = { path = "../../crates/seal-node" }
+seal-wallet = { path = "../../crates/seal-wallet" }
+hex = "0.4"

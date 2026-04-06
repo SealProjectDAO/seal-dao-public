@@ -1,0 +1,18 @@
+[package]
+name = "seal-storage"
+description = "On-disk state and block storage for Seal DAO"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+seal-crypto = { path = "../seal-crypto" }
+seal-merkle = { path = "../seal-merkle" }
+sled = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

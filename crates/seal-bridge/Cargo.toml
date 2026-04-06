@@ -1,0 +1,16 @@
+[package]
+name = "seal-bridge"
+description = "Cross-chain bridge for Solana and Stellar (lock-and-mint)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+seal-crypto = { path = "../seal-crypto" }
+seal-token = { path = "../seal-token" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

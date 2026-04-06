@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: LGPL-3.0-or-later
+# Copyright (C) 2021 Tobias Hunger <tobias.hunger@gmail.com>
+
+[package]
+name = "downloader"
+version = "0.2.8"
+authors = ["Tobias Hunger <tobias.hunger@gmail.com>"]
+edition = "2018"
+description = "A simple way to download things via HTTP/HTTPS"
+repository = "https://github.com/hunger/downloader"
+license = "LGPL-3.0-or-later"
+keywords = [ "http", "https", "download" ]
+categories = [ "web-programming::http-client" ]
+
+[features]
+default = [ "default-tls" ]
+
+tui = [ "indicatif" ]
+verify = [ "digest" ]
+
+# Pass down features to reqwest:
+default-tls = ["reqwest/default-tls"]
+rustls-tls = ["reqwest/rustls-tls"]
+
+[dependencies]
+futures = { version = "0.3" }
+reqwest = { version = "0.12", default-features = false }
+rand = { version = "0.8" }
+thiserror = { version = "1.0" }
+tokio = { version = "1.23", features = [ "rt-multi-thread", "time" ] }
+
+digest = { version = "0.10.1", optional = true }
+indicatif = { version = "0.17.2", optional = true }
+
+[dev-dependencies]
+sha3 = "0.10.0"  # used in examples

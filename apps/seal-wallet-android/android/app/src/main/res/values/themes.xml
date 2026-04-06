@@ -1,0 +1,11 @@
+<resources>
+    <style name="Theme.SealWallet" parent="Theme.MaterialComponents.DayNight.NoActionBar">
+        <item name="colorPrimary">#4A90D9</item>
+        <item name="colorPrimaryVariant">#2A5A8A</item>
+        <item name="colorOnPrimary">#FFFFFF</item>
+        <item name="colorSecondary">#4ADE80</item>
+        <item name="android:statusBarColor">#0A0A0F</item>
+        <item name="android:navigationBarColor">#0A0A0F</item>
+        <item name="android:windowBackground">#0A0A0F</item>
+    </style>
+</resources>

@@ -1,0 +1,35 @@
+[package]
+name = "sp1-recursion-compiler"
+description = "Compiler for SP1 recursion circuits"
+readme = "../../../README.md"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+keywords = { workspace = true }
+categories = { workspace = true }
+rust-version = { workspace = true }
+
+[dependencies]
+slop-bn254 = { workspace = true }
+slop-algebra = { workspace = true }
+slop-symmetric = { workspace = true }
+
+sp1-core-machine = { workspace = true }
+sp1-primitives = { workspace = true }
+sp1-recursion-executor = { workspace = true }
+sp1-hypercube = { workspace = true }
+
+itertools = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+backtrace = { workspace = true }
+tracing = { workspace = true }
+vec_map = { workspace = true }
+cfg-if = { workspace = true }
+
+[features]
+# Enables cycle tracking and adds backtraces for circuit IR assertions.
+debug = ["sp1-recursion-executor/debug"]
+
+[lints]
+workspace = true

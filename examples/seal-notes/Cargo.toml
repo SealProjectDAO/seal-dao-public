@@ -1,0 +1,16 @@
+[package]
+name = "seal-notes"
+version = "0.1.0"
+edition = "2021"
+description = "Seal Notes — encrypted notebook on Seal DAO (demo app)"
+
+[[bin]]
+name = "seal-notes"
+path = "src/main.rs"
+
+[dependencies]
+seal-crypto = { path = "../../crates/seal-crypto" }
+seal-sql = { path = "../../crates/seal-sql" }
+seal-node = { path = "../../crates/seal-node" }
+seal-wallet = { path = "../../crates/seal-wallet" }
+hex = "0.4"

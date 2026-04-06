@@ -1,0 +1,24 @@
+[package]
+name = "p3-keccak-air"
+description = "An AIR for the Keccak-f permutation, assuming a field size between 2^16 and 2^32."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+p3-air = { workspace = true }
+p3-field = { workspace = true }
+p3-matrix = { workspace = true }
+p3-maybe-rayon = { workspace = true }
+p3-util = { workspace = true }
+tracing = "0.1.37"
+
+[features]
+# TODO: Consider removing, at least when this gets split off into another repository.
+# We should be able to enable p3-maybe-rayon/parallel directly; this just doesn't
+# seem to work when using cargo with the -p or --package option.
+parallel = ["p3-maybe-rayon/parallel"]

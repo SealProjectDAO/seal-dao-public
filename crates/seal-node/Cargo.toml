@@ -1,0 +1,39 @@
+[package]
+name = "seal-node"
+description = "Seal DAO single-node prototype"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "seal-node"
+path = "src/main.rs"
+
+[dependencies]
+seal-crypto = { path = "../seal-crypto" }
+seal-merkle = { path = "../seal-merkle" }
+seal-sql = { path = "../seal-sql" }
+seal-storage = { path = "../seal-storage" }
+seal-vrf = { path = "../seal-vrf" }
+seal-p2p = { path = "../seal-p2p" }
+seal-consensus = { path = "../seal-consensus" }
+seal-threshold = { path = "../seal-threshold" }
+seal-zk = { path = "../seal-zk" }
+seal-mpc = { path = "../seal-mpc" }
+seal-token = { path = "../seal-token" }
+libp2p = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+bincode = { workspace = true }
+hex = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+sled = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

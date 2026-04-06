@@ -1,0 +1,22 @@
+[package]
+name = "sp1-derive"
+description = "Procedural macros for SP1"
+readme = "../../README.md"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+repository = { workspace = true }
+keywords = { workspace = true }
+categories = { workspace = true }
+rust-version = { workspace = true }
+
+[lib]
+proc-macro = true
+
+[dependencies]
+quote = { workspace = true }
+syn = { workspace = true, features = ["full", "fold"] }
+proc-macro2 = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,19 @@
+[package]
+name = "seal-vrf"
+description = "Post-quantum VRF for Seal DAO consensus leader selection"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+seal-crypto = { path = "../seal-crypto" }
+seal-threshold = { path = "../seal-threshold" }
+serde = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

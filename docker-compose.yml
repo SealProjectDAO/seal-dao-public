@@ -1,0 +1,149 @@
+# Multi-node Seal testnet via Docker Compose
+#
+# Usage:
+#   docker-compose up          # Start 5-validator testnet
+#   docker-compose up -d       # Start in background
+#   docker-compose logs -f     # Watch logs
+#   docker-compose down        # Stop all
+#   docker-compose down -v     # Stop and remove volumes
+#
+# Each node gets:
+# - Unique validator index and P2P port
+# - Shared genesis config via environment
+# - Persistent data volume
+# - mDNS peer discovery within sealnet
+# - Health check on 10-second interval
+
+services:
+  node1:
+    build: .
+    container_name: seal-validator-1
+    environment:
+      SEAL_VALIDATOR_INDEX: "0"
+      SEAL_P2P_PORT: "4001"
+      SEAL_CHAIN_ID: "seal-testnet-docker"
+      SEAL_SLOTS_PER_EPOCH: "32"
+      SEAL_COMMITTEE_SIZE: "5"
+      SEAL_VALIDATOR_COUNT: "5"
+      SEAL_LOG_LEVEL: "info"
+      RUST_LOG: "seal_node=info,seal_p2p=debug"
+    ports:
+      - "4001:4001"
+    volumes:
+      - node1-data:/data
+    networks:
+      - sealnet
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/seal-healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  node2:
+    build: .
+    container_name: seal-validator-2
+    environment:
+      SEAL_VALIDATOR_INDEX: "1"
+      SEAL_P2P_PORT: "4001"
+      SEAL_CHAIN_ID: "seal-testnet-docker"
+      SEAL_SLOTS_PER_EPOCH: "32"
+      SEAL_COMMITTEE_SIZE: "5"
+      SEAL_VALIDATOR_COUNT: "5"
+      SEAL_BOOTSTRAP_PEERS: "/dns4/seal-validator-1/tcp/4001"
+      SEAL_LOG_LEVEL: "info"
+      RUST_LOG: "seal_node=info,seal_p2p=debug"
+    ports:
+      - "4002:4001"
+    volumes:
+      - node2-data:/data
+    networks:
+      - sealnet
+    depends_on:
+      - node1
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/seal-healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  node3:
+    build: .
+    container_name: seal-validator-3
+    environment:
+      SEAL_VALIDATOR_INDEX: "2"
+      SEAL_P2P_PORT: "4001"
+      SEAL_CHAIN_ID: "seal-testnet-docker"
+      SEAL_SLOTS_PER_EPOCH: "32"
+      SEAL_COMMITTEE_SIZE: "5"
+      SEAL_VALIDATOR_COUNT: "5"
+      SEAL_BOOTSTRAP_PEERS: "/dns4/seal-validator-1/tcp/4001"
+      SEAL_LOG_LEVEL: "info"
+      RUST_LOG: "seal_node=info,seal_p2p=debug"
+    ports:
+      - "4003:4001"
+    volumes:
+      - node3-data:/data
+    networks:
+      - sealnet
+    depends_on:
+      - node1
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/seal-healthy || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  node4:
+    build: .
+    container_name: seal-validator-4
+    environment:
+      SEAL_VALIDATOR_INDEX: "3"
+      SEAL_P2P_PORT: "4001"
+      SEAL_CHAIN_ID: "seal-testnet-docker"
+      SEAL_SLOTS_PER_EPOCH: "32"
+      SEAL_COMMITTEE_SIZE: "5"
+      SEAL_VALIDATOR_COUNT: "5"
+      SEAL_BOOTSTRAP_PEERS: "/dns4/seal-validator-1/tcp/4001"
+      SEAL_LOG_LEVEL: "info"
+      RUST_LOG: "seal_node=info,seal_p2p=debug"
+    ports:
+      - "4004:4001"
+    volumes:
+      - node4-data:/data
+    networks:
+      - sealnet
+    depends_on:
+      - node1
+
+  node5:
+    build: .
+    container_name: seal-validator-5
+    environment:
+      SEAL_VALIDATOR_INDEX: "4"
+      SEAL_P2P_PORT: "4001"
+      SEAL_CHAIN_ID: "seal-testnet-docker"
+      SEAL_SLOTS_PER_EPOCH: "32"
+      SEAL_COMMITTEE_SIZE: "5"
+      SEAL_VALIDATOR_COUNT: "5"
+      SEAL_BOOTSTRAP_PEERS: "/dns4/seal-validator-1/tcp/4001"
+      SEAL_LOG_LEVEL: "info"
+      RUST_LOG: "seal_node=info,seal_p2p=debug"
+    ports:
+      - "4005:4001"
+    volumes:
+      - node5-data:/data
+    networks:
+      - sealnet
+    depends_on:
+      - node1
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  node4-data:
+  node5-data:
+
+networks:
+  sealnet:
+    driver: bridge
