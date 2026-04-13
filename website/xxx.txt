@@ -1,0 +1,72 @@
+
+=> seal-dao.network
+=> new graphical identity 
+=> old stuff
+
+===
+===
+
+---                                                                                                                                                  
+  Test Suite — 428 tests, all passing                                                                                                                  
+                                                                                                                                                       
+  cargo test          # all 428 pass, 0 failures                                                                                                       
+                                                                                                                                                       
+  Covers all 16 crates including property-based tests (proptest on merkle, SQL, tokens, RB-trees).                                                     
+                                                                                                                                                       
+  ---                                                                                                                                                  
+  Interactive Demo                                                                                                                                     
+
+  cargo run -p seal-cli -- demo
+
+  Shows end-to-end in one shot:                                                                                                                        
+  - Node identity — generates PQC keypair, derives bech32m SEAL address
+  - App deployment — deploys blog.seal and market.seal with schemas                                                                                    
+  - SQL engine — CREATE TABLE, INSERT, SELECT with WHERE clauses                                                                                     
+  - Row-Level Security — alice can update her products, bob can't                                                                                      
+  - Cross-app visibility — public vs private table access                                                                                              
+  - Block production — produces block #1 with state root hash
+                                                                                                                                                       
+  ---                                                                                                                                                  
+  Interactive REPL                                                                                                                                     
+                                                                                                                                                       
+  cargo run -p seal-app                                                                                                                              
+
+  Live SQL shell:
+  - Type SQL directly (CREATE TABLE, INSERT, SELECT, UPDATE, DELETE)
+  - .tables — list tables with row counts                                                                                                              
+  - .status — node height + state root   
+  - .wallet — PQC + Ed25519 keypair info                                                                                                               
+  - .produce — manually produce a block                                                                                                              
+  - .block <n> — inspect block at height                                                                                                               
+                                                                                                                                                       
+  ---                                                                                                                                                  
+  Individual CLI Commands                                                                                                                              
+                                                                                                                                                       
+  cargo run -p seal-cli -- sql "CREATE TABLE t (id BIGINT PRIMARY KEY)"
+  cargo run -p seal-cli -- sql "INSERT INTO t VALUES (1)"                                                                                              
+  cargo run -p seal-cli -- sql "SELECT * FROM t"                                                                                                       
+  cargo run -p seal-cli -- migrate analyze dump.sql   # PostgreSQL migration analyzer
+                                                                                                                                                       
+  ---                                                                                                                                                
+  Single-Node Prototype                                                                                                                                
+                                                                                                                                                     
+  cargo run -p seal-node
+
+  Full node with: PQC identity, VRF election, consensus runner, Merkle state, sled persistence, fee processing, governance stubs.                      
+  
+  ---                                                                                                                                                  
+  What You Can Demo to Someone                                                                                                                       
+                              
+  1. PQC crypto is real — ML-DSA signatures, ML-KEM encryption, SHA3 hashing (not stubs)
+  2. SQL database works — full parser + engine with PostgreSQL syntax                                                                                  
+  3. RLS works — row-level security policies, per-user access control                                                                                  
+  4. App namespaces — deploy isolated apps with their own schemas                                                                                      
+  5. Block production — state transitions produce Merkle-rooted blocks                                                                                 
+  6. Wallet — BIP-39 mnemonic → PQC keypair + Ed25519 keypair (multi-chain)                                                                            
+  7. 428 passing tests — including formal property tests                                                                                               
+                                                                                                                                                       
+  What you can't demo yet: multi-node consensus, real ZK proofs, cross-chain bridge, TEE attestation, threshold signature aggregation.                 
+                        
+https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=Eini30pregSn4PNuavT5hzbemPZ6nkWdNxDrh3r2OAA&code_challenge_method=S256&state=B9oynqHuCY8cIR8DGOji64OEguIfyN9QmQYLppvJft0
+
+https://claude.com/cai/oauth/authorize?code=true&client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&response_type=code&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&scope=org%3Acreate_api_key+user%3Aprofile+user%3Ainference+user%3Asessions%3Aclaude_code+user%3Amcp_servers+user%3Afile_upload&code_challenge=f-tW3oQkbYYSeZ1kgmHzOuac3C-gg4lgLUsgxD-H9Lw&code_challenge_method=S256&state=RMfSy9QQMELSRrd4xFEbusAGenFPc3MEJBM0GXecAoI

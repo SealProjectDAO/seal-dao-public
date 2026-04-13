@@ -48,6 +48,17 @@ impl Sp1Prover {
     }
 }
 
+impl Sp1Prover {
+    fn prepare_guest_input(&self, transition: &StateTransition) -> GuestInput {
+        GuestInput {
+            pre_state_root: transition.pre_state_root.0,
+            transactions: vec![],
+            claimed_post_state_root: transition.post_state_root.0,
+            block_height: transition.block_height,
+        }
+    }
+}
+
 impl Default for Sp1Prover {
     fn default() -> Self {
         Self::new()
@@ -59,17 +70,27 @@ impl ZkProver for Sp1Prover {
         #[cfg(feature = "sp1")]
         {
             if !self._simulation {
-                // Real SP1 proving (when sp1-sdk is vendored):
+                // Real SP1 proving via the vendored sp1-sdk crate.
+                //
+                // Full proving requires a compiled guest ELF. To enable:
+                // 1. Build guest: `cd crates/seal-zk && cargo prove build`
+                // 2. Set SEAL_GUEST_ELF to the built ELF path
+                //
+                // When guest ELF is available, uncomment:
                 //
                 // use sp1_sdk::{ProverClient, SP1Stdin};
-                // let client = ProverClient::new();
+                // let client = ProverClient::builder().cpu().build();
                 // let (pk, _vk) = client.setup(SEAL_GUEST_ELF);
                 // let mut stdin = SP1Stdin::new();
-                // let input = GuestInput { ... };
-                // stdin.write(&input);
-                // let proof = client.prove(&pk, stdin)
+                // let input = self.prepare_guest_input(&transition);
+                // let input_bytes = bincode::serialize(&input)
+                //     .map_err(|e| ZkError::ProvingFailed(format!("serialization: {}", e)))?;
+                // stdin.write_slice(&input_bytes);
+                // let proof = client.prove(&pk, &stdin)
                 //     .map_err(|e| ZkError::ProvingFailed(e.to_string()))?;
-                // return Ok(ZkProof { bytes: proof.bytes(), public_inputs: transition });
+                // let proof_bytes = bincode::serialize(&proof)
+                //     .map_err(|e| ZkError::ProvingFailed(e.to_string()))?;
+                // return Ok(ZkProof { bytes: proof_bytes, public_inputs: transition });
             }
         }
 
@@ -118,10 +139,11 @@ impl ZkVerifier for Sp1Verifier {
     fn verify(&self, proof: &ZkProof) -> Result<(), ZkError> {
         #[cfg(feature = "sp1")]
         {
-            // Real verification (when sp1-sdk is vendored):
+            // Real verification with vendored sp1-sdk.
+            // When guest ELF is compiled (and SEAL_GUEST_ELF set), uncomment:
             //
             // use sp1_sdk::ProverClient;
-            // let client = ProverClient::new();
+            // let client = ProverClient::builder().cpu().build();
             // let (_, vk) = client.setup(SEAL_GUEST_ELF);
             // client.verify(&proof.bytes, &vk)
             //     .map_err(|_| ZkError::VerificationFailed)?;

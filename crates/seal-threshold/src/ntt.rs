@@ -1,12 +1,11 @@
 //! NTT (Number Theoretic Transform) implementations for Ringtail.
 //!
-//! Three implementations behind the `RingOps` trait:
+//! Two implementations behind the `RingOps` trait:
 //!
-//! A. `ConcreteNttRing` — wraps concrete-ntt crate (when available)
-//! B. `HandRolledRing` — hand-written NTT for Ringtail's specific parameters
-//! C. `LattigoPortRing` — direct port of Lattigo's ring operations from Go
+//! A. `HandRolledRing` / `HandRolledOps` — Cooley-Tukey DIT NTT (production default)
+//! B. `LattigoPortRing` / `LattigoPortOps` — direct port of Lattigo's ring operations from Go
 //!
-//! All three operate over R_q = Z_q[X]/(X^N + 1) with:
+//! Both operate over R_q = Z_q[X]/(X^N + 1) with:
 //!   N = 256 (ring dimension)
 //!   q = 0x1000000004A01 (NTT-friendly 48-bit prime)
 //!

@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "slop-bn254"
-version = "6.0.2"
+version = "6.1.0"
 build = false
 autolib = false
 autobins = false
@@ -50,16 +50,16 @@ version = "1.0.204"
 features = ["derive"]
 
 [dependencies.slop-algebra]
-version = "6.0.2"
+version = "6.1.0"
 
 [dependencies.slop-challenger]
-version = "6.0.2"
+version = "6.1.0"
 
 [dependencies.slop-poseidon2]
-version = "6.0.2"
+version = "6.1.0"
 
 [dependencies.slop-symmetric]
-version = "6.0.2"
+version = "6.1.0"
 
 [dependencies.zkhash]
 version = "0.2.0"

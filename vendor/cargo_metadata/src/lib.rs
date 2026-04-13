@@ -88,7 +88,7 @@ use std::fmt;
 use std::hash::Hash;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::str::from_utf8;
+use std::str::{from_utf8, FromStr};
 
 pub use camino;
 pub use semver;
@@ -127,7 +127,7 @@ mod messages;
 /// precise format is an implementation detail and is subject to change.
 ///
 /// `Metadata` can be indexed by `PackageId`.
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[serde(transparent)]
 pub struct PackageId {
     /// The underlying string representation of id.
@@ -145,7 +145,7 @@ fn is_null(value: &serde_json::Value) -> bool {
     matches!(value, serde_json::Value::Null)
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "builder", derive(Builder))]
 #[non_exhaustive]
 #[cfg_attr(feature = "builder", builder(pattern = "owned", setter(into)))]
@@ -157,8 +157,11 @@ pub struct Metadata {
     pub workspace_members: Vec<PackageId>,
     /// The list of default workspace members
     ///
-    /// This not available if running with a version of Cargo older than 1.71.
-    #[serde(skip_serializing_if = "workspace_default_members_is_missing")]
+    /// This is not available if running with a version of Cargo older than 1.71.
+    ///
+    /// You can check whether it is available or missing using respectively
+    /// [`WorkspaceDefaultMembers::is_available`] and [`WorkspaceDefaultMembers::is_missing`].
+    #[serde(default, skip_serializing_if = "WorkspaceDefaultMembers::is_missing")]
     pub workspace_default_members: WorkspaceDefaultMembers,
     /// Dependencies graph
     pub resolve: Option<Resolve>,
@@ -216,7 +219,7 @@ impl Metadata {
 impl<'a> std::ops::Index<&'a PackageId> for Metadata {
     type Output = Package;
 
-    fn index(&self, idx: &'a PackageId) -> &Package {
+    fn index(&self, idx: &'a PackageId) -> &Self::Output {
         self.packages
             .iter()
             .find(|p| p.id == *idx)
@@ -224,7 +227,7 @@ impl<'a> std::ops::Index<&'a PackageId> for Metadata {
     }
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Default)]
 #[serde(transparent)]
 /// A list of default workspace members.
 ///
@@ -237,6 +240,32 @@ impl<'a> std::ops::Index<&'a PackageId> for Metadata {
 /// Dereferencing when running an older version of Cargo will panic.
 pub struct WorkspaceDefaultMembers(Option<Vec<PackageId>>);
 
+impl WorkspaceDefaultMembers {
+    /// Return `true` if the list of workspace default members is supported by
+    /// the called cargo-metadata version and `false` otherwise.
+    ///
+    /// In particular useful when parsing the output of `cargo-metadata` for
+    /// versions of Cargo < 1.71, as dereferencing [`WorkspaceDefaultMembers`]
+    /// for these versions will panic.
+    ///
+    /// Opposite of [`WorkspaceDefaultMembers::is_missing`].
+    pub fn is_available(&self) -> bool {
+        self.0.is_some()
+    }
+
+    /// Return `false` if the list of workspace default members is supported by
+    /// the called cargo-metadata version and `true` otherwise.
+    ///
+    /// In particular useful when parsing the output of `cargo-metadata` for
+    /// versions of Cargo < 1.71, as dereferencing [`WorkspaceDefaultMembers`]
+    /// for these versions will panic.
+    ///
+    /// Opposite of [`WorkspaceDefaultMembers::is_available`].
+    pub fn is_missing(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
 impl core::ops::Deref for WorkspaceDefaultMembers {
     type Target = [PackageId];
 
@@ -247,19 +276,7 @@ impl core::ops::Deref for WorkspaceDefaultMembers {
     }
 }
 
-/// Return true if a valid value for [`WorkspaceDefaultMembers`] is missing, and
-/// dereferencing it would panic.
-///
-/// Internal helper for `skip_serializing_if` and test code. Might be removed in
-/// the future.
-#[doc(hidden)]
-pub fn workspace_default_members_is_missing(
-    workspace_default_members: &WorkspaceDefaultMembers,
-) -> bool {
-    workspace_default_members.0.is_none()
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "builder", derive(Builder))]
 #[non_exhaustive]
 #[cfg_attr(feature = "builder", builder(pattern = "owned", setter(into)))]
@@ -272,7 +289,18 @@ pub struct Resolve {
     pub root: Option<PackageId>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+impl<'a> std::ops::Index<&'a PackageId> for Resolve {
+    type Output = Node;
+
+    fn index(&self, idx: &'a PackageId) -> &Self::Output {
+        self.nodes
+            .iter()
+            .find(|p| p.id == *idx)
+            .unwrap_or_else(|| panic!("no Node with this id: {:?}", idx))
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "builder", derive(Builder))]
 #[non_exhaustive]
 #[cfg_attr(feature = "builder", builder(pattern = "owned", setter(into)))]
@@ -295,7 +323,7 @@ pub struct Node {
     pub features: Vec<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "builder", derive(Builder))]
 #[non_exhaustive]
 #[cfg_attr(feature = "builder", builder(pattern = "owned", setter(into)))]
@@ -313,7 +341,7 @@ pub struct NodeDep {
     pub dep_kinds: Vec<DepKindInfo>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "builder", derive(Builder))]
 #[non_exhaustive]
 #[cfg_attr(feature = "builder", builder(pattern = "owned", setter(into)))]
@@ -336,7 +364,7 @@ pub struct DepKindInfo {
     pub target: Option<dependency::Platform>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "builder", derive(Builder))]
 #[non_exhaustive]
 #[cfg_attr(feature = "builder", builder(pattern = "owned", setter(into)))]
@@ -352,46 +380,60 @@ pub struct Package {
     pub version: Version,
     /// The [`authors` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-authors-field) as specified in the `Cargo.toml`
     #[serde(default)]
+    #[cfg_attr(feature = "builder", builder(default))]
     pub authors: Vec<String>,
     /// An opaque identifier for a package
     pub id: PackageId,
     /// The source of the package, e.g.
     /// crates.io or `None` for local projects.
+    #[cfg_attr(feature = "builder", builder(default))]
     pub source: Option<Source>,
     /// The [`description` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-description-field) as specified in the `Cargo.toml`
+    #[cfg_attr(feature = "builder", builder(default))]
     pub description: Option<String>,
     /// List of dependencies of this particular package
+    #[cfg_attr(feature = "builder", builder(default))]
     pub dependencies: Vec<Dependency>,
     /// The [`license` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields) as specified in the `Cargo.toml`
+    #[cfg_attr(feature = "builder", builder(default))]
     pub license: Option<String>,
     /// The [`license-file` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-license-and-license-file-fields) as specified in the `Cargo.toml`.
     /// If the package is using a nonstandard license, this key may be specified instead of
     /// `license`, and must point to a file relative to the manifest.
+    #[cfg_attr(feature = "builder", builder(default))]
     pub license_file: Option<Utf8PathBuf>,
     /// Targets provided by the crate (lib, bin, example, test, ...)
+    #[cfg_attr(feature = "builder", builder(default))]
     pub targets: Vec<Target>,
     /// Features provided by the crate, mapped to the features required by that feature.
+    #[cfg_attr(feature = "builder", builder(default))]
     pub features: BTreeMap<String, Vec<String>>,
     /// Path containing the `Cargo.toml`
     pub manifest_path: Utf8PathBuf,
     /// The [`categories` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-categories-field) as specified in the `Cargo.toml`
     #[serde(default)]
+    #[cfg_attr(feature = "builder", builder(default))]
     pub categories: Vec<String>,
     /// The [`keywords` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-keywords-field) as specified in the `Cargo.toml`
     #[serde(default)]
+    #[cfg_attr(feature = "builder", builder(default))]
     pub keywords: Vec<String>,
     /// The [`readme` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-readme-field) as specified in the `Cargo.toml`
+    #[cfg_attr(feature = "builder", builder(default))]
     pub readme: Option<Utf8PathBuf>,
     /// The [`repository` URL](https://doc.rust-lang.org/cargo/reference/manifest.html#the-repository-field) as specified in the `Cargo.toml`
     // can't use `url::Url` because that requires a more recent stable compiler
+    #[cfg_attr(feature = "builder", builder(default))]
     pub repository: Option<String>,
     /// The [`homepage` URL](https://doc.rust-lang.org/cargo/reference/manifest.html#the-homepage-field) as specified in the `Cargo.toml`.
     ///
     /// On versions of cargo before 1.49, this will always be [`None`].
+    #[cfg_attr(feature = "builder", builder(default))]
     pub homepage: Option<String>,
     /// The [`documentation` URL](https://doc.rust-lang.org/cargo/reference/manifest.html#the-documentation-field) as specified in the `Cargo.toml`.
     ///
     /// On versions of cargo before 1.49, this will always be [`None`].
+    #[cfg_attr(feature = "builder", builder(default))]
     pub documentation: Option<String>,
     /// The default Rust edition for the package (either what's specified in the [`edition` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-edition-field)
     /// or defaulting to [`Edition::E2015`]).
@@ -399,6 +441,7 @@ pub struct Package {
     /// Beware that individual targets may specify their own edition in
     /// [`Target::edition`].
     #[serde(default)]
+    #[cfg_attr(feature = "builder", builder(default))]
     pub edition: Edition,
     /// Contents of the free form [`package.metadata` section](https://doc.rust-lang.org/cargo/reference/manifest.html#the-metadata-table).
     ///
@@ -413,31 +456,33 @@ pub struct Package {
     ///     some_value: i32,
     /// }
     ///
-    /// fn main() {
-    ///     let value = json!({
-    ///         "some_value": 42,
-    ///     });
+    /// let value = json!({
+    ///     "some_value": 42,
+    /// });
     ///
-    ///     let package_metadata: SomePackageMetadata = serde_json::from_value(value).unwrap();
-    ///     assert_eq!(package_metadata.some_value, 42);
-    /// }
+    /// let package_metadata: SomePackageMetadata = serde_json::from_value(value).unwrap();
+    /// assert_eq!(package_metadata.some_value, 42);
     ///
     /// ```
     #[serde(default, skip_serializing_if = "is_null")]
+    #[cfg_attr(feature = "builder", builder(default))]
     pub metadata: serde_json::Value,
     /// The name of a native library the package is linking to.
+    #[cfg_attr(feature = "builder", builder(default))]
     pub links: Option<String>,
     /// List of registries to which this package may be published (derived from the [`publish` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-publish-field)).
     ///
     /// Publishing is unrestricted if `None`, and forbidden if the `Vec` is empty.
     ///
     /// This is always `None` if running with a version of Cargo older than 1.39.
+    #[cfg_attr(feature = "builder", builder(default))]
     pub publish: Option<Vec<String>>,
     /// The [`default-run` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-default-run-field) as given in the `Cargo.toml`
     // (We say "given in" instead of "specified in" since the `default-run` key cannot be inherited from the workspace.)
     /// The default binary to run by `cargo run`.
     ///
     /// This is always `None` if running with a version of Cargo older than 1.55.
+    #[cfg_attr(feature = "builder", builder(default))]
     pub default_run: Option<String>,
     /// The [`rust-version` field](https://doc.rust-lang.org/cargo/reference/manifest.html#the-rust-version-field) as specified in the `Cargo.toml`.
     /// The minimum supported Rust version of this package.
@@ -445,7 +490,25 @@ pub struct Package {
     /// This is always `None` if running with a version of Cargo older than 1.58.
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_rust_version")]
+    #[cfg_attr(feature = "builder", builder(default))]
     pub rust_version: Option<Version>,
+}
+
+#[cfg(feature = "builder")]
+impl PackageBuilder {
+    /// Construct a new `PackageBuilder` with all required fields.
+    pub fn new(
+        name: impl Into<String>,
+        version: impl Into<Version>,
+        id: impl Into<PackageId>,
+        path: impl Into<Utf8PathBuf>,
+    ) -> Self {
+        Self::default()
+            .name(name)
+            .version(version)
+            .id(id)
+            .manifest_path(path)
+    }
 }
 
 impl Package {
@@ -474,7 +537,7 @@ impl Package {
 ///
 /// It is possible to inspect the `repr` field, if the need arises, but its
 /// precise format is an implementation detail and is subject to change.
-#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Hash)]
 #[serde(transparent)]
 pub struct Source {
     /// The underlying string representation of a source.
@@ -502,13 +565,23 @@ impl fmt::Display for Source {
 pub struct Target {
     /// Name as given in the `Cargo.toml` or generated from the file name
     pub name: String,
-    /// Kind of target ("bin", "example", "test", "bench", "lib", "custom-build")
-    pub kind: Vec<String>,
-    /// Almost the same as `kind`, except when an example is a library instead of an executable.
-    /// In that case `crate_types` contains things like `rlib` and `dylib` while `kind` is `example`
+    /// Kind of target.
+    ///
+    /// The possible values are `example`, `test`, `bench`, `custom-build` and
+    /// [Cargo crate types](https://doc.rust-lang.org/cargo/reference/cargo-targets.html#the-crate-type-field):
+    /// `bin`, `lib`, `rlib`, `dylib`, `cdylib`, `staticlib`, `proc-macro`.
+    ///
+    /// Other possible values may be added in the future.
+    pub kind: Vec<TargetKind>,
+    /// Similar to `kind`, but only reports the
+    /// [Cargo crate types](https://doc.rust-lang.org/cargo/reference/cargo-targets.html#the-crate-type-field):
+    /// `bin`, `lib`, `rlib`, `dylib`, `cdylib`, `staticlib`, `proc-macro`.
+    /// Everything that's not a proc macro or a library of some kind is reported as "bin".
+    ///
+    /// Other possible values may be added in the future.
     #[serde(default)]
     #[cfg_attr(feature = "builder", builder(default))]
-    pub crate_types: Vec<String>,
+    pub crate_types: Vec<CrateType>,
 
     #[serde(default)]
     #[cfg_attr(feature = "builder", builder(default))]
@@ -543,46 +616,211 @@ pub struct Target {
     pub doc: bool,
 }
 
+macro_rules! methods_target_is_kind {
+    ($($name:ident => $kind:expr),*) => {
+        $(
+            /// Return true if this target is of kind `$kind`.
+            pub fn $name(&self) -> bool {
+                self.is_kind($kind)
+            }
+        )*
+    }
+}
+
 impl Target {
-    fn is_kind(&self, name: &str) -> bool {
-        self.kind.iter().any(|kind| kind == name)
+    /// Return true if this target is of the given kind.
+    pub fn is_kind(&self, name: TargetKind) -> bool {
+        self.kind.iter().any(|kind| kind == &name)
     }
 
-    /// Return true if this target is of kind "lib".
-    pub fn is_lib(&self) -> bool {
-        self.is_kind("lib")
+    // Generate `is_*` methods for each `TargetKind`
+    methods_target_is_kind! {
+        is_lib => TargetKind::Lib,
+        is_bin => TargetKind::Bin,
+        is_example => TargetKind::Example,
+        is_test => TargetKind::Test,
+        is_bench => TargetKind::Bench,
+        is_custom_build => TargetKind::CustomBuild,
+        is_proc_macro => TargetKind::ProcMacro,
+        is_cdylib => TargetKind::CDyLib,
+        is_dylib => TargetKind::DyLib,
+        is_rlib => TargetKind::RLib,
+        is_staticlib => TargetKind::StaticLib
     }
+}
 
-    /// Return true if this target is of kind "bin".
-    pub fn is_bin(&self) -> bool {
-        self.is_kind("bin")
+/// Kind of target.
+///
+/// The possible values are `example`, `test`, `bench`, `custom-build` and
+/// [Cargo crate types](https://doc.rust-lang.org/cargo/reference/cargo-targets.html#the-crate-type-field):
+/// `bin`, `lib`, `rlib`, `dylib`, `cdylib`, `staticlib`, `proc-macro`.
+///
+/// Other possible values may be added in the future.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum TargetKind {
+    /// `cargo bench` target
+    #[serde(rename = "bench")]
+    Bench,
+    /// Binary executable target
+    #[serde(rename = "bin")]
+    Bin,
+    /// Custom build target
+    #[serde(rename = "custom-build")]
+    CustomBuild,
+    /// Dynamic system library target
+    #[serde(rename = "cdylib")]
+    CDyLib,
+    /// Dynamic Rust library target
+    #[serde(rename = "dylib")]
+    DyLib,
+    /// Example target
+    #[serde(rename = "example")]
+    Example,
+    /// Rust library
+    #[serde(rename = "lib")]
+    Lib,
+    /// Procedural Macro
+    #[serde(rename = "proc-macro")]
+    ProcMacro,
+    /// Rust library for use as an intermediate artifact
+    #[serde(rename = "rlib")]
+    RLib,
+    /// Static system library
+    #[serde(rename = "staticlib")]
+    StaticLib,
+    /// Test target
+    #[serde(rename = "test")]
+    Test,
+    /// Unknown type
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+impl From<&str> for TargetKind {
+    fn from(value: &str) -> Self {
+        match value {
+            "example" => TargetKind::Example,
+            "test" => TargetKind::Test,
+            "bench" => TargetKind::Bench,
+            "custom-build" => TargetKind::CustomBuild,
+            "bin" => TargetKind::Bin,
+            "lib" => TargetKind::Lib,
+            "rlib" => TargetKind::RLib,
+            "dylib" => TargetKind::DyLib,
+            "cdylib" => TargetKind::CDyLib,
+            "staticlib" => TargetKind::StaticLib,
+            "proc-macro" => TargetKind::ProcMacro,
+            x => TargetKind::Unknown(x.to_string()),
+        }
     }
+}
 
-    /// Return true if this target is of kind "example".
-    pub fn is_example(&self) -> bool {
-        self.is_kind("example")
+impl FromStr for TargetKind {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(TargetKind::from(s))
     }
+}
 
-    /// Return true if this target is of kind "test".
-    pub fn is_test(&self) -> bool {
-        self.is_kind("test")
+impl fmt::Display for TargetKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bench => "bench".fmt(f),
+            Self::Bin => "bin".fmt(f),
+            Self::CustomBuild => "custom-build".fmt(f),
+            Self::CDyLib => "cdylib".fmt(f),
+            Self::DyLib => "dylib".fmt(f),
+            Self::Example => "example".fmt(f),
+            Self::Lib => "lib".fmt(f),
+            Self::ProcMacro => "proc-macro".fmt(f),
+            Self::RLib => "rlib".fmt(f),
+            Self::StaticLib => "staticlib".fmt(f),
+            Self::Test => "test".fmt(f),
+            Self::Unknown(x) => x.fmt(f),
+        }
     }
+}
 
-    /// Return true if this target is of kind "bench".
-    pub fn is_bench(&self) -> bool {
-        self.is_kind("bench")
+/// Similar to `kind`, but only reports the
+/// [Cargo crate types](https://doc.rust-lang.org/cargo/reference/cargo-targets.html#the-crate-type-field):
+///
+/// `bin`, `lib`, `rlib`, `dylib`, `cdylib`, `staticlib`, `proc-macro`.
+/// Everything that's not a proc macro or a library of some kind is reported as "bin".
+///
+/// Other possible values may be added in the future.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum CrateType {
+    /// Binary executable target
+    #[serde(rename = "bin")]
+    Bin,
+    /// Dynamic system library target
+    #[serde(rename = "cdylib")]
+    CDyLib,
+    /// Dynamic Rust library target
+    #[serde(rename = "dylib")]
+    DyLib,
+    /// Rust library
+    #[serde(rename = "lib")]
+    Lib,
+    /// Procedural Macro
+    #[serde(rename = "proc-macro")]
+    ProcMacro,
+    /// Rust library for use as an intermediate artifact
+    #[serde(rename = "rlib")]
+    RLib,
+    /// Static system library
+    #[serde(rename = "staticlib")]
+    StaticLib,
+    /// Unkown type
+    #[serde(untagged)]
+    Unknown(String),
+}
+
+impl From<&str> for CrateType {
+    fn from(value: &str) -> Self {
+        match value {
+            "bin" => CrateType::Bin,
+            "lib" => CrateType::Lib,
+            "rlib" => CrateType::RLib,
+            "dylib" => CrateType::DyLib,
+            "cdylib" => CrateType::CDyLib,
+            "staticlib" => CrateType::StaticLib,
+            "proc-macro" => CrateType::ProcMacro,
+            x => CrateType::Unknown(x.to_string()),
+        }
     }
+}
 
-    /// Return true if this target is of kind "custom-build".
-    pub fn is_custom_build(&self) -> bool {
-        self.is_kind("custom-build")
+impl FromStr for CrateType {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        Ok(CrateType::from(s))
+    }
+}
+
+impl fmt::Display for CrateType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bin => "bin".fmt(f),
+            Self::CDyLib => "cdylib".fmt(f),
+            Self::DyLib => "dylib".fmt(f),
+            Self::Lib => "lib".fmt(f),
+            Self::ProcMacro => "proc-macro".fmt(f),
+            Self::RLib => "rlib".fmt(f),
+            Self::StaticLib => "staticlib".fmt(f),
+            Self::Unknown(x) => x.fmt(f),
+        }
     }
 }
 
 /// The Rust edition
 ///
 /// As of writing this comment rust editions 2024, 2027 and 2030 are not actually a thing yet but are parsed nonetheless for future proofing.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 pub enum Edition {
     /// Edition 2015
@@ -594,9 +832,9 @@ pub enum Edition {
     /// Edition 2021
     #[serde(rename = "2021")]
     E2021,
-    #[doc(hidden)]
+    /// Edition 2024
     #[serde(rename = "2024")]
-    _E2024,
+    E2024,
     #[doc(hidden)]
     #[serde(rename = "2027")]
     _E2027,
@@ -613,7 +851,7 @@ impl Edition {
             E2015 => "2015",
             E2018 => "2018",
             E2021 => "2021",
-            _E2024 => "2024",
+            E2024 => "2024",
             _E2027 => "2027",
             _E2030 => "2030",
         }
@@ -647,7 +885,7 @@ pub enum CargoOpt {
     SomeFeatures(Vec<String>),
 }
 
-/// A builder for configurating `cargo metadata` invocation.
+/// A builder for configuring `cargo metadata` invocation.
 #[derive(Debug, Clone, Default)]
 pub struct MetadataCommand {
     /// Path to `cargo` executable.  If not set, this will use the

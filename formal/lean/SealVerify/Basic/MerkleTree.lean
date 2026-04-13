@@ -20,6 +20,10 @@
   3. Membership proofs are SOUND: a valid proof means the key IS in the tree
   4. Membership proofs are COMPLETE: if a key is in the tree, a proof EXISTS
   5. The root hash uniquely determines the tree contents (given collision resistance)
+  6. Delete then lookup returns none (delete correctness)
+  7. Delete preserves lookups of other keys (delete frame property)
+  8. Delete is idempotent (double delete = single delete)
+  9. Insert after delete = insert (delete-insert commutativity)
 
   MAPS TO RUST CODE:
   ==================
@@ -187,3 +191,146 @@ theorem MTree.rootHash_injective (t1 t2 : MTree)
     t2.entries.foldl (fun acc (k, v) => acc ++ k ++ v) [] := by
   unfold MTree.rootHash at h
   exact Hash.collision_resistant _ _ h
+
+-- ========================================================================
+-- DELETE OPERATIONS AND CORRECTNESS THEOREMS
+-- ========================================================================
+
+/-
+  DELETE: Remove a key from the tree.
+
+  Maps to: MerkleTree::delete() in crates/seal-merkle/src/tree.rs
+  The delete operation filters out entries matching the given key.
+-/
+def MTree.delete (t : MTree) (k : Key) : MTree :=
+  ⟨t.entries.filter (fun p => decide (p.1 ≠ k)), true⟩
+
+/-
+  THEOREM: Delete then lookup returns none.
+
+  After deleting key k, looking it up returns none.
+  This is the fundamental correctness property of delete.
+
+  Maps to: test_delete in crates/seal-merkle/tests/proptest_merkle.rs
+-/
+theorem MTree.delete_lookup (t : MTree) (k : Key) :
+    (t.delete k).lookup k = none := by
+  simp only [MTree.delete, MTree.lookup]
+  exact filter_find_none t.entries k
+
+/-
+  THEOREM: Delete preserves lookups of other keys.
+
+  Deleting key k1 does not affect looking up a different key k2.
+  This is the "frame" property — delete is surgical, only removing
+  the targeted key without corrupting other entries.
+
+  Maps to: test_delete_preserves_other_keys (proptest)
+-/
+theorem MTree.delete_lookup_other (t : MTree) (k1 k2 : Key)
+    (h : k1 ≠ k2) :
+    (t.delete k1).lookup k2 = t.lookup k2 := by
+  simp only [MTree.delete, MTree.lookup]
+  rw [filter_preserves_find t.entries k1 k2 h]
+
+/-
+  THEOREM: Delete is idempotent.
+
+  Deleting a key that's already been deleted has no effect.
+  delete(delete(t, k), k) = delete(t, k)
+-/
+theorem MTree.delete_idempotent (t : MTree) (k : Key) :
+    (t.delete k).delete k = t.delete k := by
+  simp only [MTree.delete]
+  congr 1
+  -- Filtering by (≠ k) twice is the same as filtering once
+  induction t.entries with
+  | nil => simp [List.filter]
+  | cons hd tl ih =>
+    simp only [List.filter]
+    split
+    · -- hd.1 ≠ k: kept in first filter
+      simp only [List.filter]
+      split
+      · -- kept in second filter too
+        congr 1; exact ih
+      · -- this case is impossible: same predicate
+        contradiction
+    · -- hd.1 = k: removed in first filter, also removed in second
+      exact ih
+
+/-
+  THEOREM: Insert after delete is the same as insert.
+
+  delete(t, k) then insert(t, k, v) = insert(t, k, v)
+  Because insert already filters out the old key.
+
+  Maps to: test_insert_overwrite behavior in tree.rs
+-/
+theorem MTree.delete_then_insert (t : MTree) (k : Key) (v : Value) :
+    (t.delete k).insert k v = t.insert k v := by
+  simp only [MTree.delete, MTree.insert]
+  congr 1
+  -- Both produce: filter(≠k)(entries) ++ [(k,v)]
+  -- delete followed by insert: filter(≠k)(filter(≠k)(entries)) ++ [(k,v)]
+  -- insert alone: filter(≠k)(entries) ++ [(k,v)]
+  -- These are equal because filter is idempotent on the same predicate
+  congr 1
+  induction t.entries with
+  | nil => simp [List.filter]
+  | cons hd tl ih =>
+    simp only [List.filter]
+    split
+    · simp only [List.filter]
+      split
+      · congr 1; exact ih
+      · contradiction
+    · exact ih
+
+/-
+  THEOREM: Root hash changes after delete.
+
+  If key k was in the tree (lookup returns Some), then deleting it
+  changes the root hash (given collision resistance). This ensures
+  that validators can detect when data has been removed.
+
+  NOTE: This requires the key to actually be present. Deleting a
+  non-existent key doesn't change the tree.
+-/
+/-
+  HELPER: If find? returns Some for a key, that entry is in the list.
+-/
+private theorem find_mem {α : Type} (f : α → Bool) (xs : List α) (x : α)
+    (h : xs.find? f = some x) : x ∈ xs := by
+  induction xs with
+  | nil => simp [List.find?] at h
+  | cons hd tl ih =>
+    simp only [List.find?] at h
+    split at h
+    · injection h with h_eq; rw [h_eq]; exact List.mem_cons_self hd tl
+    · exact List.mem_cons_of_mem hd (ih h)
+
+/-
+  HELPER: An entry where key = k is not in filter(≠k).
+-/
+private theorem not_mem_filter_neq (entries : List (Key × Value)) (k : Key) (v : Value) :
+    (k, v) ∉ List.filter (fun p => decide (p.1 ≠ k)) entries := by
+  intro h_in
+  have := List.of_mem_filter h_in
+  simp at this
+
+theorem MTree.delete_changes_root (t : MTree) (k : Key) (v : Value)
+    (h : t.lookup k = some v) :
+    (t.delete k).entries ≠ t.entries := by
+  -- Unfold delete: (t.delete k).entries = filter(≠k)(t.entries)
+  simp only [MTree.delete]
+  -- Assume for contradiction: filter(≠k)(t.entries) = t.entries
+  intro h_eq
+  -- From h, extract that (k, v) ∈ t.entries
+  simp only [MTree.lookup] at h
+  have h_mem : (k, v) ∈ t.entries := find_mem _ t.entries (k, v) h
+  -- But (k, v) ∉ filter(≠k)(t.entries) since the predicate rejects k
+  have h_not_mem := not_mem_filter_neq t.entries k v
+  -- Substituting h_eq: (k, v) ∈ t.entries but (k, v) ∉ t.entries — contradiction
+  rw [h_eq] at h_not_mem
+  exact h_not_mem h_mem

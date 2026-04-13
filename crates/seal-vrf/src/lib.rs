@@ -20,7 +20,7 @@ pub mod traits;
 
 pub use error::VrfError;
 pub use hmac_vrf::HmacVrf;
-pub use key_rotation::VrfKeyManager;
+pub use key_rotation::{VrfBackend, VrfKeyManager};
 pub use lattice_vrf::LatticeVrf;
 pub use lav_vrf::LavVrf;
 pub use pq_vrf::PqVrf;

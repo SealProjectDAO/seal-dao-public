@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Seal Explorer</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>Seal Explorer</h1>
+    <div id="connection">
+      <input id="rpc-url" type="text" value="http://localhost:8545" placeholder="RPC URL">
+      <button onclick="connect()">Connect</button>
+      <span id="status-dot" class="dot offline"></span>
+      <span id="status-text">Disconnected</span>
+    </div>
+  </header>
+
+  <main>
+    <!-- Chain Overview -->
+    <section id="overview">
+      <h2>Chain Overview</h2>
+      <div class="grid">
+        <div class="card">
+          <label>Height</label>
+          <span id="chain-height">-</span>
+        </div>
+        <div class="card">
+          <label>Epoch</label>
+          <span id="chain-epoch">-</span>
+        </div>
+        <div class="card">
+          <label>State Root</label>
+          <span id="chain-root" class="mono">-</span>
+        </div>
+        <div class="card">
+          <label>Peers</label>
+          <span id="chain-peers">-</span>
+        </div>
+        <div class="card">
+          <label>Validators</label>
+          <span id="chain-validators">-</span>
+        </div>
+        <div class="card">
+          <label>Uptime</label>
+          <span id="chain-uptime">-</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Blocks -->
+    <section id="blocks">
+      <h2>Recent Blocks</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Height</th>
+            <th>Transactions</th>
+            <th>State Root</th>
+            <th>Timestamp</th>
+          </tr>
+        </thead>
+        <tbody id="block-list"></tbody>
+      </table>
+    </section>
+
+    <!-- Namespaces -->
+    <section id="namespaces">
+      <h2>Deployed Namespaces</h2>
+      <div id="namespace-list" class="tag-list"></div>
+    </section>
+
+    <!-- Block Detail -->
+    <section id="block-detail" style="display:none">
+      <h2>Block #<span id="detail-height"></span></h2>
+      <pre id="detail-json"></pre>
+      <button onclick="hideDetail()">Close</button>
+    </section>
+  </main>
+
+  <footer>
+    <p>Seal DAO Testnet Explorer &mdash; PQC-native L1 blockchain</p>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>

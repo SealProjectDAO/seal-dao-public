@@ -69,12 +69,19 @@ if [ "$MODE" = "release" ]; then
     CARGO_FLAGS="--release"
 fi
 
+# The FFI crate depends on `jni` which is not in the workspace vendor set.
+# Temporarily disable vendor config so cargo can fetch from crates.io.
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+mv "$REPO_ROOT/.cargo/config.toml" "$REPO_ROOT/.cargo/config.toml.android-bak" 2>/dev/null || true
+
 # Build for both arm64 (device) and x86_64 (emulator)
 for TARGET in aarch64-linux-android x86_64-linux-android; do
     echo "  Building for $TARGET..."
     cargo build --manifest-path "$SCRIPT_DIR/Cargo.toml" \
         --target "$TARGET" $CARGO_FLAGS
 done
+
+mv "$REPO_ROOT/.cargo/config.toml.android-bak" "$REPO_ROOT/.cargo/config.toml" 2>/dev/null || true
 
 # Step 2: Copy .so to jniLibs
 echo ""

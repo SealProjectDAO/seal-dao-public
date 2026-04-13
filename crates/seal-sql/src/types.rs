@@ -98,15 +98,56 @@ impl Schema {
     }
 }
 
-/// A row of data.
+/// Per-row random salt for Merkle leaf anti-correlation.
+///
+/// Each row carries a 32-byte salt mixed into its Merkle leaf hash:
+///   `leaf = SHA3("table:pk" || salt || serialized_row)`
+///
+/// This ensures:
+/// - Same row content at different times produces different hashes (salt differs)
+/// - Historical Merkle roots cannot reconstruct or correlate data without salts
+/// - Salts are stored alongside rows in active state only (never in block headers)
+///
+/// See QA.md #STORAGE-FORGET for the full design.
+pub type RowSalt = [u8; 32];
+
+/// A row of data with anti-correlation salt.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Row {
     pub values: Vec<SealValue>,
+    /// Random salt for Merkle leaf anti-correlation (right-to-be-forgotten).
+    /// Generated on INSERT, rotated on UPDATE.
+    #[serde(default = "default_salt")]
+    pub salt: RowSalt,
+}
+
+fn default_salt() -> RowSalt {
+    [0u8; 32]
 }
 
 impl Row {
     pub fn get(&self, idx: usize) -> Option<&SealValue> {
         self.values.get(idx)
+    }
+
+    /// Generate a fresh random salt for this row (for local/test use).
+    pub fn generate_salt(&mut self) {
+        use rand::RngCore;
+        rand::thread_rng().fill_bytes(&mut self.salt);
+    }
+
+    /// Derive a deterministic salt from a block seed + table + row index.
+    /// All validators processing the same block derive identical salts,
+    /// but different blocks produce different salts (anti-correlation).
+    pub fn derive_salt(&mut self, block_seed: &[u8], table: &str, row_index: usize) {
+        use sha3::{Digest, Sha3_256};
+        let mut hasher = Sha3_256::new();
+        hasher.update(b"row_salt");
+        hasher.update(block_seed);
+        hasher.update(table.as_bytes());
+        hasher.update(&row_index.to_le_bytes());
+        let result = hasher.finalize();
+        self.salt.copy_from_slice(&result[..32]);
     }
 }
 

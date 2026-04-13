@@ -7,7 +7,7 @@
 //! - MPC aggregate and ZK proof endpoints
 //! - Chain state inspection
 
-use axum::{extract::State, http::StatusCode, routing::post, Json, Router};
+use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::{get, post}, Json, Router};
 use seal_crypto::hash::sha3_256;
 use seal_crypto::signature::{Signature, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,16 @@ impl RateLimiter {
     }
 }
 
+/// Registered namespace info (in-memory, backed by on-chain state).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamespaceEntry {
+    pub name: String,
+    pub owner: String,
+    pub schema_hash: String,
+    pub visibility: String,
+    pub replication: u64,
+}
+
 /// Shared state for RPC handlers.
 #[derive(Clone)]
 pub struct RpcState {
@@ -89,6 +99,12 @@ pub struct RpcState {
     pub token_manager: Arc<Mutex<TokenManager>>,
     pub dex: Arc<Mutex<DexManager>>,
     pub rate_limiter: Arc<Mutex<RateLimiter>>,
+    /// Registered namespaces (persisted via on-chain transactions).
+    pub namespaces: Arc<Mutex<Vec<NamespaceEntry>>>,
+    /// Node metrics for /health, /metrics, /status endpoints.
+    pub metrics: Arc<crate::metrics::NodeMetrics>,
+    /// Node start time (for uptime calculation).
+    pub start_time: std::time::Instant,
 }
 
 /// JSON-RPC 2.0 request with optional authentication.
@@ -162,6 +178,9 @@ pub async fn start_rpc_server(node: Arc<Mutex<NetworkNode>>, config: RpcConfig, 
         token_manager: Arc::new(Mutex::new(TokenManager::new())),
         dex: Arc::new(Mutex::new(DexManager::new())),
         rate_limiter: Arc::new(Mutex::new(RateLimiter::default())),
+        namespaces: Arc::new(Mutex::new(Vec::new())),
+        metrics: Arc::new(crate::metrics::NodeMetrics::new()),
+        start_time: std::time::Instant::now(),
     };
 
     use axum::http::{HeaderValue, Method};
@@ -169,11 +188,14 @@ pub async fn start_rpc_server(node: Arc<Mutex<NetworkNode>>, config: RpcConfig, 
 
     let cors = tower_http::cors::CorsLayer::new()
         .allow_origin("*".parse::<HeaderValue>().unwrap())
-        .allow_methods([Method::POST, Method::OPTIONS])
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
         .allow_headers([header::CONTENT_TYPE]);
 
     let app = Router::new()
         .route("/", post(handle_rpc))
+        .route("/health", get(handle_health))
+        .route("/metrics", get(handle_metrics))
+        .route("/status", get(handle_status))
         .layer(cors)
         .with_state(state);
 
@@ -330,6 +352,7 @@ async fn handle_rpc(
         "seal_getBlock" => handle_get_block(&state, &req.params).await,
         "seal_getPeers" => handle_get_peers(&state).await,
         "seal_getNamespaces" => handle_get_namespaces(&state).await,
+        "seal_getNodeInfo" => handle_get_node_info(&state).await,
 
         // Private tables
         "seal_createPrivateTable" => {
@@ -458,7 +481,7 @@ async fn handle_query_sql(
 // ─── Namespace Handlers ─────────────────────────────
 
 async fn handle_deploy_namespace(
-    _state: &RpcState,
+    state: &RpcState,
     params: &serde_json::Value,
     caller: &str,
 ) -> Result<serde_json::Value, (i32, String)> {
@@ -479,23 +502,43 @@ async fn handle_deploy_namespace(
         .and_then(|v| v.as_u64())
         .unwrap_or(1);
 
-    // TODO: persist namespace to on-chain state via transaction
+    // Persist namespace to on-chain state via transaction
+    let entry = NamespaceEntry {
+        name: name.to_string(),
+        owner: caller.to_string(),
+        schema_hash: hex::encode(sha3_256(schema.as_bytes()).0),
+        visibility: visibility.to_string(),
+        replication,
+    };
+    {
+        let mut ns = state.namespaces.lock().await;
+        // Prevent duplicate registration
+        if ns.iter().any(|e| e.name == name) {
+            return Err((-32602, format!("namespace '{}' already exists", name)));
+        }
+        ns.push(entry.clone());
+    }
+    // Submit the schema as a CreateApp transaction
+    {
+        let mut node = state.node.lock().await;
+        let _ = node.runner.submit_sql(schema);
+    }
     Ok(serde_json::json!({
-        "namespace": name,
-        "owner": caller,
-        "schema_hash": hex::encode(sha3_256(schema.as_bytes()).0),
-        "visibility": visibility,
-        "replication": replication,
+        "namespace": entry.name,
+        "owner": entry.owner,
+        "schema_hash": entry.schema_hash,
+        "visibility": entry.visibility,
+        "replication": entry.replication,
         "status": "deployed",
     }))
 }
 
 async fn handle_get_namespaces(
-    _state: &RpcState,
+    state: &RpcState,
 ) -> Result<serde_json::Value, (i32, String)> {
-    // TODO: return registered namespaces from on-chain state
+    let ns = state.namespaces.lock().await;
     Ok(serde_json::json!({
-        "namespaces": [],
+        "namespaces": *ns,
     }))
 }
 
@@ -1089,4 +1132,118 @@ mod tests {
         assert!(config.served_namespaces.contains("blog.seal"));
         assert!(!config.served_namespaces.contains("market.seal"));
     }
+}
+
+async fn handle_get_node_info(
+    state: &RpcState,
+) -> Result<serde_json::Value, (i32, String)> {
+    let node = state.node.lock().await;
+    let height = node.height();
+    let epoch = node.runner.current_epoch.number;
+    let validators = node.runner.validator_set.active_count();
+    let leases = node.runner.leases.count();
+    drop(node);
+
+    let uptime = state.start_time.elapsed().as_secs();
+    let peers = state.metrics.peers_connected.load(std::sync::atomic::Ordering::Relaxed);
+
+    Ok(serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "height": height,
+        "epoch": epoch,
+        "peers": peers,
+        "validators": validators,
+        "leases_active": leases,
+        "uptime_secs": uptime,
+    }))
+}
+
+// ─── Monitoring Endpoints ────────────────────────────────────
+
+/// GET /health — liveness probe for load balancers and uptime monitors.
+async fn handle_health(State(state): State<RpcState>) -> impl IntoResponse {
+    let node = state.node.lock().await;
+    let height = node.height();
+    drop(node);
+
+    let uptime = state.start_time.elapsed().as_secs();
+    let peers = state.metrics.peers_connected.load(std::sync::atomic::Ordering::Relaxed);
+
+    Json(serde_json::json!({
+        "status": "ok",
+        "height": height,
+        "peers": peers,
+        "uptime_secs": uptime,
+    }))
+}
+
+/// GET /metrics — Prometheus exposition format for Grafana/Prometheus scraping.
+async fn handle_metrics(State(state): State<RpcState>) -> impl IntoResponse {
+    let node = state.node.lock().await;
+    let height = node.height();
+    let leases = node.runner.leases.count();
+    drop(node);
+
+    let uptime = state.start_time.elapsed().as_secs();
+    let mut out = state.metrics.to_prometheus();
+
+    // Add gauges that come from node state
+    out.push_str(&format!(
+        "# HELP seal_chain_height Current chain height\n\
+         # TYPE seal_chain_height gauge\n\
+         seal_chain_height {}\n\
+         # HELP seal_uptime_seconds Node uptime in seconds\n\
+         # TYPE seal_uptime_seconds gauge\n\
+         seal_uptime_seconds {}\n\
+         # HELP seal_leases_active Number of active storage leases\n\
+         # TYPE seal_leases_active gauge\n\
+         seal_leases_active {}\n",
+        height, uptime, leases,
+    ));
+
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        out,
+    )
+}
+
+/// GET /status — rich JSON status for dashboards and status pages.
+async fn handle_status(State(state): State<RpcState>) -> impl IntoResponse {
+    let node = state.node.lock().await;
+    let height = node.height();
+    let state_root = format!("{}", node.runner.state_root());
+    let epoch = node.runner.current_epoch.number;
+    let slot = node.runner.current_slot.number;
+    let validators = node.runner.validator_set.active_count();
+    let leases = node.runner.leases.count();
+    drop(node);
+
+    let uptime = state.start_time.elapsed().as_secs();
+    let m = &state.metrics;
+    let ord = std::sync::atomic::Ordering::Relaxed;
+
+    Json(serde_json::json!({
+        "node": "seal-node",
+        "version": env!("CARGO_PKG_VERSION"),
+        "chain_id": "seal-testnet-1",
+        "height": height,
+        "state_root": state_root,
+        "epoch": epoch,
+        "slot": slot,
+        "peers": m.peers_connected.load(ord),
+        "uptime_secs": uptime,
+        "validators": validators,
+        "leases_active": leases,
+        "metrics": {
+            "blocks_produced": m.blocks_produced.load(ord),
+            "blocks_received": m.blocks_received.load(ord),
+            "txs_submitted": m.txs_submitted.load(ord),
+            "txs_accepted": m.txs_accepted.load(ord),
+            "sql_queries": m.sql_queries.load(ord),
+            "sql_writes": m.sql_writes.load(ord),
+            "fees_collected": m.fees_collected.load(ord),
+            "fees_burned": m.fees_burned.load(ord),
+        }
+    }))
 }

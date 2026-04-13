@@ -33,18 +33,15 @@
 //!   - Check: c == H(D'||m) AND ||z|| < B
 //! ```
 //!
-//! # Blocking dependency
+//! # NTT backend
 //!
-//! The reference implementation (github.com/daryakaviani/ringtail) is in Go
-//! and depends on Lattigo v5 for NTT and polynomial ring arithmetic.
+//! All ring arithmetic is provided by `HandRolledOps` (see `ntt.rs`):
+//! - Cooley-Tukey DIT NTT over R_q = Z_q[X]/(X^256+1) with q = 0x1000000004A01
+//! - Discrete Gaussian sampling (Box-Muller)
+//! - Shamir secret sharing over polynomial rings
 //!
-//! To complete this port, we need:
-//! 1. NTT over R_q = Z_q[X]/(X^256 + 1) with q = 0x1000000004A01
-//! 2. Discrete Gaussian sampling over R_q
-//! 3. Shamir secret sharing over polynomial rings
-//!
-//! The `RingOps` trait below abstracts these operations so a concrete
-//! implementation can be plugged in (from `concrete-ntt`, hand-rolled, etc.).
+//! The `RingOps` trait abstracts these operations for testing or future
+//! backends (e.g., `concrete-ntt`, hardware-accelerated NTT).
 //!
 //! # References
 //!
@@ -98,7 +95,7 @@ pub const MAX_PARTIES: usize = 1024;
 /// Trait for polynomial ring arithmetic over R_q = Z_q[X]/(X^N + 1).
 ///
 /// Implement this trait to plug in a concrete NTT library.
-/// The default `StubRingOps` panics — replace with real implementation.
+/// Default implementation: `HandRolledOps` (real NTT, see `ntt.rs`).
 pub trait RingOps {
     /// A polynomial in R_q (N coefficients mod q).
     type Poly: Clone + Default;
@@ -507,107 +504,8 @@ pub fn reconstruct_key<R: RingOps>(
         .map_err(|_| ThresholdError::InvalidThresholdSignature)
 }
 
-// ============================================================================
-// Stub ring operations (for testing without NTT library)
-// ============================================================================
-
-/// Stub ring operations using simple coefficient vectors.
-/// NOT cryptographically secure — for protocol testing only.
-pub struct StubRingOps;
-
-impl RingOps for StubRingOps {
-    type Poly = Vec<u64>;
-
-    fn sample_uniform(&self) -> Self::Poly {
-        use rand::RngCore;
-        let mut rng = rand::thread_rng();
-        (0..RING_N).map(|_| rng.next_u64() % RING_Q).collect()
-    }
-
-    fn sample_gaussian(&self, _sigma: f64) -> Self::Poly {
-        // Stub: small random coefficients
-        use rand::RngCore;
-        let mut rng = rand::thread_rng();
-        (0..RING_N).map(|_| rng.next_u64() % 13).collect()
-    }
-
-    fn mul(&self, a: &Self::Poly, b: &Self::Poly) -> Self::Poly {
-        // Schoolbook multiplication mod (X^N+1, q) — O(N^2), for testing only.
-        // Real implementation uses NTT for O(N log N).
-        let mut result = vec![0u64; RING_N];
-        for i in 0..RING_N {
-            for j in 0..RING_N {
-                let idx = i + j;
-                let val = (a[i] as u128 * b[j] as u128) % RING_Q as u128;
-                if idx < RING_N {
-                    result[idx] = (result[idx] + val as u64) % RING_Q;
-                } else {
-                    // X^N = -1 mod (X^N + 1)
-                    let wrapped = idx - RING_N;
-                    result[wrapped] = (result[wrapped] + RING_Q - val as u64) % RING_Q;
-                }
-            }
-        }
-        result
-    }
-
-    fn add(&self, a: &Self::Poly, b: &Self::Poly) -> Self::Poly {
-        a.iter()
-            .zip(b.iter())
-            .map(|(&x, &y)| (x + y) % RING_Q)
-            .collect()
-    }
-
-    fn sub(&self, a: &Self::Poly, b: &Self::Poly) -> Self::Poly {
-        a.iter()
-            .zip(b.iter())
-            .map(|(&x, &y)| (x + RING_Q - y) % RING_Q)
-            .collect()
-    }
-
-    fn norm_l2(&self, p: &Self::Poly) -> u64 {
-        // L2 norm of coefficients (in signed representation)
-        let mut sum: u128 = 0;
-        for &c in p {
-            let signed = if c > RING_Q / 2 {
-                (RING_Q - c) as i128
-            } else {
-                c as i128
-            };
-            sum += (signed * signed) as u128;
-        }
-        (sum as f64).sqrt() as u64
-    }
-
-    fn to_bytes(&self, p: &Self::Poly) -> Vec<u8> {
-        // Simple serialization: 8 bytes per coefficient
-        let mut bytes = Vec::with_capacity(RING_N * 8);
-        for &c in p {
-            bytes.extend_from_slice(&c.to_le_bytes());
-        }
-        bytes
-    }
-
-    fn from_bytes(&self, data: &[u8]) -> Result<Self::Poly, String> {
-        if data.len() < RING_N * 8 {
-            // Pad with zeros if too short
-            let mut padded = data.to_vec();
-            padded.resize(RING_N * 8, 0);
-            return Ok(padded
-                .chunks(8)
-                .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()) % RING_Q)
-                .collect());
-        }
-        Ok(data[..RING_N * 8]
-            .chunks(8)
-            .map(|chunk| u64::from_le_bytes(chunk.try_into().unwrap()) % RING_Q)
-            .collect())
-    }
-
-    fn zero(&self) -> Self::Poly {
-        vec![0u64; RING_N]
-    }
-}
+// NOTE: StubRingOps was removed — HandRolledOps (in ntt.rs) is a full Cooley-Tukey
+// NTT implementation and is used everywhere. No stub needed.
 
 // ============================================================================
 // Public parameters, key generation, and challenge expansion
@@ -1118,8 +1016,8 @@ mod tests {
     }
 
     #[test]
-    fn test_stub_ring_ops() {
-        let ring = StubRingOps;
+    fn test_ring_ops_basic() {
+        let ring = HandRolledOps::new();
 
         let a = ring.sample_uniform();
         let _b = ring.sample_uniform();
@@ -1140,8 +1038,8 @@ mod tests {
     }
 
     #[test]
-    fn test_stub_polynomial_mul() {
-        let ring = StubRingOps;
+    fn test_polynomial_mul() {
+        let ring = HandRolledOps::new();
 
         // Multiply by zero = zero
         let a = ring.sample_uniform();
@@ -1205,7 +1103,7 @@ mod tests {
 
     #[test]
     fn test_insufficient_signers_rejected() {
-        let ring = StubRingOps;
+        let ring = HandRolledOps::new();
 
         let sig = aggregate_responses(
             &ring,
@@ -1224,7 +1122,7 @@ mod tests {
 
     #[test]
     fn test_norm_bound() {
-        let ring = StubRingOps;
+        let ring = HandRolledOps::new();
         let zero = ring.zero();
         assert_eq!(ring.norm_l2(&zero), 0);
 

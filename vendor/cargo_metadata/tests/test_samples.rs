@@ -5,8 +5,7 @@ extern crate serde_json;
 
 use camino::Utf8PathBuf;
 use cargo_metadata::{
-    workspace_default_members_is_missing, ArtifactDebuginfo, CargoOpt, DependencyKind, Edition,
-    Message, Metadata, MetadataCommand,
+    ArtifactDebuginfo, CargoOpt, DependencyKind, Edition, Message, Metadata, MetadataCommand,
 };
 
 /// Output from oldest version ever supported (1.24).
@@ -95,8 +94,8 @@ fn old_minimal() {
     assert_eq!(pkg.targets.len(), 1);
     let target = &pkg.targets[0];
     assert_eq!(target.name, "foo");
-    assert_eq!(target.kind, vec!["bin"]);
-    assert_eq!(target.crate_types, vec!["bin"]);
+    assert_eq!(target.kind, vec!["bin".into()]);
+    assert_eq!(target.crate_types, vec!["bin".into()]);
     assert_eq!(target.required_features.len(), 0);
     assert_eq!(target.src_path, "/foo/src/main.rs");
     assert_eq!(target.edition, Edition::E2015);
@@ -125,9 +124,9 @@ fn old_minimal() {
     assert_eq!(meta.workspace_metadata, serde_json::Value::Null);
     assert_eq!(meta.target_directory, "/foo/target");
 
-    assert!(workspace_default_members_is_missing(
-        &meta.workspace_default_members
-    ));
+    assert!(!meta.workspace_default_members.is_available());
+    assert!(meta.workspace_default_members.is_missing());
+
     let serialized = serde_json::to_value(meta).unwrap();
     assert!(!serialized
         .as_object()
@@ -208,7 +207,7 @@ fn all_the_fields() {
         }
     );
     assert_eq!(meta.workspace_members.len(), 1);
-    assert!(meta.workspace_members[0].to_string().starts_with("all"));
+    assert!(meta.workspace_members[0].to_string().contains("all"));
     if ver >= semver::Version::parse("1.71.0").unwrap() {
         assert_eq!(&*meta.workspace_default_members, &meta.workspace_members);
     }
@@ -217,7 +216,7 @@ fn all_the_fields() {
     let all = meta.packages.iter().find(|p| p.name == "all").unwrap();
     assert_eq!(all.version, semver::Version::parse("0.1.0").unwrap());
     assert_eq!(all.authors, vec!["Jane Doe <user@example.com>"]);
-    assert!(all.id.to_string().starts_with("all"));
+    assert!(all.id.to_string().contains("all"));
     assert_eq!(all.description, Some("Package description.".to_string()));
     assert_eq!(all.license, Some("MIT/Apache-2.0".to_string()));
     assert_eq!(all.license_file, Some(Utf8PathBuf::from("LICENSE")));
@@ -309,10 +308,13 @@ fn all_the_fields() {
     assert_eq!(all.targets.len(), 8);
     let lib = get_file_name!("lib.rs");
     assert_eq!(lib.name, "all");
-    assert_eq!(sorted!(lib.kind), vec!["cdylib", "rlib", "staticlib"]);
+    assert_eq!(
+        sorted!(lib.kind),
+        vec!["cdylib".into(), "rlib".into(), "staticlib".into()]
+    );
     assert_eq!(
         sorted!(lib.crate_types),
-        vec!["cdylib", "rlib", "staticlib"]
+        vec!["cdylib".into(), "rlib".into(), "staticlib".into()]
     );
     assert_eq!(lib.required_features.len(), 0);
     assert_eq!(lib.edition, Edition::E2018);
@@ -321,8 +323,8 @@ fn all_the_fields() {
     assert!(lib.doc);
 
     let main = get_file_name!("main.rs");
-    assert_eq!(main.crate_types, vec!["bin"]);
-    assert_eq!(main.kind, vec!["bin"]);
+    assert_eq!(main.crate_types, vec!["bin".into()]);
+    assert_eq!(main.kind, vec!["bin".into()]);
     assert!(!main.doctest);
     assert!(main.test);
     assert!(main.doc);
@@ -335,17 +337,17 @@ fn all_the_fields() {
     assert_eq!(reqfeat.required_features, vec!["feat2"]);
 
     let ex1 = get_file_name!("ex1.rs");
-    assert_eq!(ex1.kind, vec!["example"]);
+    assert_eq!(ex1.kind, vec!["example".into()]);
     assert!(!ex1.test);
 
     let t1 = get_file_name!("t1.rs");
-    assert_eq!(t1.kind, vec!["test"]);
+    assert_eq!(t1.kind, vec!["test".into()]);
 
     let b1 = get_file_name!("b1.rs");
-    assert_eq!(b1.kind, vec!["bench"]);
+    assert_eq!(b1.kind, vec!["bench".into()]);
 
     let build = get_file_name!("build.rs");
-    assert_eq!(build.kind, vec!["custom-build"]);
+    assert_eq!(build.kind, vec!["custom-build".into()]);
 
     if ver >= semver::Version::parse("1.60.0").unwrap() {
         // 1.60 now reports optional dependencies within the features table
@@ -390,18 +392,13 @@ fn all_the_fields() {
     );
 
     let resolve = meta.resolve.as_ref().unwrap();
-    assert!(resolve
-        .root
-        .as_ref()
-        .unwrap()
-        .to_string()
-        .starts_with("all"));
+    assert!(resolve.root.as_ref().unwrap().to_string().contains("all"));
 
     assert_eq!(resolve.nodes.len(), 9);
     let path_dep = resolve
         .nodes
         .iter()
-        .find(|n| n.id.to_string().starts_with("path-dep"))
+        .find(|n| n.id.to_string().contains("path-dep"))
         .unwrap();
     assert_eq!(path_dep.deps.len(), 0);
     assert_eq!(path_dep.dependencies.len(), 0);
@@ -410,29 +407,29 @@ fn all_the_fields() {
     let bitflags = resolve
         .nodes
         .iter()
-        .find(|n| n.id.to_string().starts_with("bitflags"))
+        .find(|n| n.id.to_string().contains("bitflags"))
         .unwrap();
     assert_eq!(bitflags.features, vec!["default"]);
 
     let featdep = resolve
         .nodes
         .iter()
-        .find(|n| n.id.to_string().starts_with("featdep"))
+        .find(|n| n.id.to_string().contains("featdep"))
         .unwrap();
     assert_eq!(featdep.features, vec!["i128"]);
 
     let all = resolve
         .nodes
         .iter()
-        .find(|n| n.id.to_string().starts_with("all"))
+        .find(|n| n.id.to_string().contains("all"))
         .unwrap();
     assert_eq!(all.dependencies.len(), 8);
     assert_eq!(all.deps.len(), 8);
     let newname = all.deps.iter().find(|d| d.name == "newname").unwrap();
-    assert!(newname.pkg.to_string().starts_with("oldname"));
+    assert!(newname.pkg.to_string().contains("oldname"));
     // Note the underscore here.
     let path_dep = all.deps.iter().find(|d| d.name == "path_dep").unwrap();
-    assert!(path_dep.pkg.to_string().starts_with("path-dep"));
+    assert!(path_dep.pkg.to_string().contains("path-dep"));
     assert_eq!(path_dep.dep_kinds.len(), 1);
     let kind = &path_dep.dep_kinds[0];
     assert_eq!(kind.kind, DependencyKind::Normal);
@@ -443,7 +440,7 @@ fn all_the_fields() {
         .iter()
         .find(|d| d.name == "different_name")
         .unwrap();
-    assert!(namedep.pkg.to_string().starts_with("namedep"));
+    assert!(namedep.pkg.to_string().contains("namedep"));
     assert_eq!(sorted!(all.features), vec!["bitflags", "default", "feat1"]);
 
     let bdep = all.deps.iter().find(|d| d.name == "bdep").unwrap();
@@ -596,7 +593,7 @@ fn advanced_feature_configuration() {
         let all = resolve
             .nodes
             .iter()
-            .find(|n| n.id.to_string().starts_with("all"))
+            .find(|n| !n.features.is_empty())
             .unwrap();
 
         all.features.clone()
@@ -724,4 +721,211 @@ fn debuginfo_variants() {
 fn missing_workspace_default_members() {
     let meta: Metadata = serde_json::from_str(JSON_OLD_MINIMAL).unwrap();
     let _ = &*meta.workspace_default_members;
+}
+
+#[test]
+fn workspace_default_members_is_available() {
+    // generated with cargo +1.71.0 metadata --format-version 1
+    let json = r#"
+{
+  "packages": [
+    {
+      "name": "basic",
+      "version": "0.1.0",
+      "id": "basic 0.1.0 (path+file:///example)",
+      "license": null,
+      "license_file": null,
+      "description": null,
+      "source": null,
+      "dependencies": [],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "basic",
+          "src_path": "/example/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        }
+      ],
+      "features": {},
+      "manifest_path": "/example/Cargo.toml",
+      "metadata": null,
+      "publish": null,
+      "authors": [],
+      "categories": [],
+      "keywords": [],
+      "readme": null,
+      "repository": null,
+      "homepage": null,
+      "documentation": null,
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": null
+    }
+  ],
+  "workspace_members": [
+    "basic 0.1.0 (path+file:///example)"
+  ],
+  "workspace_default_members": [
+    "basic 0.1.0 (path+file:///example)"
+  ],
+  "resolve": {
+    "nodes": [
+      {
+        "id": "basic 0.1.0 (path+file:///example)",
+        "dependencies": [],
+        "deps": [],
+        "features": []
+      }
+    ],
+    "root": "basic 0.1.0 (path+file:///example)"
+  },
+  "target_directory": "/example/target",
+  "version": 1,
+  "workspace_root": "/example",
+  "metadata": null
+}
+"#;
+
+    let meta: Metadata = serde_json::from_str(json).unwrap();
+
+    assert!(meta.workspace_default_members.is_available());
+    assert!(!meta.workspace_default_members.is_missing());
+}
+
+#[test]
+fn workspace_default_members_is_missing() {
+    // generated with cargo +1.70.0 metadata --format-version 1
+    let json = r#"
+{
+  "packages": [
+    {
+      "name": "basic",
+      "version": "0.1.0",
+      "id": "basic 0.1.0 (path+file:///example)",
+      "license": null,
+      "license_file": null,
+      "description": null,
+      "source": null,
+      "dependencies": [],
+      "targets": [
+        {
+          "kind": [
+            "lib"
+          ],
+          "crate_types": [
+            "lib"
+          ],
+          "name": "basic",
+          "src_path": "/example/src/lib.rs",
+          "edition": "2021",
+          "doc": true,
+          "doctest": true,
+          "test": true
+        }
+      ],
+      "features": {},
+      "manifest_path": "/example/Cargo.toml",
+      "metadata": null,
+      "publish": null,
+      "authors": [],
+      "categories": [],
+      "keywords": [],
+      "readme": null,
+      "repository": null,
+      "homepage": null,
+      "documentation": null,
+      "edition": "2021",
+      "links": null,
+      "default_run": null,
+      "rust_version": null
+    }
+  ],
+  "workspace_members": [
+    "basic 0.1.0 (path+file:///example)"
+  ],
+  "resolve": {
+    "nodes": [
+      {
+        "id": "basic 0.1.0 (path+file:///example)",
+        "dependencies": [],
+        "deps": [],
+        "features": []
+      }
+    ],
+    "root": "basic 0.1.0 (path+file:///example)"
+  },
+  "target_directory": "/example/target",
+  "version": 1,
+  "workspace_root": "/example",
+  "metadata": null
+}
+"#;
+
+    let meta: Metadata = serde_json::from_str(json).unwrap();
+
+    assert!(!meta.workspace_default_members.is_available());
+    assert!(meta.workspace_default_members.is_missing());
+}
+
+#[test]
+fn test_unknown_target_kind_and_crate_type() {
+    // Both kind and crate_type set to a type not yet known
+    let json = r#"
+{
+  "packages": [
+    {
+      "name": "alt",
+      "version": "0.1.0",
+      "id": "alt 0.1.0 (path+file:///alt)",
+      "source": null,
+      "dependencies": [],
+      "targets": [
+        {
+          "kind": [
+            "future-kind"
+          ],
+          "crate_types": [
+            "future-type"
+          ],
+          "name": "alt",
+          "src_path": "/alt/src/lib.rs",
+          "edition": "2018"
+        }
+      ],
+      "features": {},
+      "manifest_path": "/alt/Cargo.toml",
+      "metadata": null,
+      "authors": [],
+      "categories": [],
+      "keywords": [],
+      "readme": null,
+      "repository": null,
+      "edition": "2018",
+      "links": null
+    }
+  ],
+  "workspace_members": [
+    "alt 0.1.0 (path+file:///alt)"
+  ],
+  "resolve": null,
+  "target_directory": "/alt/target",
+  "version": 1,
+  "workspace_root": "/alt"
+}
+"#;
+    let meta: Metadata = serde_json::from_str(json).unwrap();
+    assert_eq!(meta.packages.len(), 1);
+    assert_eq!(meta.packages[0].targets.len(), 1);
+    let target = &meta.packages[0].targets[0];
+    assert_eq!(target.kind[0], "future-kind".into());
+    assert_eq!(target.crate_types[0], "future-type".into());
 }

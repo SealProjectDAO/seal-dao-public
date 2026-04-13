@@ -1,0 +1,5 @@
+# Guest builds fetch from crates.io directly.
+# The parent workspace uses vendored sources, but -Zbuild-std needs
+# to fetch std library source crates (rustc-literal-escaper etc.)
+# which aren't vendored. This config overrides the parent's vendor
+# replacement for this standalone workspace.

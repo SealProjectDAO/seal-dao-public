@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "slop-primitives"
-version = "6.0.2"
+version = "6.1.0"
 build = false
 autolib = false
 autobins = false
@@ -36,7 +36,7 @@ name = "slop_primitives"
 path = "src/lib.rs"
 
 [dependencies.slop-algebra]
-version = "6.0.2"
+version = "6.1.0"
 
 [lints.clippy]
 print_stdout = "deny"
@@ -47,4 +47,8 @@ priority = 0
 check-cfg = [
     "cfg(sp1_debug_constraints)",
     "cfg(sp1_debug_global_memory)",
+    "cfg(sp1_core_runner_override)",
+    "cfg(sp1_use_native_executor)",
+    "cfg(sp1_use_portable_executor)",
+    "cfg(sp1_native_executor_available)",
 ]

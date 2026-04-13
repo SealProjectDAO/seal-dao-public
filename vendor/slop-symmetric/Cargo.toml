@@ -12,7 +12,7 @@
 [package]
 edition = "2021"
 name = "slop-symmetric"
-version = "6.0.2"
+version = "6.1.0"
 build = false
 autolib = false
 autobins = false

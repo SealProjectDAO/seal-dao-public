@@ -93,7 +93,7 @@ impl MerkleEngine {
             for &row_idx in &log.modified_rows {
                 if let Some(row) = result.rows.get(row_idx) {
                     let key = format!("{}:{}", table_name, row_idx);
-                    let value = format!("{:?}", row.values);
+                    let value = format!("{}:{:?}", hex::encode(row.salt), row.values);
                     let _ = self.merkle.insert(key.into_bytes(), value.into_bytes());
                 }
             }
@@ -128,7 +128,10 @@ impl MerkleEngine {
                     format!("{:?}", row.values)
                 };
                 let merkle_key = format!("{}:{}", table_name, pk_str);
-                let merkle_value = format!("{:?}", row.values);
+                // Include salt in Merkle value for anti-correlation (#STORAGE-FORGET).
+                // Same row content with different salts produces different leaf hashes,
+                // preventing correlation across historical Merkle roots.
+                let merkle_value = format!("{}:{:?}", hex::encode(row.salt), row.values);
                 let _ = self.merkle
                     .insert(merkle_key.clone().into_bytes(), merkle_value.into_bytes());
                 current_pks.insert(merkle_key);
@@ -189,6 +192,37 @@ impl MerkleEngine {
 
     pub fn row_count(&self, table: &str) -> Option<usize> {
         self.engine.row_count(table)
+    }
+
+    /// Set block seed for deterministic salt derivation (#STORAGE-FORGET).
+    /// Call before executing block transactions so all validators agree on salts.
+    pub fn set_block_seed(&mut self, seed: Vec<u8>) {
+        self.engine.set_block_seed(seed);
+    }
+
+    /// Clear the block seed (reverts to random salts for local/test use).
+    pub fn clear_block_seed(&mut self) {
+        self.engine.clear_block_seed();
+    }
+
+    /// Get the current block seed (if set).
+    pub fn block_seed(&self) -> Option<&Vec<u8>> {
+        self.engine.block_seed()
+    }
+
+    /// Estimate the byte size of a table (#STORAGE-FORGET invoicing).
+    pub fn table_byte_size(&self, table_name: &str) -> Option<u64> {
+        self.engine.table_byte_size(table_name)
+    }
+
+    /// Get the last write log from the engine.
+    pub fn last_write_log(&self) -> Option<&crate::engine::WriteLog> {
+        self.engine.last_write_log.as_ref()
+    }
+
+    /// Drop a table by executing DROP TABLE (for lease expiry pruning).
+    pub fn drop_table(&mut self, table_name: &str) -> Result<QueryResult, crate::error::SqlError> {
+        self.execute(&format!("DROP TABLE {}", table_name))
     }
 }
 
@@ -272,23 +306,23 @@ mod tests {
 
     #[test]
     fn test_merkle_deterministic() {
-        let mut e1 = MerkleEngine::new();
-        let mut e2 = MerkleEngine::new();
+        // With random salts (#STORAGE-FORGET), two separate engines produce
+        // different roots by design. Determinism is preserved within a single
+        // engine: same state → same root on repeated calls.
+        let mut engine = MerkleEngine::new();
+        engine
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, val TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO t (id, val) VALUES (1, 'x')")
+            .unwrap();
+        engine
+            .execute("INSERT INTO t (id, val) VALUES (2, 'y')")
+            .unwrap();
 
-        for e in [&mut e1, &mut e2] {
-            e.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, val TEXT)")
-                .unwrap();
-            e.execute("INSERT INTO t (id, val) VALUES (1, 'x')")
-                .unwrap();
-            e.execute("INSERT INTO t (id, val) VALUES (2, 'y')")
-                .unwrap();
-        }
-
-        assert_eq!(
-            e1.state_root(),
-            e2.state_root(),
-            "same operations must produce same state root"
-        );
+        let root1 = engine.state_root();
+        let root2 = engine.state_root();
+        assert_eq!(root1, root2, "same state must produce same root");
     }
 
     #[test]

@@ -204,15 +204,21 @@ impl NetworkNode {
                         }
                         NetworkMessage::CommitteeVote { data, source } => {
                             debug!(from = %source, bytes = data.len(), "Received committee vote");
-                            // TODO: deserialize and process via CommitteeManager
+                            if let Err(e) = self.runner.accept_committee_vote(&data) {
+                                warn!("Rejected committee vote from {}: {}", source, e);
+                            }
                         }
                         NetworkMessage::CommitteeSignature { data, source } => {
                             debug!(from = %source, bytes = data.len(), "Received committee signature");
-                            // TODO: deserialize and apply finalized attestation
+                            if let Err(e) = self.runner.accept_committee_signature(&data) {
+                                warn!("Rejected committee signature from {}: {}", source, e);
+                            }
                         }
                         NetworkMessage::EpochTransition { data, source } => {
                             debug!(from = %source, bytes = data.len(), "Received epoch transition");
-                            // TODO: update validator VRF keys for new epoch
+                            if let Err(e) = self.runner.accept_epoch_transition(&data) {
+                                warn!("Rejected epoch transition from {}: {}", source, e);
+                            }
                         }
                         NetworkMessage::PeerConnected(peer) => {
                             info!(%peer, "Peer connected");

@@ -20,6 +20,19 @@ use crate::traits::{Vrf, VrfKeypair};
 use seal_crypto::hash::sha3_256;
 use zeroize::Zeroize;
 
+/// Available VRF backends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VrfBackend {
+    /// ML-DSA-65 based VRF (NIST standard, many-time safe, ~3.3 KB proofs).
+    /// Default and production-recommended.
+    PqVrf,
+    /// LaV lattice-based VRF (dedicated construction, many-time safe via Gaussian masking).
+    /// Smaller proofs, native lattice-based — use when LaV is audited.
+    LavVrf,
+    /// HMAC-SHA3 VRF (NOT PQ-secure, testing only).
+    HmacVrf,
+}
+
 /// Manages VRF key rotation across epochs.
 pub struct VrfKeyManager {
     /// Master seed (32 bytes, from wallet mnemonic).
@@ -29,18 +42,37 @@ pub struct VrfKeyManager {
     current_epoch: u64,
     /// Current epoch's VRF key pair.
     current_keypair: VrfKeypair,
+    /// Active VRF backend.
+    backend: VrfBackend,
 }
 
 impl VrfKeyManager {
-    /// Create a new key manager from a master seed.
+    /// Create a new key manager from a master seed (default: PqVrf backend).
     /// Initializes at epoch 0.
     pub fn new(master_seed: [u8; 32]) -> Self {
-        let keypair = derive_epoch_keypair(&master_seed, 0);
+        let keypair = derive_epoch_keypair(&master_seed, 0, VrfBackend::PqVrf);
         Self {
             master_seed,
             current_epoch: 0,
             current_keypair: keypair,
+            backend: VrfBackend::PqVrf,
         }
+    }
+
+    /// Create a key manager with a specific VRF backend.
+    pub fn with_backend(master_seed: [u8; 32], backend: VrfBackend) -> Self {
+        let keypair = derive_epoch_keypair(&master_seed, 0, backend);
+        Self {
+            master_seed,
+            current_epoch: 0,
+            current_keypair: keypair,
+            backend,
+        }
+    }
+
+    /// Get the active VRF backend.
+    pub fn backend(&self) -> VrfBackend {
+        self.backend
     }
 
     /// Rotate to a new epoch. Derives a new VRF key pair.
@@ -49,7 +81,7 @@ impl VrfKeyManager {
         if epoch == self.current_epoch {
             return self.current_keypair.public_key.clone();
         }
-        self.current_keypair = derive_epoch_keypair(&self.master_seed, epoch);
+        self.current_keypair = derive_epoch_keypair(&self.master_seed, epoch, self.backend);
         self.current_epoch = epoch;
         self.current_keypair.public_key.clone()
     }
@@ -72,13 +104,17 @@ impl VrfKeyManager {
     /// Derive the public key for a specific epoch (for verification).
     /// This doesn't change the current epoch.
     pub fn public_key_for_epoch(&self, epoch: u64) -> Vec<u8> {
-        let kp = derive_epoch_keypair(&self.master_seed, epoch);
+        let kp = derive_epoch_keypair(&self.master_seed, epoch, self.backend);
         kp.public_key
     }
 
-    /// Evaluate the VRF for the current epoch.
+    /// Evaluate the VRF for the current epoch using the active backend.
     pub fn eval(&self, input: &[u8]) -> Result<(crate::traits::VrfOutput, crate::traits::VrfProof), crate::VrfError> {
-        crate::pq_vrf::PqVrf::eval(&self.current_keypair.secret_key, input)
+        match self.backend {
+            VrfBackend::PqVrf => crate::pq_vrf::PqVrf::eval(&self.current_keypair.secret_key, input),
+            VrfBackend::LavVrf => crate::lav_vrf::LavVrf::eval(&self.current_keypair.secret_key, input),
+            VrfBackend::HmacVrf => crate::hmac_vrf::HmacVrf::eval(&self.current_keypair.secret_key, input),
+        }
     }
 }
 
@@ -91,14 +127,18 @@ impl Drop for VrfKeyManager {
 /// Derive a VRF key pair for a specific epoch from a master seed.
 ///
 /// epoch_seed = SHA3(master_seed || "seal_vrf_epoch" || epoch_number)
-/// keypair = PqVrf::keygen_from_seed(epoch_seed)
-fn derive_epoch_keypair(master_seed: &[u8; 32], epoch: u64) -> VrfKeypair {
+/// keypair = Backend::keygen_from_seed(epoch_seed)
+fn derive_epoch_keypair(master_seed: &[u8; 32], epoch: u64, backend: VrfBackend) -> VrfKeypair {
     let mut input = Vec::with_capacity(32 + 14 + 8);
     input.extend_from_slice(master_seed);
     input.extend_from_slice(b"seal_vrf_epoch");
     input.extend_from_slice(&epoch.to_le_bytes());
     let epoch_seed = sha3_256(&input);
-    crate::pq_vrf::keygen_from_seed(epoch_seed.0)
+    match backend {
+        VrfBackend::PqVrf => crate::pq_vrf::keygen_from_seed(epoch_seed.0),
+        VrfBackend::LavVrf => crate::lav_vrf::LavVrf::keygen_from_seed(epoch_seed.0),
+        VrfBackend::HmacVrf => crate::hmac_vrf::keygen_from_seed(epoch_seed.0),
+    }
 }
 
 #[cfg(test)]

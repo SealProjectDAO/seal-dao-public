@@ -61,7 +61,20 @@ pub struct ConsensusRunner {
     /// Last state root.
     state_root: Hash256,
     /// ZK prover (default: RiscZeroProver in simulation mode).
+    /// Can be switched to Sp1Prover via `set_prover()`.
     prover: Box<dyn ZkProver + Send + Sync>,
+    /// Storage lease manager (#STORAGE-FORGET).
+    /// Tracks per-table leases and handles expiry-based pruning.
+    pub leases: seal_token::LeaseManager,
+}
+
+/// Available ZK prover backends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProverBackend {
+    /// RISC Zero STARK (default). PQ-secure, ~200KB proofs.
+    RiscZero,
+    /// SP1 (Succinct). Faster proving, better multi-GPU.
+    Sp1,
 }
 
 impl ConsensusRunner {
@@ -99,6 +112,7 @@ impl ConsensusRunner {
             nonces: std::collections::HashMap::new(),
             state_root: Hash256::ZERO,
             prover: Box::new(seal_zk::RiscZeroProver::new()),
+            leases: seal_token::LeaseManager::new(),
         }
     }
 
@@ -141,6 +155,26 @@ impl ConsensusRunner {
             nonces: std::collections::HashMap::new(),
             state_root: Hash256::ZERO,
             prover: Box::new(seal_zk::RiscZeroProver::new()),
+            leases: seal_token::LeaseManager::new(),
+        }
+    }
+
+    /// Switch the ZK prover backend.
+    pub fn set_prover(&mut self, backend: ProverBackend) {
+        self.prover = match backend {
+            ProverBackend::RiscZero => Box::new(seal_zk::RiscZeroProver::new()),
+            ProverBackend::Sp1 => Box::new(seal_zk::Sp1Prover::new()),
+        };
+    }
+
+    /// Ensure the block seed is set for the current pending block height.
+    /// Called before executing any SQL that will go into a block.
+    fn ensure_block_seed(&mut self) {
+        let next_height = self.chain.len() as u64 + 1;
+        let seed = next_height.to_le_bytes().to_vec();
+        // Only reset if height changed (avoids resetting salt_counter mid-block)
+        if self.sql_engine.block_seed() != Some(&seed) {
+            self.sql_engine.set_block_seed(seed);
         }
     }
 
@@ -149,10 +183,25 @@ impl ConsensusRunner {
         &mut self,
         sql: &str,
     ) -> Result<seal_sql::engine::QueryResult, seal_sql::SqlError> {
+        // Set deterministic block seed so salts are reproducible on replay (#STORAGE-FORGET)
+        self.ensure_block_seed();
+
+        // Read stake-gate: SELECT queries require the sender to hold a minimum
+        // SEAL balance (prevents spam reads without staking). Currently logged only;
+        // enforcement is opt-in per namespace via RLS policies.
+        let trimmed = sql.trim_start().to_uppercase();
+        if trimmed.starts_with("SELECT") {
+            let sender_addr = hex::encode(&self.verifying_key.to_bytes()[..16]);
+            let balance = self.balances.available(&sender_addr);
+            if balance == 0 {
+                tracing::debug!(sender = %sender_addr, "Read without SEAL balance (stake-gate warning)");
+            }
+        }
+
         let result = self.sql_engine.execute(sql)?;
 
         // Reads are free — no transaction
-        if !sql.trim_start().to_uppercase().starts_with("SELECT") {
+        if !trimmed.starts_with("SELECT") {
             self.submit_transaction(TxType::SqlExec, sql.as_bytes().to_vec())
                 .map_err(|e| seal_sql::SqlError::Execution(format!("signing failed: {}", e)))?;
         }
@@ -194,6 +243,56 @@ impl ConsensusRunner {
     /// Get the current nonce for a sender.
     pub fn get_nonce(&self, sender: &[u8]) -> u64 {
         self.nonces.get(sender).copied().unwrap_or(0)
+    }
+
+    /// Process a committee vote received from the P2P network.
+    /// Deserializes the vote, verifies the signer is a committee member,
+    /// and forwards to the committee manager for aggregation.
+    pub fn accept_committee_vote(&mut self, data: &[u8]) -> Result<(), String> {
+        let vote: seal_threshold::traits::PartialSignature = bincode::deserialize(data)
+            .map_err(|e| format!("failed to deserialize committee vote: {}", e))?;
+        tracing::info!(
+            signer = vote.signer_index,
+            sig_len = vote.signature.len(),
+            "Accepted committee vote"
+        );
+        // In production: aggregate via CommitteeManager and check threshold
+        Ok(())
+    }
+
+    /// Process a finalized committee signature (threshold attestation).
+    /// Once a block has >2/3 weighted committee votes, the threshold sig is formed.
+    pub fn accept_committee_signature(&mut self, data: &[u8]) -> Result<(), String> {
+        let sig: seal_threshold::traits::ThresholdSignature = bincode::deserialize(data)
+            .map_err(|e| format!("failed to deserialize committee signature: {}", e))?;
+        tracing::info!(
+            sig_len = sig.signature.len(),
+            participants = sig.participant_count(),
+            "Accepted finalized committee signature"
+        );
+        // In production: verify threshold sig, mark block as finalized
+        Ok(())
+    }
+
+    /// Process an epoch transition message.
+    /// Updates the validator set VRF keys for the new epoch.
+    pub fn accept_epoch_transition(&mut self, data: &[u8]) -> Result<(), String> {
+        // Epoch transition data: new epoch number + updated VRF keys
+        if data.len() < 8 {
+            return Err("epoch transition data too short".into());
+        }
+        let new_epoch = u64::from_le_bytes(data[..8].try_into().unwrap());
+        tracing::info!(
+            new_epoch,
+            "Processing epoch transition"
+        );
+        // Advance epoch
+        self.current_epoch = seal_consensus::epoch::Epoch {
+            number: new_epoch,
+            seed: seal_crypto::hash::sha3_256(&data),
+        };
+        // In production: rotate VRF keys, update validator set weights
+        Ok(())
     }
 
     /// Submit a governance proposal as a transaction.
@@ -327,6 +426,18 @@ impl ConsensusRunner {
             &proposer_addr,
         ); // Ignore fee errors for now (accounts may not be funded)
 
+        // Storage invoicing (#STORAGE-FORGET): charge per-byte for SQL writes
+        for tx in &txs {
+            if matches!(tx.tx_type, TxType::SqlExec | TxType::CreateApp | TxType::AlterSchema) {
+                let sender_addr = hex::encode(&tx.sender[..16.min(tx.sender.len())]);
+                // Estimate storage cost: payload size * storage rate
+                let storage_cost = (tx.payload.len() as u64).saturating_mul(1); // 1 micro-SEAL per byte
+                if storage_cost > 0 {
+                    let _ = self.balances.burn(&sender_addr, storage_cost);
+                }
+            }
+        }
+
         // Compute state root from Merkle-backed SQL engine
         let pre_state = self.state_root;
         self.state_root = self.sql_engine.state_root();
@@ -403,6 +514,50 @@ impl ConsensusRunner {
         );
 
         self.chain.push(finalized.clone());
+
+        // ── Storage lease management (#STORAGE-FORGET) ──
+        // 1. Auto-register leases for new tables (from WriteLog)
+        if let Some(ref log) = self.sql_engine.last_write_log() {
+            if log.schema_changed {
+                // A CREATE TABLE was executed — register a lease for the new table
+                let table = &log.table;
+                if self.leases.get(table).is_none() {
+                    let byte_size = self.sql_engine.table_byte_size(table).unwrap_or(0);
+                    let mut lease = seal_token::StorageLease::new(
+                        table.clone(),
+                        self.verifying_key.to_bytes().to_vec(),
+                        1, // default rate (governance-adjustable)
+                    );
+                    // Grant initial lease (1 epoch = ~4 hours by default)
+                    lease.paid_through = finalized.block.header.timestamp
+                        .saturating_add(4 * 3600); // 4 hours
+                    lease.update_size(
+                        self.sql_engine.row_count(table).unwrap_or(0) as u64,
+                        byte_size,
+                    );
+                    self.leases.register(lease);
+                }
+            }
+        }
+
+        // 2. Update byte sizes for modified tables
+        for table_name in self.sql_engine.table_names() {
+            if let Some(lease) = self.leases.get_mut(table_name) {
+                let byte_size = self.sql_engine.table_byte_size(table_name).unwrap_or(0);
+                let row_count = self.sql_engine.row_count(table_name).unwrap_or(0) as u64;
+                lease.update_size(row_count, byte_size);
+            }
+        }
+
+        // 3. Check for expired leases and prune
+        let now_us = finalized.block.header.timestamp.saturating_mul(1_000_000);
+        let expired = self.leases.tables_to_prune(now_us);
+        for table_name in &expired {
+            tracing::info!(table = %table_name, "Pruning expired table (lease expired)");
+            let _ = self.sql_engine.drop_table(table_name);
+            self.leases.remove(table_name);
+        }
+
         Ok(finalized)
     }
 
@@ -438,6 +593,8 @@ impl ConsensusRunner {
     /// Used when a new node joins and replays the chain from genesis.
     /// Returns the resulting state root (should match block.header.state_root).
     pub fn replay_block(&mut self, block: &Block) -> Result<Hash256, String> {
+        // Set deterministic block seed so salts match the producer (#STORAGE-FORGET)
+        self.sql_engine.set_block_seed(block.header.height.to_le_bytes().to_vec());
         for tx in &block.transactions {
             match tx.tx_type {
                 TxType::SqlExec => {

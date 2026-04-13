@@ -2985,10 +2985,13 @@ dependencies = [
 name = "seal-sql"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "rand 0.8.5",
  "seal-crypto",
  "seal-merkle",
  "serde",
  "serde_json",
+ "sha3",
  "sqlparser",
  "thiserror 2.0.18",
 ]

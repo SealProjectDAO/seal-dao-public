@@ -23,8 +23,9 @@
 //! - **Rocq** (`formal/rocq/`): models SQL-level state ops, not tree structure.
 //! - **TLA+**: consensus/bridge only, no tree specs.
 //!
-//! TODO (formal): Add Lean 4 theorems for delete correctness and the
-//! no-empty-children invariant. Add Kani harness for merge_empty_child.
+//! Lean 4 delete theorems added: delete_lookup, delete_lookup_other,
+//! delete_idempotent, delete_then_insert (see formal/lean/SealVerify/Basic/MerkleTree.lean).
+//! TODO (formal): Add Kani harness for merge_empty_child, no-empty-children invariant.
 
 use crate::node::{Entry, Node, NodeRef};
 use crate::store::NodeStore;

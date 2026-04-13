@@ -197,7 +197,7 @@ dependencies = [
 
 [[package]]
 name = "slop-symmetric"
-version = "6.0.2"
+version = "6.1.0"
 dependencies = [
  "p3-symmetric",
 ]

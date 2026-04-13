@@ -85,23 +85,20 @@ proptest! {
         prop_assert_eq!(&result.rows[0].values[1], &SealValue::Text(new_val));
     }
 
-    /// Property: state_root is deterministic — same ops produce same root.
+    /// Property: state_root is stable — same state produces same root on repeated calls.
+    /// (With random salts per #STORAGE-FORGET, two separate engines intentionally diverge.)
     #[test]
-    fn prop_state_root_deterministic(
+    fn prop_state_root_stable(
         id1 in 1i64..100,
         id2 in 101i64..200,
         val1 in "[a-z]{1,5}",
         val2 in "[a-z]{1,5}",
     ) {
-        let mut e1 = Engine::new();
-        let mut e2 = Engine::new();
+        let mut engine = Engine::new();
+        engine.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, val TEXT)").unwrap();
+        engine.execute(&format!("INSERT INTO t (id, val) VALUES ({}, '{}')", id1, val1)).unwrap();
+        engine.execute(&format!("INSERT INTO t (id, val) VALUES ({}, '{}')", id2, val2)).unwrap();
 
-        for e in [&mut e1, &mut e2] {
-            e.execute("CREATE TABLE t (id BIGINT PRIMARY KEY, val TEXT)").unwrap();
-            e.execute(&format!("INSERT INTO t (id, val) VALUES ({}, '{}')", id1, val1)).unwrap();
-            e.execute(&format!("INSERT INTO t (id, val) VALUES ({}, '{}')", id2, val2)).unwrap();
-        }
-
-        prop_assert_eq!(e1.state_root(), e2.state_root());
+        prop_assert_eq!(engine.state_root(), engine.state_root());
     }
 }

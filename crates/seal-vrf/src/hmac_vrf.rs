@@ -42,6 +42,15 @@ use seal_crypto::hash::{sha3_256, Sha3Hasher};
 /// HMAC-SHA3 VRF stub for development and testing.
 pub struct HmacVrf;
 
+/// Derive an HMAC-VRF keypair deterministically from a 32-byte seed.
+pub fn keygen_from_seed(seed: [u8; 32]) -> VrfKeypair {
+    let public_key = sha3_256(&seed);
+    VrfKeypair {
+        secret_key: seed.to_vec(),
+        public_key: public_key.0.to_vec(),
+    }
+}
+
 impl Vrf for HmacVrf {
     fn keygen() -> VrfKeypair {
         let mut secret_key = [0u8; 32];

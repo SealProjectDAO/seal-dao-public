@@ -1,11 +1,26 @@
+[workspace]
+
 [package]
 name = "seal-zk-guest"
 version = "0.1.0"
 edition = "2021"
 description = "RISC Zero guest program for Seal DAO state transition proofs"
 
-# When risc0-zkvm is available, add:
-# [dependencies]
-# risc0-zkvm = { version = "1.0", default-features = false, features = ["guest"] }
+[features]
+default = []
 
-# For now: compiles as a normal binary (placeholder)
+[dependencies]
+# risc0-zkvm-platform provides: allocator, panic handler, syscall wrappers.
+# NO serde dependency — works with -Zbuild-std on nightly.
+# risc0-zkvm-platform provides: panic handler, entry point, syscalls, bump allocator.
+# Avoid heap-embedded-alloc (nightly API breakage with embedded-alloc crate).
+risc0-zkvm-platform = { version = "5.0.0-rc.1", default-features = false, features = [
+    "panic-handler",
+    "entrypoint",
+    "rust-runtime",
+] }
+
+# Native-only deps (for testing without zkVM)
+[target.'cfg(not(target_arch = "riscv32"))'.dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = "1"

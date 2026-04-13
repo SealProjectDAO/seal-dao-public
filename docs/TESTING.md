@@ -3,7 +3,7 @@
 ## Quick Reference
 
 ```bash
-./scripts/ci.sh quick    # Build + 785 tests + clippy (~2 min)
+./scripts/ci.sh quick    # Build + 810+ tests + clippy (~2 min)
 ./scripts/ci.sh          # Full: + Kani + Miri + fuzz + audit (~5 min)
 ```
 
@@ -15,7 +15,7 @@
 cargo build --release -p seal-node -p seal-cli
 ```
 
-## 2. Unit Tests (785 tests)
+## 2. Unit Tests (810+ tests)
 
 ```bash
 cargo test -- --skip bench
@@ -504,6 +504,18 @@ cargo run -p seal-app
 | `seal_mpcAggregate` | Optional | MPC sum/count/avg |
 | `seal_zkProve` | Optional | ZK proof |
 | `seal_pqHandshake` | No | ML-KEM key exchange |
+| `seal_getNodeInfo` | No | Node version, epoch, peers, validators, uptime |
+| `seal_setVisibility` | ML-DSA | Set table visibility (private/shared/public) |
+| `seal_enableRls` | ML-DSA | Enable row-level security on table |
+| `seal_addPolicy` | ML-DSA | Add RLS policy to table |
+
+**HTTP endpoints** (GET, no JSON-RPC):
+
+| Endpoint | Description |
+|----------|-------------|
+| `/health` | Liveness probe: `{"status":"ok","height":N,"peers":N,"uptime_secs":N}` |
+| `/metrics` | Prometheus exposition format (12 counters + 3 gauges) |
+| `/status` | Rich JSON: chain state, epoch, validators, leases, all metrics |
 
 ---
 
@@ -535,3 +547,274 @@ cargo run -p seal-app
 | `--serve <namespace>` | all | Namespace to serve (repeatable) |
 | `--data-dir <path>` | seal-data | Disk persistence directory |
 | `--no-network` | false | Local mode, no P2P |
+
+---
+
+## 22. Row Salts and Storage Leases (`#STORAGE-FORGET`)
+
+### Verify row salts are generated
+
+```bash
+# Two engines with same SQL produce different state roots (random salts)
+cargo test -p seal-sql test_state_root_deterministic -- --nocapture
+```
+
+Expected: test passes — it verifies that a single engine produces the same root
+on repeated calls, but no longer asserts cross-engine equality (salts are random).
+
+### Verify deterministic salts in consensus
+
+```bash
+# Block replay produces identical state root (block-seed-derived salts)
+cargo test -p seal-node test_replay_single_block -- --nocapture
+cargo test -p seal-node test_replay_chain -- --nocapture
+```
+
+Expected: both tests pass — producer and replayer derive the same salts from
+block height, producing identical state roots.
+
+### StorageLease tests
+
+```bash
+cargo test -p seal-token storage_lease -- --nocapture
+```
+
+Expected: 7 tests pass — lease creation, extension, expiry, grace period,
+governance hold, and lease manager pruning.
+
+### Manual: inspect row salt in Merkle value
+
+```bash
+cargo run -p seal-cli -- demo 2>&1 | head -30
+```
+
+Merkle leaf values now include the hex-encoded salt prefix:
+`"<64-char-hex-salt>:[BigInt(1), Text(\"hello\")]"`
+
+---
+
+## 23. Namespace Registration
+
+### Via RPC
+
+```bash
+# Start a node
+cargo run -p seal-node -- --slots 0 --rpc-port 8545 &
+
+# Deploy a namespace
+curl -s http://localhost:8545 -d '{
+  "jsonrpc": "2.0", "id": 1,
+  "method": "seal_deployNamespace",
+  "params": {"name": "myapp.seal", "schema": "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT)", "visibility": "public"}
+}' | jq .
+
+# List namespaces
+curl -s http://localhost:8545 -d '{
+  "jsonrpc": "2.0", "id": 2,
+  "method": "seal_getNamespaces"
+}' | jq .
+```
+
+Expected: first call returns `"status": "deployed"`, second returns the namespace list.
+
+### Duplicate rejection
+
+```bash
+# Deploy same namespace again — should fail
+curl -s http://localhost:8545 -d '{
+  "jsonrpc": "2.0", "id": 3,
+  "method": "seal_deployNamespace",
+  "params": {"name": "myapp.seal", "schema": "CREATE TABLE t (id BIGINT PRIMARY KEY)"}
+}' | jq .
+```
+
+Expected: error with "namespace 'myapp.seal' already exists".
+
+---
+
+## 24. ZK Prover Backend Selection
+
+Both RISC Zero and SP1 are available (simulation mode until real SDKs vendored).
+
+```bash
+# Verify both provers work in simulation
+cargo test -p seal-zk test_risc0_prove_and_verify
+cargo test -p seal-zk test_sp1_prove_and_verify
+cargo test -p seal-zk test_sp1_cross_verify_with_risc0
+
+# All ZK tests
+cargo test -p seal-zk
+```
+
+Expected: all pass. In simulation mode both produce identical SHA3 commitments.
+
+---
+
+## 25. Committee Message Processing
+
+```bash
+# Verify committee vote/sig/epoch handlers compile and wire correctly
+cargo test -p seal-node -- --nocapture 2>&1 | grep -E "(committee|epoch|vote)"
+```
+
+The consensus runner now has `accept_committee_vote()`, `accept_committee_signature()`,
+and `accept_epoch_transition()` methods that deserialize and log P2P messages.
+
+---
+
+## 26. Lean 4 Merkle Delete Theorems
+
+```bash
+cd formal/lean && lake build 2>&1 | tail -20
+```
+
+New theorems in `SealVerify/Basic/MerkleTree.lean`:
+- `delete_lookup` — delete then lookup returns none
+- `delete_lookup_other` — delete preserves other keys
+- `delete_idempotent` — double delete = single delete
+- `delete_then_insert` — delete + insert = insert
+- `delete_changes_root` — (sorry, requires further proof work)
+
+---
+
+## 27. Bridge Threshold Signature Testing
+
+### Solana bridge (Anchor)
+
+```bash
+cd bridges/solana && anchor test 2>&1 | tail -20
+```
+
+The `verify_threshold_signature` now checks message binding via
+SHA3(recipient || amount || nonce || "seal-bridge-v1") in development mode.
+
+### Stellar bridge (Soroban)
+
+```bash
+cd bridges/stellar && cargo test 2>&1 | tail -20
+```
+
+Expected: 5 tests pass (init, lock, unlock, replay protection, double-init rejection).
+
+---
+
+## 28. Monitoring Endpoints
+
+### Health check
+
+```bash
+cargo run -p seal-node -- --slots 0 --rpc-port 8545 &
+curl -s http://localhost:8545/health | jq .
+```
+
+Expected: `{"status":"ok","height":N,"peers":0,"uptime_secs":N}`
+
+### Prometheus metrics
+
+```bash
+curl -s http://localhost:8545/metrics | head -20
+```
+
+Expected: Prometheus exposition format with `seal_blocks_produced`, `seal_peers_connected`,
+`seal_chain_height`, `seal_uptime_seconds`, etc.
+
+### Rich status
+
+```bash
+curl -s http://localhost:8545/status | jq .
+```
+
+Expected: JSON with version, chain_id, height, state_root, epoch, slot, peers, validators,
+leases_active, and full metrics breakdown.
+
+### Node info RPC
+
+```bash
+curl -s http://localhost:8545 -d '{"jsonrpc":"2.0","id":1,"method":"seal_getNodeInfo"}' | jq .
+```
+
+---
+
+## 29. Web Block Explorer
+
+```bash
+# Open directly in browser (connects to localhost:8545 by default)
+open apps/seal-explorer-web/index.html
+
+# Or with custom RPC URL
+open "apps/seal-explorer-web/index.html?rpc=http://node1.testnet.seal-dao.org:8545"
+```
+
+Features: auto-refresh (2s), block list with click-to-expand, namespace list, dark theme.
+No build step — pure HTML+JS.
+
+---
+
+## 30. Grafana + Prometheus Monitoring
+
+```bash
+# Start the monitoring stack
+cd monitoring && docker-compose -f docker-compose.monitoring.yml up -d
+
+# Grafana: http://localhost:3000 (admin/admin)
+# Prometheus: http://localhost:9090
+```
+
+Dashboard: "Seal Node Overview" — block production rate, tx throughput, SQL ops,
+peer count, fees, leases.
+
+---
+
+## 31. Storage Invoicing (#STORAGE-FORGET)
+
+### Write cost deduction
+
+SQL writes burn SEAL proportional to payload size (1 micro-SEAL per byte).
+Verify by checking balances before/after a write:
+
+```bash
+# Check balance
+curl -s localhost:8545 -d '{"jsonrpc":"2.0","id":1,"method":"seal_getBalance","params":{"address":"<sender>"}}' | jq .
+
+# Submit a write
+curl -s localhost:8545 -d '{"jsonrpc":"2.0","id":1,"method":"seal_submitSql","params":{"sql":"INSERT INTO t VALUES (1)"},...}' | jq .
+
+# Check balance again — should decrease
+```
+
+### Read stake-gate
+
+SELECT queries log a warning when the sender has zero SEAL balance.
+Check node logs for: `"Read without SEAL balance (stake-gate warning)"`
+
+### Storage leases
+
+Tables auto-register a lease on CREATE TABLE. Verify:
+
+```bash
+cargo test -p seal-token storage_lease -- --nocapture
+```
+
+Expected: 7 tests pass (creation, extension, expiry, grace period, governance hold, manager).
+
+---
+
+## 32. Real ZK Proving (RISC Zero)
+
+### Verify guest ELF is embedded
+
+```bash
+cargo test -p seal-zk --features risc0 test_risc0_real_stark_proof -- --nocapture
+```
+
+Expected: test passes, prints ELF size (~23KB) and ProgramBinary size.
+
+### Full STARK proof (deferred)
+
+Full end-to-end prove() requires rebuilding the guest with `risc0-zkvm` dep
+(blocked on serde + -Zbuild-std nightly compatibility). When available:
+
+```bash
+R0VM=~/.risc0/extensions/v5.0.0-rc.1-*/r0vm
+PATH=$R0VM:$PATH RISC0_DEV_MODE=1 cargo test -p seal-zk --features risc0
+```

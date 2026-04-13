@@ -195,7 +195,7 @@ dependencies = [
 
 [[package]]
 name = "slop-algebra"
-version = "6.0.2"
+version = "6.1.0"
 dependencies = [
  "itertools 0.14.0",
  "p3-field",

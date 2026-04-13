@@ -9,7 +9,7 @@ license.workspace = true
 [features]
 default = []
 # Enable RISC Zero backend
-risc0 = ["dep:risc0-zkvm"]
+risc0 = ["dep:risc0-zkvm", "dep:risc0-binfmt", "dep:risc0-zkos-v1compat"]
 # Enable SP1 backend
 sp1 = ["dep:sp1-sdk"]
 # GPU acceleration backends
@@ -26,6 +26,8 @@ thiserror = { workspace = true }
 
 # Optional ZK backends
 risc0-zkvm = { workspace = true, optional = true }
+risc0-binfmt = { version = "5.0.0-rc.1", optional = true }
+risc0-zkos-v1compat = { version = "5.0.0-rc.1", optional = true }
 sp1-sdk = { workspace = true, optional = true }
 
 [dev-dependencies]

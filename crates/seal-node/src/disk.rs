@@ -19,6 +19,19 @@ pub struct DiskStore {
     tables: sled::Tree,
     /// SQL schemas (table_name → serialized schema).
     schemas: sled::Tree,
+    /// Registered namespaces (namespace_name → serialized NamespaceInfo).
+    namespaces: sled::Tree,
+}
+
+/// Information about a registered namespace.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamespaceInfo {
+    pub name: String,
+    pub owner: String,
+    pub schema_hash: String,
+    pub visibility: String,
+    pub replication: u64,
+    pub registered_at: u64,
 }
 
 /// Chain metadata stored on disk.
@@ -37,6 +50,7 @@ impl DiskStore {
         let meta = db.open_tree("meta")?;
         let tables = db.open_tree("tables")?;
         let schemas = db.open_tree("schemas")?;
+        let namespaces = db.open_tree("namespaces")?;
 
         info!("Disk store opened at {}", path.display());
 
@@ -45,6 +59,7 @@ impl DiskStore {
             meta,
             tables,
             schemas,
+            namespaces,
         })
     }
 
@@ -135,12 +150,38 @@ impl DiskStore {
         self.blocks.len()
     }
 
+    /// Register a namespace.
+    pub fn put_namespace(&self, info: &NamespaceInfo) -> Result<(), Box<dyn std::error::Error>> {
+        let value = bincode::serialize(info)?;
+        self.namespaces.insert(info.name.as_bytes(), value)?;
+        Ok(())
+    }
+
+    /// Get a namespace by name.
+    pub fn get_namespace(&self, name: &str) -> Result<Option<NamespaceInfo>, Box<dyn std::error::Error>> {
+        match self.namespaces.get(name.as_bytes())? {
+            Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// List all registered namespaces.
+    pub fn list_namespaces(&self) -> Vec<NamespaceInfo> {
+        self.namespaces
+            .iter()
+            .values()
+            .filter_map(|v| v.ok())
+            .filter_map(|v| bincode::deserialize(&v).ok())
+            .collect()
+    }
+
     /// Flush all pending writes to disk.
     pub fn flush(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.blocks.flush()?;
         self.meta.flush()?;
         self.tables.flush()?;
         self.schemas.flush()?;
+        self.namespaces.flush()?;
         Ok(())
     }
 }
