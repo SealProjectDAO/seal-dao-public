@@ -25,6 +25,13 @@ async fn main() {
 
     let args: Vec<String> = std::env::args().collect();
     let no_network = args.iter().any(|a| a == "--no-network");
+    let dev_faucet = args.iter().any(|a| a == "--dev-faucet");
+    // Node defaults to testnet addresses (sealt1…) so the HRP matches
+    // what `cargo run -p seal-cli -- wallet` creates by default. Pass
+    // `--mainnet` for a `seal1…`-HRP node. Mixing the two across
+    // wallet and node makes authenticated transfers silently debit a
+    // ghost account.
+    let mainnet = args.iter().any(|a| a == "--mainnet");
     let slots = parse_arg(&args, "--slots").unwrap_or(10);
     let port = parse_arg::<u16>(&args, "--port").unwrap_or(4001);
     let rpc_port = parse_arg::<u16>(&args, "--rpc-port").unwrap_or(0);
@@ -38,7 +45,17 @@ async fn main() {
     if no_network {
         run_local().await;
     } else {
-        run_networked(slots, port, rpc_port, bootstrap_peers, serve_namespaces, data_dir).await;
+        run_networked(
+            slots,
+            port,
+            rpc_port,
+            bootstrap_peers,
+            serve_namespaces,
+            data_dir,
+            dev_faucet,
+            mainnet,
+        )
+        .await;
     }
 }
 
@@ -92,6 +109,8 @@ async fn run_networked(
     bootstrap_peers: Vec<Multiaddr>,
     serve_namespaces: HashSet<String>,
     data_dir: String,
+    dev_faucet: bool,
+    mainnet: bool,
 ) {
     let config = ConsensusConfig::default();
     let slot_duration = config.slot_duration;
@@ -147,9 +166,16 @@ async fn run_networked(
 
     // Start RPC server if enabled
     if rpc_port > 0 {
+        if dev_faucet {
+            println!(
+                "Dev faucet enabled: POST seal_faucet {{\"address\":\"seal1…\"}} — do NOT enable on mainnet."
+            );
+        }
         let rpc_node = Arc::clone(&node);
         let rpc_config = RpcConfig {
             served_namespaces: serve_namespaces,
+            dev_faucet,
+            testnet: !mainnet,
             ..RpcConfig::default()
         };
         tokio::spawn(async move {
@@ -157,34 +183,15 @@ async fn run_networked(
         });
     }
 
-    // Deploy schema
-    {
-        let mut n = node.lock().await;
-        if let Err(e) = n.submit_sql(
-            "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT NOT NULL, balance BIGINT)",
-        ) {
-            eprintln!("Failed to create table: {}", e);
-            return;
-        }
-        if let Err(e) =
-            n.submit_sql("INSERT INTO users (id, name, balance) VALUES (1, 'alice', 1000)")
-        {
-            eprintln!("Failed to insert user alice: {}", e);
-            return;
-        }
-        if let Err(e) =
-            n.submit_sql("INSERT INTO users (id, name, balance) VALUES (2, 'bob', 500)")
-        {
-            eprintln!("Failed to insert user bob: {}", e);
-            return;
-        }
-        println!("Deployed schema + inserted 2 users");
-    }
-
-    // Open disk store for persistence
-    let disk_store = match DiskStore::open(&PathBuf::from(&data_dir)) {
+    // Open disk store for persistence. If prior blocks exist we replay
+    // them FIRST and skip the demo seed — otherwise the seed's
+    // `CREATE TABLE users` collides with block 1's already-recorded
+    // schema, and the replay dies at block 1 with
+    // `SQL replay failed: table already exists: users`.
+    let (disk_store, had_prior_chain) = match DiskStore::open(&PathBuf::from(&data_dir)) {
         Ok(store) => {
             let stored_height = store.latest_height().unwrap_or(0);
+            let mut replayed_any = false;
             if stored_height > 0 {
                 println!("Found {} blocks on disk, replaying...", stored_height);
                 let mut n = node.lock().await;
@@ -211,17 +218,48 @@ async fn run_networked(
                     }
                 }
                 if replayed > 0 {
-                    println!("Replayed {} blocks, height={}, state={}", replayed, n.height(), n.state_root());
+                    println!(
+                        "Replayed {} blocks, height={}, state={}",
+                        replayed,
+                        n.height(),
+                        n.state_root()
+                    );
+                    replayed_any = true;
                 }
                 drop(n);
             }
-            Some(store)
+            (Some(store), replayed_any)
         }
         Err(e) => {
             eprintln!("Warning: disk persistence disabled ({})", e);
-            None
+            (None, false)
         }
     };
+
+    // Demo seed: only on a fresh chain. Block 1 records this tx; on
+    // subsequent runs the replay above reconstitutes the same state.
+    if !had_prior_chain {
+        let mut n = node.lock().await;
+        if let Err(e) = n.submit_sql(
+            "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT NOT NULL, balance BIGINT)",
+        ) {
+            eprintln!("Failed to create table: {}", e);
+            return;
+        }
+        if let Err(e) =
+            n.submit_sql("INSERT INTO users (id, name, balance) VALUES (1, 'alice', 1000)")
+        {
+            eprintln!("Failed to insert user alice: {}", e);
+            return;
+        }
+        if let Err(e) =
+            n.submit_sql("INSERT INTO users (id, name, balance) VALUES (2, 'bob', 500)")
+        {
+            eprintln!("Failed to insert user bob: {}", e);
+            return;
+        }
+        println!("Deployed schema + inserted 2 users");
+    }
 
     // Run consensus
     println!("\n--- Running consensus ---");

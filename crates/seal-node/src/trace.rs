@@ -31,7 +31,7 @@
 
 use seal_crypto::hash::Hash256;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 /// A single state transition event.
 #[derive(Clone, Debug, Serialize, Deserialize)]

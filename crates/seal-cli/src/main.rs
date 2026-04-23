@@ -28,6 +28,10 @@ fn main() {
         "migrate" => run_migrate(&args[2..]),
         "app" => run_app(&args[2..]),
         "sql" => run_sql(&args[2..]),
+        "transfer" => run_transfer(&args[2..]),
+        "faucet" => run_faucet(&args[2..]),
+        "balance" => run_balance(&args[2..]),
+        "rpc" => run_rpc(&args[2..]),
         "help" | "--help" | "-h" => print_usage(),
         _ => {
             eprintln!("Unknown command: {}", args[1]);
@@ -50,8 +54,17 @@ fn print_usage() {
     println!("  seal sql \"<query>\"                  Execute SQL on local node");
     println!("  seal sql \"<query>\" --node <url>     Execute SQL on remote node");
     println!("  seal sql \"INSERT..\" --node <url> --key key.json  Signed write");
+    println!("  seal transfer <to> <amount> --node <url> --key key.json  One-shot signed transfer");
+    println!("  seal faucet --node <url> [--key key.json | --address <addr>] [--amount <amt>]");
+    println!("                                      Drip SEAL from node's --dev-faucet to target");
+    println!("  seal balance --node <url> [--key key.json | --address <addr>]   Read SEAL balance");
+    println!("  seal rpc --method <M> --params <JSON> --node <url> [--key key.json]");
+    println!("                                      Generic JSON-RPC passthrough (signs if --key given)");
     println!("  seal migrate analyze <file.sql>    Convert pg_dump to Seal SQL");
     println!("  seal help                          Show this help");
+    println!();
+    println!("Amount syntax (transfer/faucet --amount): bare integer = base units (10⁻⁹ SEAL),");
+    println!("  decimal or trailing `SEAL` = SEAL. Examples: 50, 50.0, \"50 SEAL\", 1.5.");
 }
 
 fn run_keygen(args: &[String]) {
@@ -72,14 +85,16 @@ fn run_keygen(args: &[String]) {
 
 fn run_keygen_signing(output: &str) {
     let (sk, vk) = seal_crypto::signature::SigningKey::generate();
-    let address = {
-        let vk_bytes = vk.to_bytes();
-        let addr_hash = seal_crypto::hash::sha3_256(&vk_bytes);
-        format!("seal1{}", hex::encode(&addr_hash.0[..20]))
-    };
+    // Default to testnet so the derived address matches
+    // `cargo run -p seal-node -- --dev-faucet`'s default HRP
+    // (`sealt1…`). Pass `--mainnet` on either side to flip both.
+    let testnet = !std::env::args().any(|a| a == "--mainnet");
+    let address =
+        seal_crypto::address::SealAddress::from_verifying_key(&vk, testnet).to_string_encoding();
 
     let key_json = serde_json::json!({
         "type": "ml-dsa-65",
+        "network": if testnet { "testnet" } else { "mainnet" },
         "address": address,
         "signing_key": hex::encode(sk.to_bytes()),
         "verifying_key": hex::encode(vk.to_bytes()),
@@ -89,6 +104,7 @@ fn run_keygen_signing(output: &str) {
         Ok(()) => {
             println!("Generated ML-DSA-65 signing keypair");
             println!("  Address: {}", address);
+            println!("  Network: {}", if testnet { "testnet" } else { "mainnet" });
             println!("  Key file: {}", output);
         }
         Err(e) => eprintln!("Failed to write key file: {}", e),
@@ -758,4 +774,256 @@ fn run_demo() {
     }
 
     println!("\n=== Demo complete ===");
+}
+
+// ─── One-shot RPC subcommands (no TUI) ──────────────────────────────
+//
+// All three share a tiny flag parser. `--node` defaults to
+// http://localhost:8545. `transfer`/`faucet` accept the same amount
+// syntax as the TUI (see wallet::parse_amount).
+
+fn flag_value<'a>(args: &'a [String], name: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1))
+        .map(|s| s.as_str())
+}
+
+fn positional(args: &[String]) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a.starts_with("--") {
+            // Skip flag + its value (we never take boolean flags here).
+            i += 2;
+            continue;
+        }
+        out.push(a.as_str());
+        i += 1;
+    }
+    out
+}
+
+/// Read a key-file JSON and return the bech32m address inside.
+fn address_from_key_file(path: &str) -> Result<String, String> {
+    let s = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {path}: {e}"))?;
+    let v: serde_json::Value = serde_json::from_str(&s)
+        .map_err(|e| format!("invalid key file JSON: {e}"))?;
+    v.get("address")
+        .and_then(|a| a.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "key file missing 'address' field".into())
+}
+
+/// POST a JSON-RPC request and return the parsed response.
+fn rpc_post(url: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
+    use std::io::{Read, Write};
+    let host = url.trim_start_matches("http://");
+    let mut stream = std::net::TcpStream::connect(host)
+        .map_err(|e| format!("connect: {e}"))?;
+    let body_str = body.to_string();
+    let req = format!(
+        "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body_str.len(), body_str
+    );
+    stream.write_all(req.as_bytes()).map_err(|e| format!("send: {e}"))?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).map_err(|e| format!("read: {e}"))?;
+    let json_start = response
+        .find("\r\n\r\n")
+        .map(|p| p + 4)
+        .ok_or("bad HTTP response")?;
+    serde_json::from_str(&response[json_start..])
+        .map_err(|e| format!("parse: {e}"))
+}
+
+fn run_transfer(args: &[String]) {
+    let url = flag_value(args, "--node").unwrap_or("http://localhost:8545");
+    let key_file = match flag_value(args, "--key") {
+        Some(k) => k,
+        None => {
+            eprintln!("Usage: seal transfer <to> <amount> --node <url> --key key.json");
+            eprintln!("  --key is required so the transfer can be ML-DSA-signed.");
+            return;
+        }
+    };
+    let pos = positional(args);
+    if pos.len() < 2 {
+        eprintln!("Usage: seal transfer <to> <amount> --node <url> --key key.json");
+        return;
+    }
+    let to = pos[0];
+    // Allow `5 SEAL` across two tokens.
+    let amount_raw = pos[1..].join(" ");
+    let amount = match wallet::parse_amount(&amount_raw) {
+        Ok(a) => a,
+        Err(e) => { eprintln!("Invalid amount: {e}"); return; }
+    };
+
+    let params = serde_json::json!({ "to": to, "amount": amount });
+    let (sig, sender) = match sign_request("seal_transfer", &params, key_file) {
+        Ok(x) => x,
+        Err(e) => { eprintln!("Failed to sign: {e}"); return; }
+    };
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "seal_transfer",
+        "params": params,
+        "signature": sig,
+        "sender": sender,
+        "id": 1,
+    });
+    match rpc_post(url, &body) {
+        Ok(resp) => {
+            if let Some(err) = resp.get("error") {
+                eprintln!("RPC error: {}", err.get("message").and_then(|m| m.as_str()).unwrap_or("unknown"));
+            } else {
+                println!("Transferred {} to {}", wallet::format_seal(amount), to);
+                if let Some(status) = resp.get("result").and_then(|r| r.get("status")).and_then(|s| s.as_str()) {
+                    println!("Status: {status}");
+                }
+            }
+        }
+        Err(e) => eprintln!("Transfer failed: {e}"),
+    }
+}
+
+fn run_faucet(args: &[String]) {
+    let url = flag_value(args, "--node").unwrap_or("http://localhost:8545");
+    // Prefer an explicit --address; fall back to --key's embedded
+    // address so `seal keygen --output k.json && seal faucet --key k.json`
+    // is a two-step onboarding flow.
+    let address = match flag_value(args, "--address") {
+        Some(a) => a.to_string(),
+        None => match flag_value(args, "--key") {
+            Some(k) => match address_from_key_file(k) {
+                Ok(a) => a,
+                Err(e) => { eprintln!("{e}"); return; }
+            },
+            None => {
+                eprintln!("Usage: seal faucet --node <url> (--key key.json | --address <addr>) [--amount <amt>]");
+                return;
+            }
+        }
+    };
+
+    let mut params = serde_json::json!({ "address": address });
+    if let Some(a) = flag_value(args, "--amount") {
+        match wallet::parse_amount(a) {
+            Ok(n) => { params["amount"] = serde_json::json!(n); }
+            Err(e) => { eprintln!("Invalid --amount: {e}"); return; }
+        }
+    }
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "method": "seal_faucet", "params": params, "id": 1,
+    });
+    match rpc_post(url, &body) {
+        Ok(resp) => {
+            if let Some(err) = resp.get("error") {
+                eprintln!("RPC error: {}", err.get("message").and_then(|m| m.as_str()).unwrap_or("unknown"));
+                eprintln!("  (Did the node start with --dev-faucet?)");
+            } else if let Some(r) = resp.get("result") {
+                let amt = r.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
+                let bal = r.get("balance").and_then(|v| v.as_u64()).unwrap_or(0);
+                println!("Faucet dripped {} to {}", wallet::format_seal(amt), address);
+                println!("Balance now {}", wallet::format_seal(bal));
+            }
+        }
+        Err(e) => eprintln!("Faucet failed: {e}"),
+    }
+}
+
+fn run_balance(args: &[String]) {
+    let url = flag_value(args, "--node").unwrap_or("http://localhost:8545");
+    let address = match flag_value(args, "--address") {
+        Some(a) => a.to_string(),
+        None => match flag_value(args, "--key") {
+            Some(k) => match address_from_key_file(k) {
+                Ok(a) => a,
+                Err(e) => { eprintln!("{e}"); return; }
+            },
+            None => {
+                eprintln!("Usage: seal balance --node <url> (--key key.json | --address <addr>)");
+                return;
+            }
+        }
+    };
+    let body = serde_json::json!({
+        "jsonrpc": "2.0", "method": "seal_getBalance",
+        "params": { "address": &address }, "id": 1,
+    });
+    match rpc_post(url, &body) {
+        Ok(resp) => {
+            if let Some(err) = resp.get("error") {
+                eprintln!("RPC error: {}", err.get("message").and_then(|m| m.as_str()).unwrap_or("unknown"));
+            } else if let Some(r) = resp.get("result") {
+                let bal = r.get("balance").and_then(|v| v.as_u64()).unwrap_or(0);
+                let supply = r.get("total_supply").and_then(|v| v.as_u64()).unwrap_or(0);
+                println!("{}  balance: {}", address, wallet::format_seal(bal));
+                println!("Total supply:  {}", wallet::format_seal(supply));
+            }
+        }
+        Err(e) => eprintln!("Balance query failed: {e}"),
+    }
+}
+
+/// Generic signed-or-unsigned JSON-RPC passthrough. Lets any method
+/// in the node's dispatcher (bridge, governance, DEX, token-setup —
+/// anything without a typed wrapper yet) be driven from scripts
+/// without hand-rolling ML-DSA envelopes.
+///
+/// Usage:
+///   seal rpc --method seal_getBridgeStatus --params '{}' --node http://localhost:8545
+///   seal rpc --method seal_bridgeWithdraw  --params '{...}' --key treasury.json
+fn run_rpc(args: &[String]) {
+    let url = flag_value(args, "--node").unwrap_or("http://localhost:8545");
+    let method = match flag_value(args, "--method") {
+        Some(m) => m.to_string(),
+        None => {
+            eprintln!("Usage: seal rpc --method <name> --params <JSON> [--node <url>] [--key key.json]");
+            return;
+        }
+    };
+    let params_raw = flag_value(args, "--params").unwrap_or("{}");
+    let params: serde_json::Value = match serde_json::from_str(params_raw) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Invalid --params JSON: {e}");
+            return;
+        }
+    };
+
+    let mut body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params,
+        "id": 1,
+    });
+
+    if let Some(kf) = flag_value(args, "--key") {
+        match sign_request(&method, &params, kf) {
+            Ok((sig, sender)) => {
+                body["signature"] = serde_json::Value::String(sig);
+                body["sender"] = serde_json::Value::String(sender);
+            }
+            Err(e) => { eprintln!("Failed to sign: {e}"); return; }
+        }
+    }
+
+    match rpc_post(url, &body) {
+        Ok(resp) => {
+            if let Some(err) = resp.get("error") {
+                eprintln!("RPC error ({}): {}",
+                    err.get("code").and_then(|c| c.as_i64()).unwrap_or(0),
+                    err.get("message").and_then(|m| m.as_str()).unwrap_or("unknown"));
+            } else if let Some(r) = resp.get("result") {
+                println!("{}", serde_json::to_string_pretty(r).unwrap_or_default());
+            } else {
+                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+            }
+        }
+        Err(e) => eprintln!("RPC failed: {e}"),
+    }
 }

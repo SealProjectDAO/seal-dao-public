@@ -1,0 +1,266 @@
+DIGEST c2fa9a55b3c29d1de27e03ce74289cce
+FSealVerify.StateMachine
+R1211:1215 Stdlib.Arith.Arith <> <> lib
+R1245:1247 Stdlib.micromega.Lia <> <> lib
+R1277:1280 Stdlib.Lists.List <> <> lib
+R1290:1302 Stdlib.Lists.List ListNotations <> mod
+def 1426:1432 <> Address
+R1437:1439 Corelib.Init.Datatypes <> nat ind
+def 1613:1617 <> State
+R1629:1632 Corelib.Init.Logic <> ::type_scope:x_'->'_x not
+R1622:1628 SealVerify.StateMachine <> Address def
+R1633:1635 Corelib.Init.Datatypes <> nat ind
+def 1690:1700 <> empty_state
+R1704:1708 SealVerify.StateMachine <> State def
+def 1779:1792 <> update_balance
+R1799:1803 SealVerify.StateMachine <> State def
+binder 1795:1795 <> s:1
+R1814:1820 SealVerify.StateMachine <> Address def
+binder 1807:1810 <> addr:2
+R1830:1832 Corelib.Init.Datatypes <> nat ind
+binder 1824:1826 <> bal:3
+R1837:1841 SealVerify.StateMachine <> State def
+binder 1852:1852 <> a:4
+R1860:1866 Stdlib.Arith.PeanoNat Nat eqb def
+R1868:1868 SealVerify.StateMachine <> a:4 var
+R1870:1873 SealVerify.StateMachine <> addr:2 var
+R1889:1889 SealVerify.StateMachine <> s:1 var
+R1891:1891 SealVerify.StateMachine <> a:4 var
+R1880:1882 SealVerify.StateMachine <> bal:3 var
+ind 1933:1943 <> Transaction
+constr 1952:1959 <> Transfer
+constr 2032:2035 <> Mint
+constr 2106:2109 <> Burn
+R1970:1973 Corelib.Init.Logic <> ::type_scope:x_'->'_x not
+R1963:1969 SealVerify.StateMachine <> Address def
+R1981:1984 Corelib.Init.Logic <> ::type_scope:x_'->'_x not
+R1974:1980 SealVerify.StateMachine <> Address def
+R1988:1991 Corelib.Init.Logic <> ::type_scope:x_'->'_x not
+R1985:1987 Corelib.Init.Datatypes <> nat ind
+R1992:2002 SealVerify.StateMachine <> Transaction:5 ind
+R2046:2049 Corelib.Init.Logic <> ::type_scope:x_'->'_x not
+R2039:2045 SealVerify.StateMachine <> Address def
+R2053:2056 Corelib.Init.Logic <> ::type_scope:x_'->'_x not
+R2050:2052 Corelib.Init.Datatypes <> nat ind
+R2057:2067 SealVerify.StateMachine <> Transaction:5 ind
+R2120:2123 Corelib.Init.Logic <> ::type_scope:x_'->'_x not
+R2113:2119 SealVerify.StateMachine <> Address def
+R2127:2130 Corelib.Init.Logic <> ::type_scope:x_'->'_x not
+R2124:2126 Corelib.Init.Datatypes <> nat ind
+R2131:2141 SealVerify.StateMachine <> Transaction:5 ind
+scheme 1933:1943 <> Transaction_rect
+scheme 1933:1943 <> Transaction_ind
+scheme 1933:1943 <> Transaction_rec
+scheme 1933:1943 <> Transaction_sind
+def 2298:2309 <> total_supply
+R2316:2320 SealVerify.StateMachine <> State def
+binder 2312:2312 <> s:7
+R2332:2335 Corelib.Init.Datatypes <> list ind
+R2337:2343 SealVerify.StateMachine <> Address def
+binder 2324:2328 <> addrs:8
+R2348:2350 Corelib.Init.Datatypes <> nat ind
+R2363:2367 SealVerify.StateMachine <> addrs:8 var
+R2378:2379 Stdlib.Lists.List ListNotations ::list_scope:'['_']' not
+R2391:2394 Corelib.Init.Datatypes <> ::list_scope:x_'::'_x not
+R2406:2408 Corelib.Init.Peano <> ::nat_scope:x_'+'_x not
+R2403:2403 SealVerify.StateMachine <> s:7 var
+R2409:2420 SealVerify.StateMachine <> total_supply:9 def
+R2422:2422 SealVerify.StateMachine <> s:7 var
+def 2546:2553 <> apply_tx
+R2560:2564 SealVerify.StateMachine <> State def
+binder 2556:2556 <> s:11
+R2573:2583 SealVerify.StateMachine <> Transaction ind
+binder 2568:2569 <> tx:12
+R2588:2593 Corelib.Init.Datatypes <> option ind
+R2595:2599 SealVerify.StateMachine <> State def
+R2612:2613 SealVerify.StateMachine <> tx:12 var
+R2624:2631 SealVerify.StateMachine <> Transfer constr
+R2658:2664 Stdlib.Arith.PeanoNat Nat leb def
+R2674:2674 SealVerify.StateMachine <> s:11 var
+R2843:2846 Corelib.Init.Datatypes <> None constr
+R2719:2722 Corelib.Init.Datatypes <> Some constr
+R2725:2738 SealVerify.StateMachine <> update_balance def
+R2757:2770 SealVerify.StateMachine <> update_balance def
+R2772:2772 SealVerify.StateMachine <> s:11 var
+R2786:2788 Corelib.Init.Peano <> ::nat_scope:x_'-'_x not
+R2780:2780 SealVerify.StateMachine <> s:11 var
+R2822:2824 Corelib.Init.Peano <> ::nat_scope:x_'+'_x not
+R2818:2818 SealVerify.StateMachine <> s:11 var
+R2910:2913 SealVerify.StateMachine <> Mint constr
+R2932:2935 Corelib.Init.Datatypes <> Some constr
+R2938:2951 SealVerify.StateMachine <> update_balance def
+R2953:2953 SealVerify.StateMachine <> s:11 var
+R2963:2965 Corelib.Init.Peano <> ::nat_scope:x_'+'_x not
+R2959:2959 SealVerify.StateMachine <> s:11 var
+R2979:2982 SealVerify.StateMachine <> Burn constr
+R3006:3012 Stdlib.Arith.PeanoNat Nat leb def
+R3022:3022 SealVerify.StateMachine <> s:11 var
+R3095:3098 Corelib.Init.Datatypes <> None constr
+R3039:3042 Corelib.Init.Datatypes <> Some constr
+R3045:3058 SealVerify.StateMachine <> update_balance def
+R3060:3060 SealVerify.StateMachine <> s:11 var
+R3074:3076 Corelib.Init.Peano <> ::nat_scope:x_'-'_x not
+R3068:3068 SealVerify.StateMachine <> s:11 var
+prf 3427:3450 <> transition_deterministic
+binder 3461:3461 <> s:14
+binder 3463:3464 <> tx:15
+R3482:3484 Corelib.Init.Logic <> ::type_scope:x_'='_x not
+R3469:3476 SealVerify.StateMachine <> apply_tx def
+R3478:3478 SealVerify.StateMachine <> s:14 var
+R3480:3481 SealVerify.StateMachine <> tx:15 var
+R3485:3492 SealVerify.StateMachine <> apply_tx def
+R3494:3494 SealVerify.StateMachine <> s:14 var
+R3496:3497 SealVerify.StateMachine <> tx:15 var
+prf 3830:3852 <> transfer_conserves_pair
+binder 3863:3863 <> s:16
+binder 3865:3868 <> from:17
+binder 3870:3871 <> to:18
+binder 3873:3878 <> amount:19
+R3893:3898 Corelib.Init.Logic <> ::type_scope:x_'->'_x not
+R3887:3890 Corelib.Init.Logic <> ::type_scope:x_'<>'_x not
+R3883:3886 SealVerify.StateMachine <> from:17 var
+R3891:3892 SealVerify.StateMachine <> to:18 var
+R3915:3920 Corelib.Init.Logic <> ::type_scope:x_'->'_x not
+R3905:3908 Corelib.Init.Peano <> ::nat_scope:x_'<='_x not
+R3899:3904 SealVerify.StateMachine <> amount:19 var
+R3909:3909 SealVerify.StateMachine <> s:16 var
+R3911:3914 SealVerify.StateMachine <> from:17 var
+R3931:3944 SealVerify.StateMachine <> update_balance def
+R3961:3974 SealVerify.StateMachine <> update_balance def
+R3976:3976 SealVerify.StateMachine <> s:16 var
+R3978:3981 SealVerify.StateMachine <> from:17 var
+R3990:3992 Corelib.Init.Peano <> ::nat_scope:x_'-'_x not
+R3984:3984 SealVerify.StateMachine <> s:16 var
+R3986:3989 SealVerify.StateMachine <> from:17 var
+R3993:3998 SealVerify.StateMachine <> amount:19 var
+R4016:4017 SealVerify.StateMachine <> to:18 var
+R4024:4026 Corelib.Init.Peano <> ::nat_scope:x_'+'_x not
+R4020:4020 SealVerify.StateMachine <> s:16 var
+R4022:4023 SealVerify.StateMachine <> to:18 var
+R4027:4032 SealVerify.StateMachine <> amount:19 var
+binder 3925:3926 <> s':20
+R4055:4057 Corelib.Init.Logic <> ::type_scope:x_'='_x not
+R4047:4049 Corelib.Init.Peano <> ::nat_scope:x_'+'_x not
+R4040:4041 SealVerify.StateMachine <> s':20 var
+R4043:4046 SealVerify.StateMachine <> from:17 var
+R4050:4051 SealVerify.StateMachine <> s':20 var
+R4053:4054 SealVerify.StateMachine <> to:18 var
+R4064:4066 Corelib.Init.Peano <> ::nat_scope:x_'+'_x not
+R4058:4058 SealVerify.StateMachine <> s:16 var
+R4060:4063 SealVerify.StateMachine <> from:17 var
+R4067:4067 SealVerify.StateMachine <> s:16 var
+R4069:4070 SealVerify.StateMachine <> to:18 var
+R4127:4140 SealVerify.StateMachine <> update_balance def
+R4162:4168 Stdlib.Arith.PeanoNat Nat eqb def
+R4162:4168 Stdlib.Arith.PeanoNat Nat eqb def
+R4203:4209 Stdlib.Arith.PeanoNat Nat eqb def
+R4203:4209 Stdlib.Arith.PeanoNat Nat eqb def
+R4240:4249 Stdlib.Arith.PeanoNat Nat eqb_eq thm
+R4240:4249 Stdlib.Arith.PeanoNat Nat eqb_eq thm
+R4301:4307 Stdlib.Arith.PeanoNat Nat eqb def
+R4301:4307 Stdlib.Arith.PeanoNat Nat eqb def
+R4516:4522 Stdlib.Arith.PeanoNat Nat eqb def
+R4516:4522 Stdlib.Arith.PeanoNat Nat eqb def
+R4687:4696 Stdlib.Arith.PeanoNat Nat eqb_eq thm
+R4687:4696 Stdlib.Arith.PeanoNat Nat eqb_eq thm
+R4742:4753 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+R4742:4753 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+R4742:4753 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+R5072:5074 Corelib.Init.Logic <> ::type_scope:x_'='_x not
+R5063:5065 Corelib.Init.Peano <> ::nat_scope:x_'+'_x not
+R5054:5056 Corelib.Init.Peano <> ::nat_scope:x_'-'_x not
+R5072:5074 Corelib.Init.Logic <> ::type_scope:x_'='_x not
+R5063:5065 Corelib.Init.Peano <> ::nat_scope:x_'+'_x not
+R5054:5056 Corelib.Init.Peano <> ::nat_scope:x_'-'_x not
+R5103:5113 Stdlib.Arith.PeanoNat Nat sub_add thm
+R5103:5113 Stdlib.Arith.PeanoNat Nat sub_add thm
+R5222:5233 Stdlib.Arith.PeanoNat Nat add_comm thm
+R5222:5233 Stdlib.Arith.PeanoNat Nat add_comm thm
+R5222:5233 Stdlib.Arith.PeanoNat Nat add_comm thm
+R5258:5270 Stdlib.Arith.PeanoNat Nat add_assoc thm
+R5258:5270 Stdlib.Arith.PeanoNat Nat add_assoc thm
+R5258:5270 Stdlib.Arith.PeanoNat Nat add_assoc thm
+R5293:5304 Stdlib.Arith.PeanoNat Nat add_comm thm
+R5320:5322 Corelib.Init.Peano <> ::nat_scope:x_'-'_x not
+R5293:5304 Stdlib.Arith.PeanoNat Nat add_comm thm
+R5320:5322 Corelib.Init.Peano <> ::nat_scope:x_'-'_x not
+R5293:5304 Stdlib.Arith.PeanoNat Nat add_comm thm
+R5320:5322 Corelib.Init.Peano <> ::nat_scope:x_'-'_x not
+R5372:5383 Stdlib.Arith.PeanoNat Nat add_comm thm
+R5372:5383 Stdlib.Arith.PeanoNat Nat add_comm thm
+R5402:5413 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+R5402:5413 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+R5402:5413 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+R5448:5459 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+R5448:5459 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+R5448:5459 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+prf 5617:5642 <> invalid_transfer_no_change
+binder 5653:5653 <> s:21
+binder 5655:5658 <> from:22
+binder 5660:5661 <> to:23
+binder 5663:5668 <> amount:24
+R5688:5693 Corelib.Init.Logic <> ::type_scope:x_'->'_x not
+R5679:5681 Corelib.Init.Peano <> ::nat_scope:x_'>'_x not
+R5673:5678 SealVerify.StateMachine <> amount:24 var
+R5682:5682 SealVerify.StateMachine <> s:21 var
+R5684:5687 SealVerify.StateMachine <> from:22 var
+R5730:5732 Corelib.Init.Logic <> ::type_scope:x_'='_x not
+R5694:5701 SealVerify.StateMachine <> apply_tx def
+R5703:5703 SealVerify.StateMachine <> s:21 var
+R5706:5713 SealVerify.StateMachine <> Transfer constr
+R5715:5718 SealVerify.StateMachine <> from:22 var
+R5720:5721 SealVerify.StateMachine <> to:23 var
+R5723:5728 SealVerify.StateMachine <> amount:24 var
+R5733:5736 Corelib.Init.Datatypes <> None constr
+R5784:5791 SealVerify.StateMachine <> apply_tx def
+R5806:5812 Stdlib.Arith.PeanoNat Nat leb def
+R5806:5812 Stdlib.Arith.PeanoNat Nat leb def
+R5848:5857 Stdlib.Arith.PeanoNat Nat leb_le thm
+R5848:5857 Stdlib.Arith.PeanoNat Nat leb_le thm
+prf 5933:5953 <> mint_increases_supply
+binder 5964:5964 <> s:25
+binder 5966:5969 <> addr:26
+binder 5971:5976 <> amount:27
+R6025:6027 Corelib.Init.Logic <> ::type_scope:x_'='_x not
+R5981:5994 SealVerify.StateMachine <> update_balance def
+R5996:5996 SealVerify.StateMachine <> s:25 var
+R5998:6001 SealVerify.StateMachine <> addr:26 var
+R6010:6012 Corelib.Init.Peano <> ::nat_scope:x_'+'_x not
+R6004:6004 SealVerify.StateMachine <> s:25 var
+R6006:6009 SealVerify.StateMachine <> addr:26 var
+R6013:6018 SealVerify.StateMachine <> amount:27 var
+R6021:6024 SealVerify.StateMachine <> addr:26 var
+R6034:6036 Corelib.Init.Peano <> ::nat_scope:x_'+'_x not
+R6028:6028 SealVerify.StateMachine <> s:25 var
+R6030:6033 SealVerify.StateMachine <> addr:26 var
+R6037:6042 SealVerify.StateMachine <> amount:27 var
+R6069:6082 SealVerify.StateMachine <> update_balance def
+R6095:6106 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+R6095:6106 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+R6095:6106 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+prf 6168:6188 <> burn_decreases_supply
+binder 6199:6199 <> s:28
+binder 6201:6204 <> addr:29
+binder 6206:6211 <> amount:30
+R6232:6237 Corelib.Init.Logic <> ::type_scope:x_'->'_x not
+R6222:6225 Corelib.Init.Peano <> ::nat_scope:x_'<='_x not
+R6216:6221 SealVerify.StateMachine <> amount:30 var
+R6226:6226 SealVerify.StateMachine <> s:28 var
+R6228:6231 SealVerify.StateMachine <> addr:29 var
+R6282:6284 Corelib.Init.Logic <> ::type_scope:x_'='_x not
+R6238:6251 SealVerify.StateMachine <> update_balance def
+R6253:6253 SealVerify.StateMachine <> s:28 var
+R6255:6258 SealVerify.StateMachine <> addr:29 var
+R6267:6269 Corelib.Init.Peano <> ::nat_scope:x_'-'_x not
+R6261:6261 SealVerify.StateMachine <> s:28 var
+R6263:6266 SealVerify.StateMachine <> addr:29 var
+R6270:6275 SealVerify.StateMachine <> amount:30 var
+R6278:6281 SealVerify.StateMachine <> addr:29 var
+R6291:6293 Corelib.Init.Peano <> ::nat_scope:x_'-'_x not
+R6285:6285 SealVerify.StateMachine <> s:28 var
+R6287:6290 SealVerify.StateMachine <> addr:29 var
+R6294:6299 SealVerify.StateMachine <> amount:30 var
+R6326:6339 SealVerify.StateMachine <> update_balance def
+R6352:6363 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+R6352:6363 Stdlib.Arith.PeanoNat Nat eqb_refl thm
+R6352:6363 Stdlib.Arith.PeanoNat Nat eqb_refl thm

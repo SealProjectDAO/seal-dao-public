@@ -17,6 +17,22 @@ use seal_token::params::{self, genesis as token_genesis};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Derive a stable seal-style address string for a validator from its
+/// ML-DSA public key. Keeps it short + hex-encoded so it matches the
+/// placeholder addresses seen elsewhere in the codebase. Replace with
+/// the canonical bech32m address once that layer lands.
+fn validator_address(public_key: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let prefix = &public_key[..public_key.len().min(8)];
+    let mut s = String::with_capacity(4 + prefix.len() * 2);
+    s.push_str("val_");
+    for &b in prefix {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
+}
+
 /// Initial token allocation for an address.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GenesisAllocation {
@@ -190,6 +206,42 @@ impl GenesisConfig {
             consensus: GenesisConsensusParams::default(),
             initial_supply: params::INITIAL_SUPPLY,
         }
+    }
+
+    /// Mint each genesis allocation + validator initial stake into the
+    /// supplied `BalanceStore`. Idempotent-ish: callers must pass a
+    /// fresh store (mints increase `total_supply`; calling twice on
+    /// the same store doubles the supply).
+    ///
+    /// Returns the total amount credited (sum of allocation amounts +
+    /// validator stakes). Errors propagate from
+    /// `BalanceStore::mint` on overflow — unreachable for any
+    /// realistic supply / stake combination but surfaced anyway so
+    /// silent corruption is impossible.
+    ///
+    /// Validator stake lands under the address derived from the
+    /// validator's ML-DSA public key — specifically,
+    /// `"val_" + hex(pk[..4])` for testnet pragmatism. Mainnet should
+    /// switch to the canonical bech32m address format once that lands
+    /// on ValidatorInfo.
+    pub fn apply_balances(
+        &self,
+        store: &mut seal_token::balance::BalanceStore,
+    ) -> Result<u64, seal_token::TokenError> {
+        let mut credited: u64 = 0;
+        for alloc in &self.allocations {
+            store.mint(&alloc.address, alloc.amount)?;
+            credited = credited.saturating_add(alloc.amount);
+        }
+        for v in &self.validators {
+            if v.stake == 0 {
+                continue;
+            }
+            let addr = validator_address(&v.public_key);
+            store.mint(&addr, v.stake)?;
+            credited = credited.saturating_add(v.stake);
+        }
+        Ok(credited)
     }
 
     /// Verify that genesis allocations exactly match the defined token economics.
@@ -650,5 +702,47 @@ mod tests {
         }];
         let config = GenesisConfig::mainnet(validators, 1700000000);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_apply_balances_credits_all_allocations() {
+        let config = GenesisConfig::testnet(3, 10_000_000_000);
+        let mut store = seal_token::balance::BalanceStore::new();
+        let credited = config.apply_balances(&mut store).unwrap();
+
+        // Every allocation landed in the store.
+        for alloc in &config.allocations {
+            assert_eq!(store.available(&alloc.address), alloc.amount, "{}", alloc.address);
+        }
+        // Every validator's stake landed too (under the val_<hex> address).
+        for v in &config.validators {
+            let addr = validator_address(&v.public_key);
+            assert_eq!(store.available(&addr), v.stake);
+        }
+        // Total credited = total_supply on a fresh store.
+        assert_eq!(credited, store.total_supply());
+    }
+
+    #[test]
+    fn test_apply_balances_mainnet_matches_initial_supply() {
+        let validators = vec![GenesisValidator {
+            public_key: vec![0xaau8; 32],
+            vrf_public_key: vec![0xbbu8; 32],
+            stake: 0, // mainnet genesis allocations cover validator funding
+            name: "v1".into(),
+        }];
+        let config = GenesisConfig::mainnet(validators, 1700000000);
+        let mut store = seal_token::balance::BalanceStore::new();
+        let credited = config.apply_balances(&mut store).unwrap();
+        // With zero validator stakes, credited == initial_supply exactly.
+        assert_eq!(credited, config.initial_supply);
+        assert_eq!(store.total_supply(), config.initial_supply);
+    }
+
+    #[test]
+    fn test_validator_address_hex_format() {
+        let addr = validator_address(&[0xde, 0xad, 0xbe, 0xef, 0x01, 0x02, 0x03, 0x04, 0x05]);
+        // Takes first 8 bytes, lowercase hex, prefixed "val_".
+        assert_eq!(addr, "val_deadbeef01020304");
     }
 }

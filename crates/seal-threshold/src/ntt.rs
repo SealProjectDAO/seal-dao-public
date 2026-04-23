@@ -20,10 +20,23 @@
 //! - Modular arithmetic safety (no overflow in u128 intermediates)
 
 use crate::ringtail::{RingOps, RING_N, RING_Q};
+use subtle::{ConditionallySelectable, ConstantTimeGreater};
 
 // ============================================================================
 // Modular arithmetic helpers (shared by all implementations)
 // ============================================================================
+
+/// Centered reduction: treat `c ∈ [0, q)` as a signed integer in
+/// `(-q/2, q/2]` and return its absolute value — without branching on
+/// `c`. Used by `norm_l2` so we don't leak the sign of each coefficient
+/// through timing. The return value is the magnitude; squaring it is
+/// still variable-time but operates on data already published.
+#[inline]
+fn centered_abs_ct(c: u64, q: u64) -> u64 {
+    let flipped = q.wrapping_sub(c);
+    let choice = c.ct_gt(&(q / 2));
+    u64::conditional_select(&c, &flipped, choice)
+}
 
 /// Modular addition: (a + b) mod q
 #[inline]
@@ -603,14 +616,13 @@ impl RingOps for HandRolledOps {
     }
 
     fn norm_l2(&self, p: &Self::Poly) -> u64 {
+        // Centered-reduction distance in a branchless fashion so the
+        // sign of each coefficient doesn't influence instruction count.
+        // The final `sqrt` on a public u128 is allowed to branch.
         let mut sum: u128 = 0;
         for &c in p {
-            let signed = if c > RING_Q / 2 {
-                (RING_Q - c) as i128
-            } else {
-                c as i128
-            };
-            sum += (signed * signed) as u128;
+            let abs = centered_abs_ct(c, RING_Q) as u128;
+            sum += abs * abs;
         }
         (sum as f64).sqrt() as u64
     }
@@ -644,6 +656,11 @@ impl RingOps for HandRolledOps {
 
     fn zero(&self) -> Self::Poly {
         vec![0u64; RING_N]
+    }
+
+    fn zeroize_poly(&self, p: &mut Self::Poly) {
+        use zeroize::Zeroize;
+        p.zeroize();
     }
 }
 
@@ -698,14 +715,13 @@ impl RingOps for LattigoPortOps {
     }
 
     fn norm_l2(&self, p: &Self::Poly) -> u64 {
+        // Centered-reduction distance in a branchless fashion so the
+        // sign of each coefficient doesn't influence instruction count.
+        // The final `sqrt` on a public u128 is allowed to branch.
         let mut sum: u128 = 0;
         for &c in p {
-            let signed = if c > RING_Q / 2 {
-                (RING_Q - c) as i128
-            } else {
-                c as i128
-            };
-            sum += (signed * signed) as u128;
+            let abs = centered_abs_ct(c, RING_Q) as u128;
+            sum += abs * abs;
         }
         (sum as f64).sqrt() as u64
     }
@@ -739,6 +755,14 @@ impl RingOps for LattigoPortOps {
 
     fn zero(&self) -> Self::Poly {
         vec![0u64; RING_N]
+    }
+
+    fn zeroize_poly(&self, p: &mut Self::Poly) {
+        use zeroize::Zeroize;
+        // Zeroize on the backing u64 buffer survives dead-store
+        // elimination and is more faithful to the "scrub secret
+        // material" intent than `*p = vec![0; N]`.
+        p.zeroize();
     }
 }
 

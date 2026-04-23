@@ -1,0 +1,13 @@
+[package]
+name = "seal-auction"
+version = "0.1.0"
+edition = "2021"
+description = "sealed-bid auction on Seal DAO — commit/reveal demo with PQC commitments"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+seal-crypto = { path = "../../crates/seal-crypto" }
+seal-sql = { path = "../../crates/seal-sql" }
+hex = { workspace = true }

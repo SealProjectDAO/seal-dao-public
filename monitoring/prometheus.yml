@@ -1,0 +1,19 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: 'seal-node'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['host.docker.internal:8545']
+        labels:
+          instance: 'local-node'
+
+  # Add more nodes for testnet:
+  # - job_name: 'seal-testnet'
+  #   static_configs:
+  #     - targets:
+  #       - 'node1.testnet.seal-dao.org:8545'
+  #       - 'node2.testnet.seal-dao.org:8545'
+  #       - 'node3.testnet.seal-dao.org:8545'

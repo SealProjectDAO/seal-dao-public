@@ -42,9 +42,9 @@ cd apps/seal-wallet
 npm install
 
 # Start the Electron app
-npm start
+npm run electron
 
-# Or run standalone in a browser
+# Or open standalone.html directly in a browser (file:// load works too)
 open standalone.html
 ```
 

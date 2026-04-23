@@ -9,6 +9,7 @@ license.workspace = true
 [dependencies]
 seal-crypto = { path = "../seal-crypto" }
 seal-merkle = { path = "../seal-merkle" }
+seal-procs = { path = "../seal-procs" }
 sqlparser = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

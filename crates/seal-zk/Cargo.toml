@@ -8,14 +8,28 @@ license.workspace = true
 
 [features]
 default = []
-# Enable RISC Zero backend
+# Enable RISC Zero backend (executor only — fast).
 risc0 = ["dep:risc0-zkvm", "dep:risc0-binfmt", "dep:risc0-zkos-v1compat"]
+# Opt-in full in-process STARK proving via risc0-zkvm's LocalProver.
+# Implies `risc0`. Adds the `prove` feature to risc0-zkvm (heavy deps:
+# rayon, gdbstub, etc.) and uses RUST_MIN_STACK=16MB in release.
+local-prover = ["risc0", "risc0-zkvm/prove"]
 # Enable SP1 backend
 sp1 = ["dep:sp1-sdk"]
-# GPU acceleration backends
-gpu-cuda = []    # NVIDIA CUDA (sm_70+)
+# GPU acceleration backends.
+#
+# `gpu-cuda` and `gpu-metal` also activate the corresponding risc0-zkvm
+# feature so its STARK prover actually dispatches to the GPU HAL. Build
+# host requirements:
+#   - gpu-cuda:  CUDA toolkit + NVIDIA driver (Linux/Windows).
+#   - gpu-metal: full Xcode with the Metal Toolchain component
+#                (`xcodebuild -downloadComponent MetalToolchain`),
+#                and DEVELOPER_DIR pointing at Xcode.app.
+gpu-cuda = []    # NVIDIA CUDA — activation: `risc0-zkvm/cuda` must be
+                 # enabled at the top-level cargo command (adds cust dep).
+gpu-metal = ["local-prover"]  # Apple Metal — activation: pass
+                              # `--features risc0-zkvm/metal` too.
 gpu-rocm = []    # AMD ROCm / HIP (gfx900+)
-gpu-metal = []   # Apple Metal (macOS)
 gpu-opencl = []  # OpenCL (cross-vendor: NVIDIA, AMD, Intel)
 
 [dependencies]

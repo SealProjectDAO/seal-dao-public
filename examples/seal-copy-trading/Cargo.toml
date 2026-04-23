@@ -1,0 +1,14 @@
+[package]
+name = "seal-copy-trading"
+version = "0.1.0"
+edition = "2021"
+description = "copy-trading.seal — followers auto-mirror a leader's DEX trades, capped per-follower"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+seal-crypto = { path = "../../crates/seal-crypto" }
+seal-sql = { path = "../../crates/seal-sql" }
+seal-token = { path = "../../crates/seal-token" }
+serde = { workspace = true }

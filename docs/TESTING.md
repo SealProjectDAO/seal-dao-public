@@ -441,10 +441,13 @@ mv .cargo/config.toml.bak .cargo/config.toml
 cargo audit
 ```
 
-### Lean 4 (0 sorries)
+### Lean 4 (7 `sorry`s pending, see TODOS.md)
 ```bash
 cd formal/lean && lake build
 ```
+
+Builds cleanly on Lean 4.8.0 but the MerkleTree helper/delete lemmas
+are still `sorry` pending Mathlib list-lemma imports.
 
 ---
 

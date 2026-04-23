@@ -1,0 +1,14 @@
+[package]
+name = "seal-kindle"
+version = "0.1.0"
+edition = "2021"
+description = "kindle.seal — encrypted-chapter ebook publishing with per-reader ML-KEM unwrap"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+seal-crypto = { path = "../../crates/seal-crypto" }
+seal-sql = { path = "../../crates/seal-sql" }
+serde = { workspace = true }
+hex = { workspace = true }

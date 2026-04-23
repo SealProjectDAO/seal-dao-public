@@ -204,6 +204,10 @@ echo ""
 # Action: 8/9 are unmaintained with no CVEs. The lru soundness bug is in
 # sp1-prover internals; we don't call IterMut on any LRU cache directly.
 # Re-evaluate when sp1-sdk or sled publish new releases.
+#
+# Ignored advisories (see .cargo/audit.toml for justifications):
+#   - RUSTSEC-2023-0071  rsa 0.9.10            Marvin Attack, no fix (rzup)
+#   - RUSTSEC-2025-0055  tracing-subscriber    0.2.25 ANSI (ark-relations 0.5)
 echo "── Step 7: cargo-audit ──"
 if cargo audit --version > /dev/null 2>&1; then
     if cargo audit 2>&1 | tail -5; then

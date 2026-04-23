@@ -52,6 +52,13 @@ pub enum TxType {
     TokenCreate,
     TokenMint,
     TokenTransfer,
+    /// Per-block DEX matching event. Payload is a bincode-serialized
+    /// list of `(maker_order_id, taker_order_id, market, price, qty,
+    /// timestamp)` tuples produced by `DexManager::match_all`. Emitting
+    /// this as a transaction (rather than out-of-band metadata) is
+    /// what brings DEX trades into the state root + the block-level
+    /// ZK proof of execution.
+    DexMatch,
 }
 
 /// Persistent block storage using sled.

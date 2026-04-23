@@ -1,0 +1,30 @@
+[package]
+name = "seal-procs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Stored procedures for Seal DAO — SQL (default) + WASM (opt-in). See ADR-001."
+
+# Notes:
+#   - Pure-Rust crate, no I/O. Used by `seal-sql::Engine` to dispatch
+#     `CREATE FUNCTION ... LANGUAGE sql|wasm` and `CALL` invocations.
+#   - The WASM engine is currently a stub (NotImplemented). The
+#     stored-body wire format is final: switching to wasmtime/wasmer
+#     later is internal to `WasmProcEngine`.
+#   - Determinism is the calling contract's problem until the WASM
+#     engine lands. SQL bodies inherit the SQL engine's determinism.
+
+[features]
+default = ["wasm-validate"]
+# Validate stored WASM bytecode at registration time using `wasmparser`.
+# Cheap (single pass over the module bytes); catches malformed modules
+# before they end up on chain. Not a full runtime — that needs wasmtime,
+# which isn't vendored in this workspace yet (tracked separately).
+wasm-validate = ["dep:wasmparser", "dep:hex"]
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }
+sha3 = { workspace = true }
+wasmparser = { version = "0.244", optional = true, default-features = false, features = ["std", "validate", "features", "hash-collections"] }
+hex = { workspace = true, optional = true }

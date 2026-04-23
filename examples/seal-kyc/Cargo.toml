@@ -1,0 +1,14 @@
+[package]
+name = "seal-kyc"
+version = "0.1.0"
+edition = "2021"
+description = "kyc.seal — ML-DSA-signed KYC attestations consumable by other apps via HAS_KYC predicate"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+seal-crypto = { path = "../../crates/seal-crypto" }
+seal-sql = { path = "../../crates/seal-sql" }
+serde = { workspace = true }
+hex = { workspace = true }

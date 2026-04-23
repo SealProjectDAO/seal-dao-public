@@ -20,7 +20,8 @@ pub fn run_wallet() {
             Ok(l) => l,
             Err(_) => break,
         };
-        let parts: Vec<&str> = line.trim().split_whitespace().collect();
+        let parts_owned = tokenize_line(line.trim());
+        let parts: Vec<&str> = parts_owned.iter().map(|s| s.as_str()).collect();
         if parts.is_empty() {
             print_prompt(&wallet);
             continue;
@@ -71,6 +72,18 @@ pub fn run_wallet() {
                 }
             }
             "balance" | "bal" => show_balance(&wallet),
+            "faucet" => {
+                if parts.len() < 2 {
+                    faucet_drip(&wallet, None);
+                } else {
+                    // Join `parts[1..]` so `faucet 500 SEAL` and `faucet 1.5`
+                    // both survive the whitespace tokenizer.
+                    match parse_amount(&parts[1..].join(" ")) {
+                        Ok(a) => faucet_drip(&wallet, Some(a)),
+                        Err(e) => eprintln!("Invalid amount: {e}"),
+                    }
+                }
+            }
             "height" => show_height(&wallet),
             "send" => {
                 if parts.len() < 2 {
@@ -90,7 +103,8 @@ pub fn run_wallet() {
                 if parts.len() < 3 {
                     eprintln!("Usage: transfer <to_address> <amount>");
                 } else {
-                    transfer_seal(&wallet, parts[1], parts[2]);
+                    // Join `parts[2..]` so `transfer <addr> 5 SEAL` parses.
+                    transfer_seal(&wallet, parts[1], &parts[2..].join(" "));
                 }
             }
             "create-token" => {
@@ -105,7 +119,9 @@ pub fn run_wallet() {
                 if parts.len() < 4 {
                     eprintln!("Usage: mint-token <SYMBOL> <to_address> <amount>");
                 } else {
-                    mint_token(&wallet, parts[1], parts[2], parts[3]);
+                    // Join `parts[3..]` so `mint-token GOLD <addr> 1.5` and
+                    // `mint-token GOLD <addr> 5 SEAL` both work.
+                    mint_token(&wallet, parts[1], parts[2], &parts[3..].join(" "));
                 }
             }
             "tokens" => list_tokens(&wallet),
@@ -204,12 +220,15 @@ fn print_help() {
     println!("Node:");
     println!("  connect <url>              Connect to a Seal node RPC");
     println!("  balance                    Show balance on connected node");
+    println!("  faucet [amount]            Dev-faucet drip to self (same amount syntax as transfer;");
+    println!("                             requires --dev-faucet on node)");
     println!("  height                     Show chain height");
     println!("  query <SQL>                Execute read-only SQL on node");
     println!("  send <SQL>                 Send signed SQL transaction");
-    println!("  transfer <to> <amount>     Transfer SEAL tokens");
+    println!("  transfer <to> <amount>     Transfer SEAL. Amount: `50` = 50 base units,");
+    println!("                             `50.0` or `50 SEAL` = 50 SEAL (50×10⁹ base units)");
     println!("  create-token <SYM> <name>  Create custom token");
-    println!("  mint-token <SYM> <to> <n>  Mint custom tokens");
+    println!("  mint-token <SYM> <to> <n>  Mint custom tokens (same amount syntax as transfer)");
     println!("  tokens                     List all tokens");
     println!("  create-pair <BASE> <QUOTE> Create DEX trading pair");
     println!("  place-order <PAIR> <side> <price> <qty>");
@@ -411,8 +430,8 @@ fn show_balance(wallet: &Option<WalletState>) {
         Ok(resp) => {
             let bal = resp.get("balance").and_then(|b| b.as_u64()).unwrap_or(0);
             let supply = resp.get("total_supply").and_then(|s| s.as_u64()).unwrap_or(0);
-            println!("SEAL balance: {} ({:.4} SEAL)", bal, bal as f64 / 1_000_000_000.0);
-            println!("Total supply: {}", supply);
+            println!("SEAL balance: {}", format_seal(bal));
+            println!("Total supply: {}", format_seal(supply));
         }
         Err(e) => eprintln!("Balance query failed: {}", e),
     }
@@ -436,6 +455,26 @@ fn show_balance(wallet: &Option<WalletState>) {
             }
         }
         Err(_) => {}
+    }
+}
+
+fn faucet_drip(wallet: &Option<WalletState>, amount: Option<u64>) {
+    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
+    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
+    let mut params = serde_json::json!({ "address": w.address });
+    if let Some(a) = amount {
+        params["amount"] = serde_json::json!(a);
+    }
+    match rpc_call(url, "seal_faucet", &params) {
+        Ok(resp) => {
+            let amt = resp.get("amount").and_then(|v| v.as_u64()).unwrap_or(0);
+            let bal = resp.get("balance").and_then(|v| v.as_u64()).unwrap_or(0);
+            println!("Faucet dripped {}", format_seal(amt));
+            println!("Balance now {}", format_seal(bal));
+        }
+        Err(e) => eprintln!(
+            "Faucet failed: {e}\n  (Did the node start with --dev-faucet?)"
+        ),
     }
 }
 
@@ -493,16 +532,143 @@ fn send_tx(wallet: &Option<WalletState>, sql: &str) {
     }
 }
 
+/// Split a REPL line into arguments, honoring `"…"` and `'…'` quoting
+/// so `create-token GOLD "Gold Coin" 1000000` yields exactly three
+/// args (the quotes are stripped, the space between "Gold" and "Coin"
+/// is preserved, and the trailing `1000000` lands at index 3). Supports
+/// backslash-escaping inside double quotes (`\"`, `\\`). Unbalanced
+/// quotes are accepted — the trailing unclosed segment becomes its own
+/// arg — so the REPL never eats a partial line.
+fn tokenize_line(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_arg = false;
+    let mut quote: Option<char> = None;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (Some('"'), '\\') => {
+                if let Some(&n) = chars.peek() {
+                    if n == '"' || n == '\\' {
+                        cur.push(n);
+                        chars.next();
+                        continue;
+                    }
+                }
+                cur.push('\\');
+            }
+            (Some(q), ch) if ch == q => {
+                quote = None;
+                // quote-end does not itself terminate the arg; the
+                // next whitespace/quote decides.
+            }
+            (None, '"') | (None, '\'') => {
+                quote = Some(c);
+                in_arg = true;
+            }
+            (None, ch) if ch.is_whitespace() => {
+                if in_arg {
+                    out.push(std::mem::take(&mut cur));
+                    in_arg = false;
+                }
+            }
+            (_, ch) => {
+                cur.push(ch);
+                in_arg = true;
+            }
+        }
+    }
+    if in_arg {
+        out.push(cur);
+    }
+    out
+}
+
+/// Parse an amount that may be expressed as:
+///   - a bare integer      → base units (legacy, 1 = 10⁻⁹ SEAL)
+///   - a decimal           → SEAL (`1.5` = 1 500 000 000 base units)
+///   - trailing `SEAL`     → force SEAL interpretation (`50 SEAL`, `1.5SEAL`)
+/// Returns the amount in base units (9-decimal precision).
+pub fn parse_amount(raw: &str) -> Result<u64, String> {
+    const DECIMALS: u32 = 9;
+    let trimmed = raw.trim();
+    let (num_part, had_suffix) = match trimmed.to_ascii_uppercase().strip_suffix("SEAL") {
+        Some(rest) => (rest.trim().to_string(), true),
+        None => (trimmed.to_string(), false),
+    };
+    if num_part.is_empty() {
+        return Err("empty amount".into());
+    }
+
+    // Decide whether to interpret as SEAL or raw base units:
+    // explicit suffix OR presence of a decimal point → SEAL.
+    let is_seal = had_suffix || num_part.contains('.');
+
+    if !is_seal {
+        return num_part
+            .parse::<u64>()
+            .map_err(|_| format!("invalid integer amount: {raw}"));
+    }
+
+    // SEAL-denominated: allow at most DECIMALS fractional digits.
+    let (int_str, frac_str) = match num_part.split_once('.') {
+        Some((i, f)) => (i, f),
+        None => (num_part.as_str(), ""),
+    };
+    if int_str.is_empty() && frac_str.is_empty() {
+        return Err("empty amount".into());
+    }
+    if frac_str.len() > DECIMALS as usize {
+        return Err(format!(
+            "too many fractional digits ({} > {DECIMALS})",
+            frac_str.len()
+        ));
+    }
+    let int_val: u64 = if int_str.is_empty() {
+        0
+    } else {
+        int_str
+            .parse()
+            .map_err(|_| format!("invalid integer part: {int_str}"))?
+    };
+    let frac_val: u64 = if frac_str.is_empty() {
+        0
+    } else {
+        let padded = format!("{:0<width$}", frac_str, width = DECIMALS as usize);
+        padded
+            .parse()
+            .map_err(|_| format!("invalid fractional part: {frac_str}"))?
+    };
+    let scale = 10u64.pow(DECIMALS);
+    int_val
+        .checked_mul(scale)
+        .and_then(|v| v.checked_add(frac_val))
+        .ok_or_else(|| format!("amount overflows u64: {raw}"))
+}
+
+/// Render a base-units amount as a SEAL-denominated string
+/// (e.g. `25 000 000 000` → `25 SEAL (25000000000 base units)`).
+pub fn format_seal(base_units: u64) -> String {
+    let whole = base_units / 1_000_000_000;
+    let frac = base_units % 1_000_000_000;
+    if frac == 0 {
+        format!("{whole} SEAL ({base_units} base units)")
+    } else {
+        let frac_str = format!("{frac:09}").trim_end_matches('0').to_string();
+        format!("{whole}.{frac_str} SEAL ({base_units} base units)")
+    }
+}
+
 fn transfer_seal(wallet: &Option<WalletState>, to: &str, amount_str: &str) {
     let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
     let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
-    let amount: u64 = match amount_str.parse() {
+    let amount: u64 = match parse_amount(amount_str) {
         Ok(a) => a,
-        Err(_) => { eprintln!("Invalid amount"); return; }
+        Err(e) => { eprintln!("Invalid amount: {e}"); return; }
     };
     match signed_rpc_call(url, "seal_transfer", &serde_json::json!({"to": to, "amount": amount}), &w.wallet) {
         Ok(resp) => {
-            println!("Transferred {} SEAL to {}", amount, to);
+            println!("Transferred {} to {}", format_seal(amount), to);
             if let Some(status) = resp.get("status").and_then(|s| s.as_str()) {
                 println!("Status: {}", status);
             }
@@ -530,9 +696,11 @@ fn create_token(wallet: &Option<WalletState>, symbol: &str, name: &str, max_supp
 fn mint_token(wallet: &Option<WalletState>, symbol: &str, to: &str, amount_str: &str) {
     let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
     let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
-    let amount: u64 = match amount_str.parse() {
+    // Custom tokens use the same 9-decimal convention as SEAL (see
+    // create_token `"decimals": 9`), so `parse_amount` applies.
+    let amount: u64 = match parse_amount(amount_str) {
         Ok(a) => a,
-        Err(_) => { eprintln!("Invalid amount"); return; }
+        Err(e) => { eprintln!("Invalid amount: {e}"); return; }
     };
     match signed_rpc_call(url, "seal_mintToken", &serde_json::json!({"symbol": symbol, "to": to, "amount": amount}), &w.wallet) {
         Ok(_) => println!("Minted {} {} to {}", amount, symbol, to),
@@ -768,4 +936,82 @@ fn rpc_call_raw(url: &str, body: &serde_json::Value) -> Result<serde_json::Value
     stream.read_to_string(&mut response).map_err(|e| format!("read: {}", e))?;
     let json_start = response.find("\r\n\r\n").map(|p| p + 4).ok_or("bad response")?;
     serde_json::from_str(&response[json_start..]).map_err(|e| format!("parse: {}", e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_seal, parse_amount, tokenize_line};
+
+    #[test]
+    fn tokenize_plain_words() {
+        assert_eq!(tokenize_line("create-token GOLD Gold 1000000"),
+                   vec!["create-token", "GOLD", "Gold", "1000000"]);
+    }
+
+    #[test]
+    fn tokenize_double_quoted() {
+        // The original bug: `"Gold Coin"` was split into two args and the
+        // trailing number was shoved down an index.
+        assert_eq!(tokenize_line("create-token GOLD \"Gold Coin\" 1000000"),
+                   vec!["create-token", "GOLD", "Gold Coin", "1000000"]);
+    }
+
+    #[test]
+    fn tokenize_single_quoted() {
+        assert_eq!(tokenize_line("mint GOLD 'with spaces' 5"),
+                   vec!["mint", "GOLD", "with spaces", "5"]);
+    }
+
+    #[test]
+    fn tokenize_escaped_quote() {
+        assert_eq!(tokenize_line(r#"sign "hello \"world\"""#),
+                   vec!["sign", r#"hello "world""#]);
+    }
+
+    #[test]
+    fn tokenize_empty_and_whitespace() {
+        assert_eq!(tokenize_line(""), Vec::<String>::new());
+        assert_eq!(tokenize_line("   \t "), Vec::<String>::new());
+    }
+
+    #[test]
+    fn bare_integer_is_base_units() {
+        assert_eq!(parse_amount("50").unwrap(), 50);
+        assert_eq!(parse_amount("0").unwrap(), 0);
+        assert_eq!(parse_amount("25000000000").unwrap(), 25_000_000_000);
+    }
+
+    #[test]
+    fn decimal_is_seal_denominated() {
+        assert_eq!(parse_amount("1.0").unwrap(), 1_000_000_000);
+        assert_eq!(parse_amount("50.0").unwrap(), 50_000_000_000);
+        assert_eq!(parse_amount("0.5").unwrap(), 500_000_000);
+        assert_eq!(parse_amount("1.234567891").unwrap(), 1_234_567_891);
+        assert_eq!(parse_amount(".5").unwrap(), 500_000_000);
+    }
+
+    #[test]
+    fn seal_suffix_forces_seal() {
+        assert_eq!(parse_amount("50 SEAL").unwrap(), 50_000_000_000);
+        assert_eq!(parse_amount("50SEAL").unwrap(), 50_000_000_000);
+        assert_eq!(parse_amount("50 seal").unwrap(), 50_000_000_000);
+        assert_eq!(parse_amount("1.5 SEAL").unwrap(), 1_500_000_000);
+    }
+
+    #[test]
+    fn rejects_bad_inputs() {
+        assert!(parse_amount("").is_err());
+        assert!(parse_amount("abc").is_err());
+        assert!(parse_amount("1.2345678901").is_err()); // >9 frac digits
+        assert!(parse_amount("-1").is_err());
+    }
+
+    #[test]
+    fn format_seal_round_trip() {
+        assert_eq!(format_seal(25_000_000_000), "25 SEAL (25000000000 base units)");
+        assert_eq!(format_seal(500_000_000), "0.5 SEAL (500000000 base units)");
+        assert_eq!(format_seal(1_234_567_891), "1.234567891 SEAL (1234567891 base units)");
+        assert_eq!(format_seal(50), "0.00000005 SEAL (50 base units)");
+        assert_eq!(format_seal(0), "0 SEAL (0 base units)");
+    }
 }

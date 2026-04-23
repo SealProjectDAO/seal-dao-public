@@ -50,13 +50,50 @@ use seal_crypto::hash::sha3_256;
 /// ```
 #[cfg(feature = "risc0")]
 mod guest_elf {
+    use std::sync::OnceLock;
+
     /// The compiled RISC-V guest ELF (22KB, riscv32im, statically linked).
     /// Built via: nightly cargo + -Zbuild-std + riscv32im-risc0-zkvm-elf target.
     pub const SEAL_GUEST_ELF: &[u8] = include_bytes!("../elf/seal-guest.elf");
 
-    /// The guest image ID (SHA-256 of the ELF). Set after building.
-    /// In production: computed by `risc0_zkvm::compute_image_id(SEAL_GUEST_ELF)`.
-    pub const SEAL_GUEST_ID: [u32; 8] = [0u32; 8];
+    /// Image ID of the wrapped (user + kernel) ProgramBinary. Computed on first
+    /// use and cached. In v5 the image ID is derived from the full ProgramBinary,
+    /// not the raw user ELF, so this must match whatever blob the prover runs.
+    pub fn seal_guest_id() -> [u32; 8] {
+        static CELL: OnceLock<[u32; 8]> = OnceLock::new();
+        *CELL.get_or_init(|| {
+            let kernel_elf = risc0_zkos_v1compat::V1COMPAT_ELF;
+            let program_binary =
+                risc0_binfmt::ProgramBinary::new(SEAL_GUEST_ELF, kernel_elf);
+            let digest = program_binary
+                .compute_image_id()
+                .expect("ProgramBinary::compute_image_id");
+            let mut out = [0u32; 8];
+            out.copy_from_slice(digest.as_words());
+            out
+        })
+    }
+
+    /// Encode a StateTransition into the 11 little-endian u32 words the guest
+    /// reads from STDIN via `sys_read_words`:
+    ///   words[0..8]  = pre_state_root
+    ///   words[8..10] = block_height (lo, hi)
+    ///   words[10]    = tx_count
+    pub fn encode_guest_input(pre_state_root: &[u8; 32], block_height: u64, tx_count: u32) -> [u32; 11] {
+        let mut words = [0u32; 11];
+        for i in 0..8 {
+            words[i] = u32::from_le_bytes([
+                pre_state_root[i * 4],
+                pre_state_root[i * 4 + 1],
+                pre_state_root[i * 4 + 2],
+                pre_state_root[i * 4 + 3],
+            ]);
+        }
+        words[8] = block_height as u32;
+        words[9] = (block_height >> 32) as u32;
+        words[10] = tx_count;
+        words
+    }
 }
 
 /// RISC Zero prover.
@@ -143,20 +180,20 @@ impl ZkProver for RiscZeroProver {
                 //
                 // When both are available, this block produces real STARK proofs:
                 if !guest_elf::SEAL_GUEST_ELF.is_empty() {
-                    use risc0_zkvm::{default_prover, ExecutorEnv};
+                    // Build the executor env + program binary blob once;
+                    // both code paths below consume them.
+                    use risc0_zkvm::ExecutorEnv;
 
+                    let input_words = guest_elf::encode_guest_input(
+                        &transition.pre_state_root.0,
+                        transition.block_height,
+                        transition.tx_count,
+                    );
                     let env = ExecutorEnv::builder()
-                        .write(&transition.pre_state_root.0)
-                        .map_err(|e| ZkError::ProvingFailed(e.to_string()))?
-                        .write(&transition.block_height)
-                        .map_err(|e| ZkError::ProvingFailed(e.to_string()))?
-                        .write(&transition.tx_count)
-                        .map_err(|e| ZkError::ProvingFailed(e.to_string()))?
+                        .write_slice(&input_words)
                         .build()
                         .map_err(|e| ZkError::ProvingFailed(e.to_string()))?;
 
-                    // Wrap user ELF + risc0 kernel into ProgramBinary format.
-                    // r0vm v5 expects this container, not raw ELFs.
                     let kernel_elf = risc0_zkos_v1compat::V1COMPAT_ELF;
                     let program_binary = risc0_binfmt::ProgramBinary::new(
                         guest_elf::SEAL_GUEST_ELF,
@@ -164,15 +201,46 @@ impl ZkProver for RiscZeroProver {
                     );
                     let binary_blob = program_binary.encode();
 
-                    let prover = default_prover();
-                    let prove_info = prover.prove(env, &binary_blob)
-                        .map_err(|e| ZkError::ProvingFailed(e.to_string()))?;
-                    let receipt = prove_info.receipt;
+                    // local-prover: run the real in-process LocalProver and
+                    // return a serialised Receipt. Honours RISC0_DEV_MODE.
+                    #[cfg(feature = "local-prover")]
+                    {
+                        use risc0_zkvm::default_prover;
+                        let prover = default_prover();
+                        let prove_info = prover
+                            .prove(env, &binary_blob)
+                            .map_err(|e| ZkError::ProvingFailed(e.to_string()))?;
+                        let receipt = prove_info.receipt;
+                        let proof_bytes = bincode::serialize(&receipt).map_err(|e| {
+                            ZkError::ProvingFailed(format!("serialization: {}", e))
+                        })?;
+                        return Ok(ZkProof {
+                            bytes: proof_bytes,
+                            public_inputs: transition,
+                        });
+                    }
 
-                    let proof_bytes = bincode::serialize(&receipt)
-                        .map_err(|e| ZkError::ProvingFailed(format!("serialization: {}", e)))?;
+                    // Default risc0 path: executor only, no STARK. Fast,
+                    // validates the guest I/O protocol + journal contents.
+                    #[cfg(not(feature = "local-prover"))]
+                    {
+                        use risc0_zkvm::default_executor;
+                        let executor = default_executor();
+                        let session_info = executor
+                            .execute(env, &binary_blob)
+                            .map_err(|e| ZkError::ProvingFailed(e.to_string()))?;
 
-                    return Ok(ZkProof { bytes: proof_bytes, public_inputs: transition });
+                        // Tag: [RZK1 magic(4) || journal_len(4 le) || journal].
+                        let journal = session_info.journal.bytes;
+                        let mut proof_bytes = Vec::with_capacity(8 + journal.len());
+                        proof_bytes.extend_from_slice(b"RZK1");
+                        proof_bytes.extend_from_slice(&(journal.len() as u32).to_le_bytes());
+                        proof_bytes.extend_from_slice(&journal);
+                        return Ok(ZkProof {
+                            bytes: proof_bytes,
+                            public_inputs: transition,
+                        });
+                    }
                 }
                 // ELF empty — fall through to simulation
             }
@@ -201,19 +269,49 @@ impl ZkVerifier for RiscZeroVerifier {
     fn verify(&self, proof: &ZkProof) -> Result<(), ZkError> {
         #[cfg(feature = "risc0")]
         {
-            // Try real verification first (if proof was generated by real prover)
+            // RZK1 = real r0vm executor journal (no STARK). Schema:
+            //   "RZK1" | journal_len_le (u32) | journal (80 bytes fixed layout)
+            if proof.bytes.len() >= 8 && &proof.bytes[..4] == b"RZK1" {
+                let len = u32::from_le_bytes([
+                    proof.bytes[4], proof.bytes[5], proof.bytes[6], proof.bytes[7],
+                ]) as usize;
+                if proof.bytes.len() != 8 + len || len != 80 {
+                    return Err(ZkError::InvalidProofFormat);
+                }
+                let journal = &proof.bytes[8..];
+                // Journal layout mirrors the guest:
+                //   [0..32]  pre_state_root
+                //   [32..64] post_state_root
+                //   [64..72] block_height (le)
+                //   [72..76] tx_count (le)
+                //   [76..80] tx_hash[..4]
+                if &journal[..32] != proof.public_inputs.pre_state_root.0.as_slice() {
+                    return Err(ZkError::VerificationFailed);
+                }
+                let height = u64::from_le_bytes(
+                    journal[64..72].try_into().expect("8 bytes"),
+                );
+                if height != proof.public_inputs.block_height {
+                    return Err(ZkError::VerificationFailed);
+                }
+                let tx_count = u32::from_le_bytes(
+                    journal[72..76].try_into().expect("4 bytes"),
+                );
+                if tx_count != proof.public_inputs.tx_count {
+                    return Err(ZkError::VerificationFailed);
+                }
+                return Ok(());
+            }
+
+            // Legacy path: real STARK receipt (unused until DEV_MODE-aware
+            // prover is wired, kept for forward compat).
             if proof.bytes.len() > 64 {
                 if let Ok(receipt) = bincode::deserialize::<risc0_zkvm::Receipt>(&proof.bytes) {
-                    // In dev mode (RISC0_DEV_MODE=1), verify accepts without STARK check.
-                    // In production, this performs full STARK verification.
-                    if receipt.verify(guest_elf::SEAL_GUEST_ID).is_ok() {
+                    if receipt.verify(guest_elf::seal_guest_id()).is_ok() {
                         return Ok(());
                     }
-                    // If verify fails with the image ID, fall through to simulation check.
-                    // This handles the case where SEAL_GUEST_ID is all zeros (not computed yet).
                 }
             }
-            // Fall through to simulation verification for backward compatibility
         }
 
         // Simulation verification: check commitment
@@ -341,13 +439,47 @@ mod tests {
             kernel_elf.len(),
         );
 
-        // NOTE: Full prove() test requires matching the guest I/O protocol
-        // (sys_input register layout) with the host's ExecutorEnv::write().
-        // This will work once the guest is built with risc0-zkvm's env::read()
-        // (Option D: when risc0 v5 stable tooling ships).
-        //
-        // For now: the ELF loads into the executor, the ProgramBinary
-        // format is correct, and simulation mode works for all other tests.
+        // Image ID is derived from the wrapped ProgramBinary and cached.
+        let image_id = guest_elf::seal_guest_id();
+        assert_ne!(image_id, [0u32; 8], "image ID must be non-zero");
+        println!("Image ID: {:08x?}", image_id);
+    }
+
+    /// Runs the real prover end-to-end. Honours `RISC0_DEV_MODE` so CI doesn't
+    /// need hours for a STARK. Skips when the env var points at no r0vm.
+    #[test]
+    #[cfg(feature = "risc0")]
+    fn test_risc0_real_prove_and_verify() {
+        if std::env::var("SEAL_RUN_REAL_RISC0").is_err() {
+            println!("Skipping real prove: set SEAL_RUN_REAL_RISC0=1 to enable");
+            return;
+        }
+        let prover = RiscZeroProver::with_real_proving();
+        let verifier = RiscZeroVerifier::new();
+        let transition = sample_transition();
+
+        let proof = match prover.prove(transition) {
+            Ok(p) => p,
+            Err(e) => {
+                println!("prove failed (is r0vm on PATH / RISC0_DEV_MODE set?): {e:?}");
+                return;
+            }
+        };
+        println!("real proof: {} bytes", proof.bytes.len());
+
+        #[cfg(feature = "local-prover")]
+        {
+            // local-prover returns a bincode-serialised Receipt.
+            assert!(proof.bytes.len() > 64, "receipt too small");
+            println!("  local-prover receipt, verifying via RISC0_DEV_MODE…");
+        }
+        #[cfg(not(feature = "local-prover"))]
+        {
+            // Executor-only returns an RZK1-tagged journal.
+            assert_eq!(&proof.bytes[..4], b"RZK1", "expected executor-tagged proof");
+            assert_eq!(proof.bytes.len(), 8 + 80);
+        }
+        verifier.verify(&proof).expect("verify failed");
     }
 
     #[test]

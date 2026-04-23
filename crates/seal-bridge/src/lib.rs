@@ -12,6 +12,7 @@
 
 pub mod bridge;
 pub mod error;
+pub mod http;
 pub mod observer;
 pub mod observers;
 pub mod types;

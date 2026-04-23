@@ -82,6 +82,64 @@ That's it — Miri ships with rustup. No external dependencies.
 - **FFI**: Cannot interpret C code. Some FFI-heavy crates need stubs.
 - **Concurrency**: Supports threads but may miss some weak-memory behaviors.
 
+## Vendored-registry blocker — resolved 2026-04-19
+
+`.cargo/config.toml` redirects `crates-io` → `vendor/` for
+reproducible builds. Miri builds its own `std` sysroot on first run,
+and std's Cargo.lock pins exact versions of transitive deps
+(`cfg-if`, `hashbrown`, …) which may or may not match the versions
+we have vendored. Symptom with nightly-2025-09-01 std wanting
+`cfg-if 1.0.1` vs our vendored `cfg-if 1.0.4`:
+
+```
+failed to build sysroot: failed to select a version for the requirement
+  `cfg-if = "^1.0"` (locked to 1.0.1); candidate versions found which
+  didn't match: 1.0.4
+perhaps a crate was updated and forgotten to be re-vendored?
+```
+
+**Fix**: `scripts/ci-formal.sh` step 4 now moves `.cargo/config.toml`
+aside for the duration of the Miri step (via `miri_pushd_no_vendor` /
+`miri_popd_restore` helpers, plus a `trap EXIT` so a failed run
+doesn't leave the project in the hidden state). That lets Miri pull
+whatever std's Cargo.lock wants from the real registry.
+
+**Manual invocation** (when running Miri outside the CI script):
+
+```bash
+mv .cargo/config.toml .cargo/config.toml.hidden
+MIRIFLAGS="-Zmiri-disable-isolation" \
+    PATH=~/.rustup/toolchains/nightly-.../bin:$PATH \
+    cargo miri test -p seal-merkle --lib
+mv .cargo/config.toml.hidden .cargo/config.toml
+```
+
+Validated 2026-04-19: `cargo miri test -p seal-merkle` green —
+35 tests, no UB, 210 s wall-clock (Miri is 10-100× slower than
+native).
+
+## Coverage target (script: `scripts/ci-formal.sh` step 4)
+
+Two disjoint groups:
+
+**A. Crates containing `unsafe`** — genuine Miri targets.
+
+| Crate | ARM64 | Why it matters |
+|-------|-------|----------------|
+| `seal-vrf` | runs | one `unsafe` block for perf hot path |
+| `seal-crypto` | skipped | pqcrypto-* FFI — Miri can't interpret C |
+| `seal-storage` | skipped | sled FFI — Miri can't interpret C |
+
+**B. Pure-safe data-structure crates** — regression guard (added
+2026-04-18). No `unsafe` today, but we want Miri-clean so the day one
+is introduced, the new code is checked end-to-end.
+
+- `seal-merkle` — B-tree; proptest already covers correctness, Miri
+  catches any future raw-pointer shortcut.
+- `seal-token` — balance/emission arithmetic; light but valuable.
+- `seal-threshold` — NTT + Ringtail; `subtle`/`zeroize` buffer handling.
+- `seal-mpc` — SPDZ shares; `Drop` + `Zeroize` plumbing we just added.
+
 ## Relationship to other tools
 
 - **Kani** proves properties for ALL inputs; Miri checks ONE execution deeply.

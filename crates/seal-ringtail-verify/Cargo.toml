@@ -1,0 +1,33 @@
+[package]
+name = "seal-ringtail-verify"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "no_std-compatible Ringtail signature verifier for Solana BPF and Soroban"
+
+# Notes:
+#   - no_std + alloc only. Must build for the Solana sbf-solana-solana target.
+#   - Byte-identical results to seal-threshold's verify_signature_full for
+#     any signature/public-params pair. Cross-checked in the test suite.
+#   - No rand / no time / no I/O in the verify path. Deterministic.
+
+[features]
+default = []
+# Enable the std-backed cross-check tests against seal-threshold. Cannot be
+# used from a BPF build — seal-threshold pulls in std + rand + subtle +
+# zeroize. This is strictly for host-side verification during development.
+std-crosscheck = ["seal-threshold"]
+
+[dependencies]
+# SHA3-256 for challenge recomputation. Direct dep (not workspace) so we
+# can pin `default-features = false` without forcing std-disabled sha3 on
+# other workspace consumers. On BPF the sha3 crate falls back to software
+# SHA3 — there is no Solana sol_sha3 syscall; only sol_sha256 and
+# sol_keccak256 exist.
+sha3 = { version = "0.10", default-features = false }
+
+# Optional — only for cross-check tests against the full-fat signer.
+seal-threshold = { path = "../seal-threshold", optional = true }
+
+[dev-dependencies]
+seal-threshold = { path = "../seal-threshold" }

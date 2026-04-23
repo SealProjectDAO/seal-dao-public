@@ -31,4 +31,11 @@ pub mod psi;
 pub mod spdz;
 
 pub use psi::{PsiInitiator, PsiResponder, PsiResult};
-pub use spdz::{SpdzParty, SpdzShare, SpdzTriple};
+pub use spdz::{SpdzError, SpdzParty, SpdzShare, SpdzTriple};
+
+/// Errors from the MPC layer.
+#[derive(Debug, thiserror::Error)]
+pub enum MpcError {
+    #[error("SPDZ: {0}")]
+    Spdz(#[from] SpdzError),
+}

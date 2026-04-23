@@ -10,10 +10,12 @@ description = "RISC Zero guest program for Seal DAO state transition proofs"
 default = []
 
 [dependencies]
-# risc0-zkvm-platform provides: allocator, panic handler, syscall wrappers.
-# NO serde dependency — works with -Zbuild-std on nightly.
-# risc0-zkvm-platform provides: panic handler, entry point, syscalls, bump allocator.
-# Avoid heap-embedded-alloc (nightly API breakage with embedded-alloc crate).
+# risc0-zkvm-platform is the bare syscall/entry layer.
+# NOTE: a valid journal commitment at sys_halt requires the Output-digest
+# machinery in risc0-zkvm's full guest env, which currently can't be pulled
+# into a pure -Zbuild-std build without the cargo-risczero v5 shim.
+# Until that ships, the guest produces a stub out_state and real proving
+# requires either docker or cargo-risczero v5.
 risc0-zkvm-platform = { version = "5.0.0-rc.1", default-features = false, features = [
     "panic-handler",
     "entrypoint",

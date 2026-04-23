@@ -232,6 +232,7 @@ footer {
     <a href="#validators">Validators</a>
     <a href="#governance">Governance</a>
     <a href="#docs">Docs</a>
+    <a href="#blog">Blog</a>
     <a href="#community">Community</a>
   </div>
 </div>
@@ -245,9 +246,12 @@ footer {
   <div style="margin-bottom:24px">
     <img src="assets/seal-logo.png" alt="Seal DAO" width="120" height="120" style="image-rendering:high-quality">
   </div>
-  <div style="margin-bottom:24px"><span class="badge badge-testnet">Pre-mainnet &mdash; private testnet 'deployed' [WORK IN PROGRESS] </span></div>
+  <div style="margin-bottom:24px"><span class="badge badge-testnet">WORK IN PROGRESS &mdash; pre-mainnet, private testnet only</span></div>
   <h1>SQL on a <span>post-quantum</span> blockchain</h1>
   <p>The web3 backend for SQL-based applications. 99% of websites that matter run on SQL. Seal gives them decentralization, privacy, and post-quantum security &mdash; without changing how they work.</p>
+  <p style="margin-top:16px;color:var(--text-muted);font-size:14px;max-width:640px;margin-left:auto;margin-right:auto">
+    <strong>Status:</strong> Seal DAO is a research and engineering project under active development. No token has been issued. No rewards, grants, airdrops, or bounties are being paid or promised. Any economic parameters described on this site are design sketches, not commitments. Everything is subject to change.
+  </p>
   <div class="hero-code">
     <pre><span style="color:var(--text-muted)"># Deploy your app</span>
 seal app deploy --name myapp.seal --schema schema.sql
@@ -353,11 +357,11 @@ CREATE TABLE users (
   <h2>Network status</h2>
   <div class="features" style="grid-template-columns:repeat(4,1fr)">
     <div class="card" style="text-align:center">
-      <div style="font-family:'JetBrains Mono';font-size:32px;font-weight:700;color:var(--accent-blue)">804</div>
+      <div style="font-family:'JetBrains Mono';font-size:32px;font-weight:700;color:var(--accent-blue)">887</div>
       <p>Tests passing</p>
     </div>
     <div class="card" style="text-align:center">
-      <div style="font-family:'JetBrains Mono';font-size:32px;font-weight:700;color:var(--accent-green)">16</div>
+      <div style="font-family:'JetBrains Mono';font-size:32px;font-weight:700;color:var(--accent-green)">66</div>
       <p>Kani proofs</p>
     </div>
     <div class="card" style="text-align:center">
@@ -365,8 +369,8 @@ CREATE TABLE users (
       <p>Fuzz targets</p>
     </div>
     <div class="card" style="text-align:center">
-      <div style="font-family:'JetBrains Mono';font-size:32px;font-weight:700;color:var(--text-primary)">0</div>
-      <p>CVEs <span class="badge badge-live">audited</span></p>
+      <div style="font-family:'JetBrains Mono';font-size:32px;font-weight:700;color:var(--text-primary)">19</div>
+      <p>Crates</p>
     </div>
   </div>
 </section>
@@ -383,7 +387,7 @@ CREATE TABLE users (
   <div class="steps">
     <div class="step"><div><h4>Build from source</h4>
       <pre>git clone https://github.com/SealProjectDAO/seal-dao-public.git
-cd seal-dao-master
+cd seal-dao-public
 cargo build --release -p seal-node -p seal-cli</pre>
     </div></div>
     <div class="step"><div><h4>Start a node</h4>
@@ -468,7 +472,7 @@ Views</pre>
     <tr><td>RAM</td><td>16 GB</td><td>32 GB</td></tr>
     <tr><td>Storage</td><td>500 GB NVMe</td><td>1 TB NVMe</td></tr>
     <tr><td>Network</td><td>100 Mbps</td><td>1 Gbps</td></tr>
-    <tr><td>Stake</td><td>1,000 SEAL</td><td>10,000+ SEAL</td></tr>
+    <tr><td>Stake</td><td colspan="2">TBD &mdash; no token is issued and no stake is currently required</td></tr>
   </table>
 </section>
 
@@ -483,19 +487,22 @@ cargo build --release -p seal-node
 </section>
 
 <section>
-  <h2>Economics</h2>
+  <h2>Economics (design sketch &mdash; not implemented)</h2>
+  <p style="color:var(--text-muted);margin-bottom:16px;font-size:14px">
+    The parameters below are provisional design notes. No token has been issued, no rewards are paid, no slashing is active, and nothing here constitutes a commitment or an offer.
+  </p>
   <div class="features" style="grid-template-columns:repeat(3,1fr)">
     <div class="card">
-      <h3>Block Rewards</h3>
-      <p>Emission: 10% year 1, declining to 2% floor. Split between block proposer and committee.</p>
+      <h3>Block Rewards (design)</h3>
+      <p>Target emission curve under study. Exact numbers, recipients, and mechanism are not finalized and may never be deployed as described.</p>
     </div>
     <div class="card">
-      <h3>Fee Revenue</h3>
-      <p>Dynamic fees (planned). 50% burned, 50% to proposer. High usage = deflationary.</p>
+      <h3>Fee Revenue (design)</h3>
+      <p>Dynamic-fee model under study. No fees are collected today and none are being distributed.</p>
     </div>
     <div class="card">
-      <h3>Slashing</h3>
-      <p>Double-propose or double-vote (planned) = stake slashed. 21-epoch unbonding period.</p>
+      <h3>Slashing (design)</h3>
+      <p>Slashing and unbonding mechanics are specified but not yet active in any production setting.</p>
     </div>
   </div>
 </section>
@@ -508,31 +515,35 @@ cargo build --release -p seal-node
 <div class="container">
 
 <section>
-  <h2>Three-Body Governance</h2>
+  <h2>Three-Body Governance (design sketch &mdash; not active)</h2>
+  <p style="color:var(--text-muted);margin-bottom:16px;font-size:14px">
+    The governance structure below is a specification. No token has been issued, no treasury exists, and no grant or treasury-spend process is live or planned to go live on any particular date.
+  </p>
   <div class="features" style="grid-template-columns:repeat(3,1fr)">
     <div class="card">
-      <h3>Token House</h3>
-      <p>SEAL token holders. Vote on proposals with conviction voting (7 tiers). Delegation with 4% per-delegate cap.</p>
+      <h3>Token House (future)</h3>
+      <p>In the designed model, SEAL token holders would vote on proposals with conviction voting and delegation caps. No token is issued today.</p>
     </div>
     <div class="card">
       <h3>Technical Council</h3>
-      <p>7-11 members. Whitelist emergency proposals, veto dangerous changes. Term-limited.</p>
+      <p>7-11 members. Whitelist emergency proposals, veto dangerous changes. Term-limited. Not yet seated.</p>
     </div>
     <div class="card">
       <h3>Service Operators</h3>
-      <p>Active validators. Advisory endorsement on operational proposals. SLA-based veto power.</p>
+      <p>Active validators. Advisory endorsement on operational proposals. SLA-based veto power. No live network yet.</p>
     </div>
   </div>
 </section>
 
 <section>
-  <h2>Proposal Tracks</h2>
+  <h2>Proposal Tracks (design sketch)</h2>
+  <p style="color:var(--text-muted);margin-bottom:16px;font-size:14px">
+    Design thresholds only. Governance is not active; no proposals are live; nothing on this table authorizes spending of any funds.
+  </p>
   <table>
     <tr><th>Track</th><th>Approval</th><th>Quorum</th><th>Timelock</th></tr>
     <tr><td>Runtime Upgrade</td><td>75%</td><td>50%</td><td>7 days</td></tr>
-    <tr><td>Treasury Spend</td><td>60%</td><td>40%</td><td>3 days</td></tr>
     <tr><td>Parameter Change</td><td>66%</td><td>33%</td><td>2 days</td></tr>
-    <tr><td>Community Grant</td><td>50%</td><td>25%</td><td>1 day</td></tr>
     <tr><td>Emergency</td><td>90%</td><td>67%</td><td>None</td></tr>
     <tr><td>Text / Signal</td><td>50%</td><td>10%</td><td>None</td></tr>
   </table>
@@ -556,7 +567,7 @@ cargo build --release -p seal-node
     <tr><th>Tool</th><th>What it proves</th><th>Status</th></tr>
     <tr><td>Lean 4</td><td>Merkle tree invariants, VRF uniqueness</td><td><span class="badge badge-live">0 sorries</span></td></tr>
     <tr><td>Rocq/Coq</td><td>Token conservation, RLS non-bypass, SQL transitions</td><td><span class="badge badge-live">0 Admitted</span></td></tr>
-    <tr><td>Kani</td><td>Overflow, bounds, arithmetic (16 harnesses)</td><td><span class="badge badge-live">All pass</span></td></tr>
+    <tr><td>Kani</td><td>Overflow, bounds, arithmetic (66 harnesses across seal-token / consensus / merkle / crypto / threshold / node / bridge)</td><td><span class="badge badge-live">66/66 pass</span></td></tr>
     <tr><td>Miri</td><td>Undefined behavior detection</td><td><span class="badge badge-live">Pass</span></td></tr>
     <tr><td>cargo-fuzz</td><td>Crash-free on random input (9 targets)</td><td><span class="badge badge-live">0 crashes</span></td></tr>
     <tr><td>TLA+</td><td>Consensus safety and liveness</td><td><span class="badge badge-live">Spec + trace</span></td></tr>
@@ -568,20 +579,87 @@ cargo build --release -p seal-node
   <table>
     <tr><th>Crate</th><th>Purpose</th></tr>
     <tr><td><code>seal-crypto</code></td><td>ML-DSA, ML-KEM, SHA3, address derivation</td></tr>
-    <tr><td><code>seal-vrf</code></td><td>PQ-VRF, LaV many-time VRF, lattice VRF</td></tr>
-    <tr><td><code>seal-threshold</code></td><td>Ringtail lattice threshold signatures, NTT, Shamir</td></tr>
-    <tr><td><code>seal-consensus</code></td><td>VRF election, committee voting, fork choice, epochs</td></tr>
+    <tr><td><code>seal-vrf</code></td><td>PQ-VRF (ML-DSA + SHA3), LaV many-time VRF, LB-VRF placeholder</td></tr>
+    <tr><td><code>seal-threshold</code></td><td>Ringtail lattice threshold signatures (full protocol), NTT, Shamir</td></tr>
+    <tr><td><code>seal-ringtail-verify</code></td><td><code>no_std</code> Ringtail verifier for Solana BPF and Stellar Soroban</td></tr>
+    <tr><td><code>seal-consensus</code></td><td>VRF election, committee voting, fork choice, epochs, slashing</td></tr>
     <tr><td><code>seal-sql</code></td><td>SQL parser, engine, RLS, namespaces</td></tr>
-    <tr><td><code>seal-merkle</code></td><td>Merkle tree, persistent RB-tree indexes</td></tr>
+    <tr><td><code>seal-procs</code></td><td>SQL stored procedures (PL/pgSQL-shaped, ADR-001 default contract model)</td></tr>
+    <tr><td><code>seal-merkle</code></td><td>Merkle tree, persistent RB-tree indexes (Aeneas-extracted into Lean)</td></tr>
     <tr><td><code>seal-storage</code></td><td>Block store, state pruning, HAMT</td></tr>
-    <tr><td><code>seal-token</code></td><td>Staking, fees, emission, treasury, governance</td></tr>
+    <tr><td><code>seal-token</code></td><td>Balances, emission, treasury, per-block batch-auction DEX, fees</td></tr>
     <tr><td><code>seal-p2p</code></td><td>libp2p GossipSub, mDNS, ML-KEM transport</td></tr>
     <tr><td><code>seal-zk</code></td><td>RISC Zero, SP1, GPU acceleration, batch proofs</td></tr>
     <tr><td><code>seal-mpc</code></td><td>SPDZ private aggregation, PSI</td></tr>
-    <tr><td><code>seal-bridge</code></td><td>Solana + Stellar bridge observers</td></tr>
-    <tr><td><code>seal-node</code></td><td>Node binary, RPC server, disk persistence</td></tr>
+    <tr><td><code>seal-tee</code></td><td>TEE attestation wiring (SGX / SEV-SNP / TDX shapes)</td></tr>
+    <tr><td><code>seal-bridge</code></td><td>Solana + Stellar bridge observers, per-chain emergency pause</td></tr>
+    <tr><td><code>seal-node</code></td><td>Node binary, RPC server, disk persistence, bridge RPC wiring</td></tr>
+    <tr><td><code>seal-wallet</code></td><td>Shared wallet core (ML-DSA-65, BIP-39); Electron / Android / browser-extension shells</td></tr>
+    <tr><td><code>seal-app</code></td><td>App packaging: <code>.seal</code> schemas, deploy, namespace routing</td></tr>
     <tr><td><code>seal-cli</code></td><td>CLI: dev, demo, sql, migrate, app deploy</td></tr>
   </table>
+</section>
+
+</div>
+</div>
+
+<!-- ═══════════════ DEV BLOG ═══════════════ -->
+<div id="blog" class="page">
+<div class="container">
+
+<section>
+  <h2>Dev Blog</h2>
+  <p style="color:var(--text-secondary);margin-bottom:24px">
+    Engineering notes are posted at <a href="https://zeta1999.github.io/renoir42/index.html">zeta1999.github.io/renoir42</a>. Summaries below; follow the titles for the full write-up.
+  </p>
+</section>
+
+<section>
+  <article style="margin-bottom:48px">
+    <h3 style="font-family:'JetBrains Mono',monospace;margin-bottom:8px">
+      <a href="https://zeta1999.github.io/renoir42//SealDAOWeeklyUpdate/">Seal DAO: what landed in the private tree this week (not yet pushed public)</a>
+    </h3>
+    <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">2026-04-21 &middot; ringtail &middot; bridges &middot; demo-apps &middot; adr-001</p>
+    <p style="color:var(--text-secondary);margin-bottom:12px">Field note on the week between the 2026-04-13 public-mirror sync and now. Most of the following is in the private tree; a batched public push is coming once the bridge e2e scripts stop finding their own bugs.</p>
+    <ul style="color:var(--text-secondary);margin-left:24px;margin-bottom:12px">
+      <li>Full Ringtail protocol path (Lagrange coefficients + canonical rounding), replacing the <code>SimpleThreshold</code> signature-list stand-in — the 2-round aggregate shape from ePrint 2024/1113.</li>
+      <li><code>seal-ringtail-verify</code>: <code>no_std</code> verifier that compiles for Solana BPF and Stellar Soroban; feature-gated on both bridges. Compute-unit projections in place for the BPF side.</li>
+      <li>Real Solana/Stellar observer RPC clients; Anchor + Soroban programs for committee-MAC verify; real SAC transfers on Stellar; a <code>docker-compose</code> + <code>bridge-e2e.sh</code> that drives a bridged-asset round-trip locally.</li>
+      <li>Per-chain bridge emergency pause with a 2/3 Technical Council supermajority gate; <code>seal_getBridgeStatus</code> surfaces <code>paused_chains</code>.</li>
+      <li><code>TxType::DexMatch</code> emitted per block, so matched trades land in the state root and ZK proof rather than only in the engine's in-memory book.</li>
+      <li>ADR-001: SQL stored procedures (CALL / PL/pgSQL-shaped) as the default contract model, WASM as an opt-in path with <code>wasm-validate</code> at deploy.</li>
+      <li>Four demo apps under <code>apps/</code>: <code>copy-trading.seal</code>, <code>kyc.seal</code>, <code>kindle.seal</code>, <code>forms.seal</code> (MPC + ZK + AEAD + browser wallet end-to-end).</li>
+      <li>Kani 66/66 (the last 6 closed by a BTreeMap swap + harness refactor); test count 820 &rarr; 887 over the week.</li>
+    </ul>
+  </article>
+
+  <article style="margin-bottom:48px">
+    <h3 style="font-family:'JetBrains Mono',monospace;margin-bottom:8px">
+      <a href="https://zeta1999.github.io/renoir42//SealDAOArchitecture/">Seal DAO architecture: what the 17 crates actually do today (updated, WIP)</a>
+    </h3>
+    <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">2026-04-12 &middot; architecture &middot; consensus &middot; sql</p>
+    <p style="color:var(--text-secondary);margin-bottom:12px">Against the current tree, crate by crate — what's wired, what's a placeholder with a TODO header, and what's honestly aspirational. Corrections vs. an earlier draft: production sortition is ML-DSA + SHA3 (not "Algorand VRF"); <code>SimpleThreshold</code> is a signature-list stand-in and <code>RingtailThreshold</code> is the real one; the DEX is a per-block batch auction with Lean-proved matching invariants. Bridges are TLA+-proved on the invariants but not yet production-validated end-to-end against a live Solana / Stellar validator.</p>
+  </article>
+
+  <article style="margin-bottom:48px">
+    <h3 style="font-family:'JetBrains Mono',monospace;margin-bottom:8px">
+      <a href="https://zeta1999.github.io/renoir42//FormalVerificationBlockchain/">Formal verification on Seal DAO: TLA+, Lean 4 + Aeneas, Rocq, Kani (updated)</a>
+    </h3>
+    <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">2026-04-05 &middot; formal-methods &middot; lean &middot; rocq &middot; tla+</p>
+    <p style="color:var(--text-secondary);margin-bottom:12px">Counted against the current <code>formal/</code> tree: TLA+ (3 specs + 2 model-check drivers; SealConsensus covers Agreement / NoEquivocation / MonotonicHeight / Progress on 2/3-threshold voting; SealBridge maps <code>MintedLeqLocked</code>, <code>NoDoubleMint</code>, <code>NoMintWithoutLock</code>, <code>BurnedLeqMinted</code> to concrete checks in <code>bridge.rs</code>). Lean 4 with an Aeneas MIR-extraction pipeline on <code>seal-merkle</code>, plus hand-written proofs for Hash, VRF (LaV), and DEX matching &mdash; 29 theorems. Rocq modules for Balance, StateMachine, SqlState, RLS &mdash; 29 theorems. 66 Kani harnesses across 19 files. 9 cargo-fuzz targets. Miri is a soft skip in CI today, which is a known gap.</p>
+  </article>
+
+  <article style="margin-bottom:48px">
+    <h3 style="font-family:'JetBrains Mono',monospace;margin-bottom:8px">
+      <a href="https://zeta1999.github.io/renoir42//PostQuantumKEM/">ML-KEM-768 in rust-secure-memory: what's wired, what isn't (updated)</a>
+    </h3>
+    <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">2026-04-12 &middot; pqc &middot; ml-kem &middot; secure-memory</p>
+    <p style="color:var(--text-secondary);margin-bottom:12px">Adjacent project, same stack. ML-KEM-768 (FIPS 203) is wired as a standalone primitive in <code>rust-secure-memory</code> &mdash; 1184-byte public keys, 1088-byte ciphertexts, 32-byte shared secrets. Important correction over an earlier draft: Enclave sealing is symmetric-only (XChaCha20-Poly1305 with a per-process session key), and ML-KEM is <em>not</em> currently in the sealing path. Three Kani harnesses plus a cargo-fuzz target cover input validation and the FIPS 203 implicit-rejection behaviour; neither proves anything about ML-KEM's underlying MLWE/MLWR soundness.</p>
+  </article>
+
+  <p style="color:var(--text-muted);font-size:13px">
+    More posts (FPGA meta-compiler, Thetis26 wait-free, Monte Carlo GPU, concurrent C++ verification, ARIA strategy DSL, market-data terminal, LOB reconstruction on GPU, tabular embedding, QML build pipeline, etc.) at <a href="https://zeta1999.github.io/renoir42/index.html">zeta1999.github.io/renoir42</a>.
+  </p>
 </section>
 
 </div>
@@ -596,7 +674,7 @@ cargo build --release -p seal-node
   <div class="features" style="grid-template-columns:repeat(3,1fr)">
     <a href="https://github.com/SealProjectDAO/seal-dao-public" class="card">
       <h3>GitHub</h3>
-      <p>Source code, issues, pull requests. 17 crates, 804 tests, formal verification.</p>
+      <p>Source code, issues, pull requests. 19 crates, 887 tests, formal verification.</p>
     </a>
     <div class="card">
       <h3>Discord</h3>
@@ -613,13 +691,13 @@ cargo build --release -p seal-node
   <h2>Contributing</h2>
   <pre><span style="color:var(--text-muted)"># Clone and build</span>
 git clone https://github.com/SealProjectDAO/seal-dao-public.git
-cd seal-dao-master
+cd seal-dao-public
 cargo build && cargo test
 
 <span style="color:var(--text-muted)"># Run the full verification suite</span>
-./scripts/ci.sh quick    <span style="color:var(--text-muted)"># build + 804 tests + clippy</span>
+./scripts/ci.sh quick    <span style="color:var(--text-muted)"># build + 887 tests + clippy</span>
 ./scripts/ci.sh          <span style="color:var(--text-muted)"># + Kani + Miri + fuzz + audit</span></pre>
-  <p style="color:var(--text-secondary);margin-top:16px">See <a href="https://github.com/SealProjectDAO/seal-dao-master/blob/main/BUG-BOUNTY.md">BUG-BOUNTY.md</a> for the security bounty program.</p>
+  <p style="color:var(--text-secondary);margin-top:16px">Seal DAO is pre-mainnet and under active development. Report security issues via a private GitHub security advisory on the repository. No bounty program is in place and none is promised.</p>
 </section>
 
 </div>
@@ -642,17 +720,38 @@ cargo build && cargo test
 <!-- SPA Router -->
 <script>
 function route() {
-  const hash = location.hash.slice(1) || 'home';
+  const raw = (location.hash || '#home').slice(1).split('?')[0].split('/')[0];
+  const hash = raw || 'home';
+  const page = document.getElementById(hash);
+  if (!page) {
+    // Unknown hash — fall back to home without loop
+    if (hash !== 'home') { location.hash = '#home'; return; }
+    return;
+  }
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-links a').forEach(a => a.classList.remove('active'));
-  const page = document.getElementById(hash);
-  if (page) {
-    page.classList.add('active');
-    const link = document.querySelector(`.nav-links a[href="#${hash}"]`);
-    if (link) link.classList.add('active');
-    window.scrollTo(0, 0);
-  }
+  page.classList.add('active');
+  document.querySelectorAll(`.nav-links a[href="#${hash}"]`).forEach(a => a.classList.add('active'));
+  window.scrollTo(0, 0);
 }
+
+// Intercept clicks on any same-page hash link so the router runs even
+// when the URL hash is unchanged (e.g. clicking the currently active tab)
+// and when the browser would otherwise just jump to the anchor.
+document.addEventListener('click', (e) => {
+  const a = e.target.closest('a');
+  if (!a) return;
+  const href = a.getAttribute('href');
+  if (!href || !href.startsWith('#')) return;
+  e.preventDefault();
+  const target = href.slice(1) || 'home';
+  if (location.hash.slice(1) === target) {
+    route();
+  } else {
+    location.hash = '#' + target;
+  }
+});
+
 window.addEventListener('hashchange', route);
 window.addEventListener('load', route);
 </script>

@@ -68,8 +68,15 @@ cd formal/lean && lake build
 # Run Rocq proofs:
 cd formal/rocq && make
 
-# Run TLA+ model checking:
+# Run TLA+ model checking.
+# Apalache (0.55.0+) takes ONE --inv flag with a comma-separated list
+# — repeating --inv triggers the CLI's "Usage … Options ???" help.
 apalache-mc check --inv=Agreement formal/tlaplus/SealConsensus.tla
+apalache-mc check --inv=Agreement,NoEquivocation,MonotonicHeight \
+    formal/tlaplus/SealConsensus.tla
+
+# Bridge spec (wraps the six safety invariants on MC_SealBridge.tla):
+./scripts/verify-tla-bridge.sh
 
 # Run Kani (bounded model checking):
 cargo kani -p seal-crypto

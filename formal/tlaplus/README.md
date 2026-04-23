@@ -72,6 +72,20 @@ implementation and check that its execution traces are valid under the TLA+ spec
 # With Apalache (symbolic, larger models):
 apalache-mc check --inv=Agreement SealConsensus.tla
 apalache-mc check --inv=NoEquivocation SealConsensus.tla
+
+# Multiple invariants in one run — Apalache (0.55.0+) takes ONE --inv
+# flag with a comma-separated list. Repeating --inv makes the CLI
+# fall through to its "Usage … Options ???" help banner.
+apalache-mc check --inv=Agreement,NoEquivocation,MonotonicHeight \
+    SealConsensus.tla
+```
+
+For the bridge spec, use the wrapper so the invariant list stays in
+one place:
+
+```bash
+./scripts/verify-tla-bridge.sh              # default length=10
+LENGTH=15 ./scripts/verify-tla-bridge.sh    # deeper search
 ```
 
 ---

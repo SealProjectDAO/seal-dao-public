@@ -1,0 +1,14 @@
+[package]
+name = "seal-x402"
+version = "0.1.0"
+edition = "2021"
+description = "x402 payment-required HTTP demo on Seal DAO — pay-per-request micropayments"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+seal-crypto = { path = "../../crates/seal-crypto" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }

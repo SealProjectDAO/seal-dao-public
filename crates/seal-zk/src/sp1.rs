@@ -49,6 +49,8 @@ impl Sp1Prover {
 }
 
 impl Sp1Prover {
+    #[allow(dead_code)] // Wired once the SP1 guest ELF ships — kept here so
+    // the SP1 and RISC Zero paths stay structurally parallel.
     fn prepare_guest_input(&self, transition: &StateTransition) -> GuestInput {
         GuestInput {
             pre_state_root: transition.pre_state_root.0,

@@ -104,9 +104,33 @@ if [ "$MODE" = "quick" ]; then
 fi
 
 # ─── 4. Miri ─────────────────────────────────────
+#
+# The workspace `.cargo/config.toml` redirects `crates-io` at the
+# vendored `/vendor` directory. That's right for normal builds but
+# breaks Miri's sysroot build — Miri's `std` has its own Cargo.lock
+# pinning exact dep versions that may not all be in vendor. We
+# sidestep the clash by moving the project config aside for the
+# duration of the Miri step, then restoring it.
+miri_pushd_no_vendor() {
+    if [ -f .cargo/config.toml ]; then
+        mv .cargo/config.toml .cargo/config.toml.miri-hidden
+    fi
+}
+miri_popd_restore() {
+    if [ -f .cargo/config.toml.miri-hidden ]; then
+        mv .cargo/config.toml.miri-hidden .cargo/config.toml
+    fi
+}
+
 echo "── Step 4: Miri (undefined behavior detection) ──"
 if rustup component list --toolchain nightly 2>/dev/null | grep -q "miri.*installed"; then
-    # Only run Miri on crates that contain unsafe code.
+    # We Miri-check two disjoint groups:
+    #   A. Crates that contain `unsafe` blocks — high-signal target.
+    #      On ARM64 we skip seal-crypto / seal-storage: both route into
+    #      C FFI (pqcrypto-*, sled) which Miri can't interpret.
+    #   B. Pure-safe crates with non-trivial data-structure logic. These
+    #      rarely find bugs, but catch regressions the day someone
+    #      introduces an `unsafe` block. Kept cheap: test only.
     MIRI_CRATES=()
     for crate_dir in crates/*/; do
         crate="$(basename "$crate_dir")"
@@ -117,10 +141,25 @@ if rustup component list --toolchain nightly 2>/dev/null | grep -q "miri.*instal
             MIRI_CRATES+=("$crate")
         fi
     done
+    # Group B: pure-safe data-structure crates we want to keep UB-clean.
+    # Append only those that aren't already present from group A and
+    # that do not depend on seal-crypto/seal-storage (FFI transitively).
+    MIRI_PURE=(seal-merkle seal-token seal-threshold seal-mpc)
+    for c in "${MIRI_PURE[@]}"; do
+        skip_already=false
+        for existing in "${MIRI_CRATES[@]}"; do
+            if [ "$existing" = "$c" ]; then skip_already=true; break; fi
+        done
+        if ! $skip_already; then
+            MIRI_CRATES+=("$c")
+        fi
+    done
     if [ ${#MIRI_CRATES[@]} -eq 0 ]; then
-        skip "Miri" "no crates contain unsafe code"
+        skip "Miri" "no candidate crates"
     else
         MIRI_OK=true
+        miri_pushd_no_vendor
+        trap miri_popd_restore EXIT
         for crate in "${MIRI_CRATES[@]}"; do
             echo "  Checking $crate..."
             if MIRIFLAGS="-Zmiri-disable-isolation" rustup run nightly cargo miri test -p "$crate" 2>&1 | tail -3; then
@@ -130,8 +169,10 @@ if rustup component list --toolchain nightly 2>/dev/null | grep -q "miri.*instal
                 MIRI_OK=false
             fi
         done
+        miri_popd_restore
+        trap - EXIT
         if $MIRI_OK; then
-            pass "Miri"
+            pass "Miri (${#MIRI_CRATES[@]} crates)"
         else
             fail "Miri"
         fi

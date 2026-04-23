@@ -22,6 +22,7 @@ seal-threshold = { path = "../seal-threshold" }
 seal-zk = { path = "../seal-zk" }
 seal-mpc = { path = "../seal-mpc" }
 seal-token = { path = "../seal-token" }
+seal-bridge = { path = "../seal-bridge" }
 libp2p = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -34,6 +35,9 @@ hex = { workspace = true }
 axum = { workspace = true }
 tower-http = { workspace = true }
 sled = { workspace = true }
+aes-gcm = "0.10"
+zeroize = { version = "1.8", features = ["zeroize_derive"] }
+rand = "0.8"
 
 [dev-dependencies]
 tempfile = { workspace = true }

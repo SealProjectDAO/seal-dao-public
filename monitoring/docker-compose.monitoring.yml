@@ -1,0 +1,45 @@
+version: '3.8'
+
+# Seal DAO Monitoring Stack
+# Usage: cd monitoring && docker-compose -f docker-compose.monitoring.yml up
+#
+# Prerequisites:
+#   - Start a seal-node with --rpc-port 8545
+#   - Docker and docker-compose installed
+#
+# Services:
+#   - Prometheus: http://localhost:9090 (scrapes /metrics from seal-node)
+#   - Grafana: http://localhost:3000 (admin/admin, dashboards auto-provisioned)
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: seal-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: seal-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/provisioning/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+      - ./grafana/provisioning/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  grafana-data:

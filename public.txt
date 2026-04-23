@@ -3,6 +3,7 @@ Cargo.toml
 Dockerfile
 LICENSE
 README.md
+MANUAL-TESTING.md
 apps
 assets
 bridges
@@ -17,6 +18,6 @@ patches
 public.txt
 scripts
 sdks
-testnet-data
+monitoring
 vendor
 website

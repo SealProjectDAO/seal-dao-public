@@ -23,6 +23,11 @@ pub struct BridgeManager {
     total_minted: HashMap<WrappedToken, u64>,
     /// Required confirmations before processing a deposit.
     pub required_confirmations: u32,
+    /// Paused chains: chain -> human-readable reason. An entry in this
+    /// map blocks new deposits, deposit processing, and withdrawals
+    /// involving that chain until `unpause_chain` is called. Settled
+    /// wrapped-balance reads are unaffected.
+    paused_chains: HashMap<Chain, String>,
 }
 
 impl BridgeManager {
@@ -35,6 +40,7 @@ impl BridgeManager {
 
     /// Record a new deposit observed on a source chain.
     pub fn observe_deposit(&mut self, deposit: BridgeDeposit) -> Result<(), BridgeError> {
+        self.ensure_chain_active(&deposit.source_chain)?;
         if self.deposits.contains_key(&deposit.id) {
             return Err(BridgeError::DepositAlreadyProcessed(deposit.id));
         }
@@ -62,6 +68,8 @@ impl BridgeManager {
             .deposits
             .get(deposit_id)
             .ok_or_else(|| BridgeError::DepositNotFound(deposit_id.into()))?;
+
+        self.ensure_chain_active(&deposit.source_chain)?;
 
         if deposit.processed {
             return Err(BridgeError::DepositAlreadyProcessed(deposit_id.into()));
@@ -99,6 +107,7 @@ impl BridgeManager {
         token: WrappedToken,
         amount: u64,
     ) -> Result<String, BridgeError> {
+        self.ensure_chain_active(&dest_chain)?;
         // Check wrapped balance
         let balance = self
             .wrapped_balances
@@ -183,6 +192,81 @@ impl BridgeManager {
             }
         }
         true
+    }
+
+    /// List all observed deposits, optionally filtered by source
+    /// chain. Sorted by deposit ID for deterministic output across
+    /// repeat calls — useful for testnet polling where the caller
+    /// (e.g. `bridge-e2e.sh`) compares snapshots.
+    pub fn list_deposits(&self, chain: Option<&Chain>) -> Vec<BridgeDeposit> {
+        let mut out: Vec<BridgeDeposit> = self
+            .deposits
+            .values()
+            .filter(|d| chain.is_none_or(|c| &d.source_chain == c))
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
+    }
+
+    /// List all withdrawals (executed or pending), sorted by ID.
+    pub fn list_withdrawals(&self) -> Vec<BridgeWithdrawal> {
+        let mut out: Vec<BridgeWithdrawal> = self.withdrawals.values().cloned().collect();
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
+    }
+
+    // ─── Emergency pause (Technical Council 2/3 vote) ────────────
+
+    /// Pause a bridge chain: block new deposits, deposit processing,
+    /// and withdrawals involving this chain. Council authorization is
+    /// enforced by the caller (RPC layer) — this method is the state
+    /// mutation only. Calling `pause_chain` on an already-paused
+    /// chain updates the reason.
+    pub fn pause_chain(&mut self, chain: Chain, reason: String) {
+        self.paused_chains.insert(chain, reason);
+    }
+
+    /// Unpause a previously-paused chain. Returns an error if the
+    /// chain was not paused.
+    pub fn unpause_chain(&mut self, chain: &Chain) -> Result<(), BridgeError> {
+        if self.paused_chains.remove(chain).is_none() {
+            return Err(BridgeError::ChainNotPaused(chain.to_string()));
+        }
+        Ok(())
+    }
+
+    /// Is the chain currently paused?
+    pub fn is_chain_paused(&self, chain: &Chain) -> bool {
+        self.paused_chains.contains_key(chain)
+    }
+
+    /// Human-readable pause reason, if paused.
+    pub fn pause_reason(&self, chain: &Chain) -> Option<&str> {
+        self.paused_chains.get(chain).map(String::as_str)
+    }
+
+    /// Sorted list of `(chain, reason)` pairs for every paused chain.
+    /// Deterministic so RPC callers (dashboards, status pages) can
+    /// compare snapshots across repeat calls.
+    pub fn list_paused_chains(&self) -> Vec<(Chain, String)> {
+        let mut out: Vec<(Chain, String)> = self
+            .paused_chains
+            .iter()
+            .map(|(c, r)| (c.clone(), r.clone()))
+            .collect();
+        out.sort_by(|a, b| a.0.to_string().cmp(&b.0.to_string()));
+        out
+    }
+
+    fn ensure_chain_active(&self, chain: &Chain) -> Result<(), BridgeError> {
+        if let Some(reason) = self.paused_chains.get(chain) {
+            return Err(BridgeError::ChainPaused {
+                chain: chain.to_string(),
+                reason: reason.clone(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -350,6 +434,178 @@ mod tests {
             2000
         );
         assert!(bridge.check_invariant());
+    }
+
+    #[test]
+    fn test_list_deposits_sorted_and_filtered() {
+        let mut bridge = BridgeManager::new(1);
+        // Insert in reverse-sort order so we exercise list_deposits'
+        // sort contract.
+        bridge
+            .observe_deposit(make_deposit("sol_zzz", 100))
+            .unwrap();
+        bridge
+            .observe_deposit(make_deposit("sol_aaa", 200))
+            .unwrap();
+        let mut xlm_dep = make_deposit("xlm_mid", 300);
+        xlm_dep.source_chain = Chain::Stellar;
+        xlm_dep.token = WrappedToken::WXLM;
+        bridge.observe_deposit(xlm_dep).unwrap();
+
+        let all = bridge.list_deposits(None);
+        assert_eq!(all.len(), 3);
+        // Sorted by ID ascending.
+        assert_eq!(all[0].id, "sol_aaa");
+        assert_eq!(all[1].id, "sol_zzz");
+        assert_eq!(all[2].id, "xlm_mid");
+
+        let sol_only = bridge.list_deposits(Some(&Chain::Solana));
+        assert_eq!(sol_only.len(), 2);
+        assert!(sol_only.iter().all(|d| d.source_chain == Chain::Solana));
+
+        let xlm_only = bridge.list_deposits(Some(&Chain::Stellar));
+        assert_eq!(xlm_only.len(), 1);
+        assert_eq!(xlm_only[0].id, "xlm_mid");
+    }
+
+    #[test]
+    fn test_pause_blocks_new_deposits() {
+        let mut bridge = BridgeManager::new(1);
+        bridge.pause_chain(Chain::Solana, "suspicious activity".into());
+        let err = bridge.observe_deposit(make_deposit("d1", 100)).unwrap_err();
+        assert!(matches!(err, BridgeError::ChainPaused { .. }));
+        assert_eq!(
+            bridge.pause_reason(&Chain::Solana),
+            Some("suspicious activity")
+        );
+        // Stellar is unaffected.
+        let mut xlm = make_deposit("xlm_d", 200);
+        xlm.source_chain = Chain::Stellar;
+        xlm.token = WrappedToken::WXLM;
+        assert!(bridge.observe_deposit(xlm).is_ok());
+    }
+
+    #[test]
+    fn test_pause_blocks_processing_of_observed_deposit() {
+        let mut bridge = BridgeManager::new(1);
+        bridge.observe_deposit(make_deposit("d1", 100)).unwrap();
+        bridge.confirm_deposit("d1").unwrap();
+        // Pause after observe but before process — processing still blocked.
+        bridge.pause_chain(Chain::Solana, "investigating".into());
+        let err = bridge.process_deposit("d1").unwrap_err();
+        assert!(matches!(err, BridgeError::ChainPaused { .. }));
+    }
+
+    #[test]
+    fn test_pause_blocks_new_withdrawals() {
+        let mut bridge = BridgeManager::new(1);
+        bridge.observe_deposit(make_deposit("d1", 1000)).unwrap();
+        bridge.confirm_deposit("d1").unwrap();
+        bridge.process_deposit("d1").unwrap();
+
+        bridge.pause_chain(Chain::Solana, "emergency".into());
+        let err = bridge
+            .initiate_withdrawal(
+                "seal1alice",
+                Chain::Solana,
+                "sol_bob",
+                WrappedToken::WSOL,
+                100,
+            )
+            .unwrap_err();
+        assert!(matches!(err, BridgeError::ChainPaused { .. }));
+    }
+
+    #[test]
+    fn test_unpause_restores_operation() {
+        let mut bridge = BridgeManager::new(1);
+        bridge.pause_chain(Chain::Solana, "maintenance".into());
+        bridge.unpause_chain(&Chain::Solana).unwrap();
+        assert!(!bridge.is_chain_paused(&Chain::Solana));
+        // Post-unpause deposits work again.
+        assert!(bridge.observe_deposit(make_deposit("d1", 50)).is_ok());
+    }
+
+    #[test]
+    fn test_unpause_nonpaused_errors() {
+        let mut bridge = BridgeManager::new(1);
+        let err = bridge.unpause_chain(&Chain::Solana).unwrap_err();
+        assert!(matches!(err, BridgeError::ChainNotPaused(_)));
+    }
+
+    #[test]
+    fn test_list_paused_chains_sorted() {
+        let mut bridge = BridgeManager::new(1);
+        bridge.pause_chain(Chain::Stellar, "horizon flapping".into());
+        bridge.pause_chain(Chain::Solana, "key rotation mid-flight".into());
+        let listed = bridge.list_paused_chains();
+        assert_eq!(listed.len(), 2);
+        // "Solana" < "Stellar" lexicographically.
+        assert_eq!(listed[0].0, Chain::Solana);
+        assert_eq!(listed[1].0, Chain::Stellar);
+    }
+
+    #[test]
+    fn test_pause_does_not_affect_wrapped_balance_reads() {
+        let mut bridge = BridgeManager::new(1);
+        bridge.observe_deposit(make_deposit("d1", 1000)).unwrap();
+        bridge.confirm_deposit("d1").unwrap();
+        bridge.process_deposit("d1").unwrap();
+
+        bridge.pause_chain(Chain::Solana, "any".into());
+        // Reads keep working so dashboards and users can still see state.
+        assert_eq!(
+            bridge.wrapped_balance("seal1alice", &WrappedToken::WSOL),
+            1000
+        );
+        assert_eq!(bridge.total_locked(&WrappedToken::WSOL), 1000);
+        assert_eq!(bridge.total_minted(&WrappedToken::WSOL), 1000);
+        assert!(bridge.check_invariant());
+    }
+
+    #[test]
+    fn test_pause_updates_reason() {
+        let mut bridge = BridgeManager::new(1);
+        bridge.pause_chain(Chain::Solana, "reason A".into());
+        bridge.pause_chain(Chain::Solana, "reason B".into());
+        assert_eq!(bridge.pause_reason(&Chain::Solana), Some("reason B"));
+    }
+
+    #[test]
+    fn test_list_withdrawals_sorted() {
+        let mut bridge = BridgeManager::new(1);
+        let mut dep = make_deposit("sol_d", 1000);
+        dep.confirmations = 1;
+        bridge.observe_deposit(dep).unwrap();
+        bridge.process_deposit("sol_d").unwrap();
+
+        // Two withdrawals with different amounts produce different IDs.
+        let id_a = bridge
+            .initiate_withdrawal(
+                "seal1alice",
+                Chain::Solana,
+                "sol_bob",
+                WrappedToken::WSOL,
+                400,
+            )
+            .unwrap();
+        let id_b = bridge
+            .initiate_withdrawal(
+                "seal1alice",
+                Chain::Solana,
+                "sol_bob",
+                WrappedToken::WSOL,
+                300,
+            )
+            .unwrap();
+
+        let ws = bridge.list_withdrawals();
+        assert_eq!(ws.len(), 2);
+        // Sorted ascending — depends on format but must be stable.
+        let ids: Vec<_> = ws.iter().map(|w| w.id.as_str()).collect();
+        assert!(ids.contains(&id_a.as_str()));
+        assert!(ids.contains(&id_b.as_str()));
+        assert!(ws[0].id <= ws[1].id);
     }
 }
 

@@ -1,3 +1,5 @@
+#![allow(unexpected_cfgs)] // `cfg(kani)` is fed by the Kani verifier; cargo
+                            // doesn't know about it. Match seal-bridge.
 //! Seal DAO node — integrates all crates into a working node.
 //!
 //! - PQC identity (ML-DSA keypair + address)

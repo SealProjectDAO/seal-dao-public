@@ -42,7 +42,7 @@ theorem trade_price_bounded
     (bid_price ask_price : Nat)
     (h_crossing : bid_price ≥ ask_price) :
     ask_price ≤ ask_price ∧ ask_price ≤ bid_price := by
-  exact ⟨le_refl ask_price, h_crossing⟩
+  exact ⟨Nat.le_refl ask_price, h_crossing⟩
 
 -- Theorem 3: No matching when bid < ask
 -- If the best bid is strictly less than the best ask, no trade occurs.

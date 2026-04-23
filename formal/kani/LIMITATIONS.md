@@ -67,6 +67,49 @@ with variable-size nodes creates an exponential number of paths.
 **Problem**: Kani only supports single-threaded sequential execution.
 Cannot verify async code, tokio, or multi-threaded logic.
 
+### 5. `std::collections::HashMap` (OS random seed)
+
+**Status 2026-04-19**: all previously-affected harnesses now verify.
+`seal-node::{delegation::DelegationManager, committee::ForkChoice}`
+moved from `HashMap` → `BTreeMap`, and several harnesses that relied
+on the API side were refactored to verify the underlying invariants
+directly (see `formal/kani/README.md`). Kept here for future
+reference — the underlying Kani limitation is unchanged.
+
+**Problem**: `HashMap::new()` eventually calls `std::thread::local` which
+needs `CCRandomGenerateBytes` (Apple) / `getrandom` (Linux) to seed
+SipHash. Kani reports this as:
+
+```
+Failed Checks: call to foreign "C" function `CCRandomGenerateBytes` is
+  not currently supported by Kani.
+  (See https://github.com/model-checking/kani/issues/2423)
+```
+
+**Affected harnesses** (as of 2026-04-18, commit ebcabdd3):
+
+- `seal-node::committee::kani_proofs::fork_choice_single_deterministic`
+- `seal-node::committee::kani_proofs::fork_choice_heavier_wins`
+- `seal-node::committee::kani_proofs::fork_choice_prune_removes_old`
+- `seal-node::delegation::kani_proofs::self_delegation_rejected`
+- `seal-node::delegation::kani_proofs::effective_weight_saturates`
+- `seal-node::delegation::kani_proofs::delegate_cap_no_overflow`
+
+All six construct a `DelegationManager` / `ForkChoice` whose constructors
+build a `HashMap`. The arithmetic the harness is trying to prove is
+sound, but Kani can't get past the allocator/thread-local random plumbing.
+
+**Fix** (for a future session, not in-scope for current hardening):
+
+- Swap `HashMap` → `BTreeMap` in the *constructor-visible path only* (no
+  O(1) lookups were needed for the proven properties), or
+- Rewrite each harness to call the per-method arithmetic directly
+  instead of going through the full manager type.
+
+Either approach is O(hours) per harness and risks regressing the
+corresponding `#[cfg(test)]` suite, so we are explicitly deferring them
+rather than inventing shims.
+
 ## What Tools to Use Instead
 
 ### For each component, the RIGHT verification tool:

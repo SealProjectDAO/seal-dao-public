@@ -1,0 +1,14 @@
+[package]
+name = "seal-social"
+version = "0.1.0"
+edition = "2021"
+description = "social.seal — public posts + RLS-enforced followers (demo app skeleton)"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+seal-crypto = { path = "../../crates/seal-crypto" }
+seal-sql = { path = "../../crates/seal-sql" }
+serde = { workspace = true }
+hex = { workspace = true }

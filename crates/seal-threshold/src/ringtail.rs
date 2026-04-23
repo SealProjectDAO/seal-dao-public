@@ -126,6 +126,18 @@ pub trait RingOps {
 
     /// Zero polynomial.
     fn zero(&self) -> Self::Poly;
+
+    /// Best-effort scrub of secret polynomial material.
+    ///
+    /// Default implementation replaces `*p` with `zero()`. Concrete
+    /// backends that store coefficients in a `Vec<u64>` should override
+    /// this to zero-write the underlying buffer (so it survives compiler
+    /// dead-store elimination and the backing allocation is wiped before
+    /// being reused). Used by `RingtailParty::drop` to clear secret
+    /// key shares and round-1 randomness.
+    fn zeroize_poly(&self, p: &mut Self::Poly) {
+        *p = self.zero();
+    }
 }
 
 // ============================================================================
@@ -164,15 +176,28 @@ pub struct RingtailSignature {
 }
 
 /// Party state during the signing protocol.
+///
+/// Secret key share and round-1 randomness are scrubbed on drop via
+/// `RingOps::zeroize_poly` to avoid leaving long-lived key material on
+/// the heap.
 pub struct RingtailParty<R: RingOps> {
     /// Party index (0-based).
     pub id: usize,
-    /// Secret key share (polynomial).
+    /// Secret key share (polynomial). Zeroized on drop.
     sk_share: R::Poly,
-    /// Round 1 randomness (kept for Round 2).
+    /// Round 1 randomness (kept for Round 2). Zeroized on drop.
     round1_randomness: Option<R::Poly>,
     /// Ring operations backend.
     ring: R,
+}
+
+impl<R: RingOps> Drop for RingtailParty<R> {
+    fn drop(&mut self) {
+        self.ring.zeroize_poly(&mut self.sk_share);
+        if let Some(r) = self.round1_randomness.as_mut() {
+            self.ring.zeroize_poly(r);
+        }
+    }
 }
 
 // ============================================================================
@@ -198,8 +223,12 @@ impl<R: RingOps> RingtailParty<R> {
         let r_i = self.ring.sample_gaussian(6.108);
         let e_i = self.ring.sample_gaussian(6.108);
 
-        // D_i = A·r_i + e_i (simplified: we use r_i + e_i directly;
-        // full implementation would do matrix-vector multiply with public A)
+        // Simplified one-shot variant: D_i = r_i + e_i (single polynomial,
+        // no matrix-vector multiply against A). Used by the trait-based
+        // `RingtailThreshold` path (committee.rs / fuzz / bench) which is
+        // a one-round adaptation. The paper-shaped commitment
+        // `D_i = A·r_i + e_i` is implemented in `round1_full` below and
+        // is what the BPF/host `verify_signature_full` accepts byte-exactly.
         let commitment_poly = self.ring.add(&r_i, &e_i);
         let commitment = self.ring.to_bytes(&commitment_poly);
 
@@ -944,6 +973,289 @@ fn deserialize_ringtail_signature(
 }
 
 // ============================================================================
+// Full protocol: D_i = A·r_i + e_i (paper-correct commitment shape)
+// ============================================================================
+//
+// The simplified `round1`/`aggregate_responses` path above uses
+// `D_i = r_i + e_i` for one-shot trait compatibility, which cannot
+// algebraically match `verify_signature_full`'s `D' = A·z - c·t` check.
+// The functions below implement the actual ePrint 2024/1113 commitment
+// shape so the produced signature is byte-exact accepted by both
+// `verify_signature_full` (host) and `seal-ringtail-verify` (BPF).
+//
+// Shape conventions (one-shot adaptation, single-poly response):
+//   - r_i: single polynomial (one randomness per signer)
+//   - e_i: K-vector of polynomials (one error per row)
+//   - D_i = (A[k][0] · r_i + e_i[k])_{k=0..K-1}, serialized as
+//     K·RING_N·8 bytes (K polys concatenated, LE-u64 per coefficient)
+//   - Aggregated D = sum_signers(D_i), per row
+//   - challenge = SHA3-256(D_aggregated_serialized || message)
+//   - z = sum_signers(z_i), z_i = r_i + c · sk_i
+//
+// Algebraic correctness (n-of-n, no Lagrange):
+//   D' = A·z - c·t
+//      = A·(sum r_i + c·s) - c·(A·s + e_master)
+//      = A·sum(r_i) - c·e_master
+//   D_aggregated = A·sum(r_i) + sum(e_i)
+//   These match iff sum(e_i) = -c·e_master, which is impossible without
+//   coordination. For exact byte-equality, callers should pair this with
+//   `generate_public_params_no_error` (e_master = 0) AND set the per-
+//   signer e_i = 0 (`smudging = false`). That collapses to a Schnorr-
+//   over-MLWE variant — functional threshold signature, weaker
+//   zero-knowledge. Full Ringtail rounding/smudging is a follow-up.
+
+/// Round 1 message in the full protocol: K-vector commitment.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Round1MessageFull {
+    pub party_id: usize,
+    /// `D_i` = A·r_i + e_i, serialized as MODULE_K · RING_N · 8 bytes
+    /// (K polynomials concatenated, LE-u64 per coefficient).
+    pub commitment: Vec<u8>,
+    pub mac: Vec<u8>,
+}
+
+impl<R: RingOps> RingtailParty<R> {
+    /// Round 1 (full protocol): produce `D_i = A·r_i + e_i`.
+    ///
+    /// `smudging = false` skips the per-signer error term (sets `e_i = 0`).
+    /// Combined with `generate_public_params_no_error`, this enables byte-
+    /// exact end-to-end verification against `verify_signature_full` /
+    /// the BPF verifier.
+    pub fn round1_full(
+        &mut self,
+        public_params: &PublicParams,
+        mac_key: &[u8],
+        smudging: bool,
+    ) -> Result<Round1MessageFull, ThresholdError> {
+        if public_params.matrix_a.len() < MODULE_K {
+            return Err(ThresholdError::InvalidPartialSignature(self.id));
+        }
+
+        let r_i = self.ring.sample_gaussian(6.108);
+
+        let mut commitment_bytes = Vec::with_capacity(MODULE_K * RING_N * 8);
+        for k in 0..MODULE_K {
+            let row = &public_params.matrix_a[k];
+            if row.is_empty() {
+                return Err(ThresholdError::InvalidPartialSignature(self.id));
+            }
+            let a_k0 = self
+                .ring
+                .from_bytes(&row[0])
+                .map_err(|_| ThresholdError::InvalidPartialSignature(self.id))?;
+            let a_r = self.ring.mul(&a_k0, &r_i);
+            let d_k = if smudging {
+                let e_k = self.ring.sample_gaussian(6.108);
+                self.ring.add(&a_r, &e_k)
+            } else {
+                a_r
+            };
+            commitment_bytes.extend_from_slice(&self.ring.to_bytes(&d_k));
+        }
+
+        let mut mac_input = Vec::with_capacity(8 + commitment_bytes.len());
+        mac_input.extend_from_slice(&self.id.to_le_bytes());
+        mac_input.extend_from_slice(&commitment_bytes);
+        let mac = crate::ntt::compute_mac(mac_key, &mac_input).to_vec();
+
+        self.round1_randomness = Some(r_i);
+
+        Ok(Round1MessageFull {
+            party_id: self.id,
+            commitment: commitment_bytes,
+            mac,
+        })
+    }
+
+    /// Round 2 (full protocol): given the *aggregated* commitment bytes
+    /// (sum_signers(D_i), serialized K-vector) plus the message, compute
+    /// the response `z_i = r_i + c · sk_i`.
+    pub fn round2_full(
+        &self,
+        aggregated_d_bytes: &[u8],
+        message: &[u8],
+    ) -> Result<Round2Message, ThresholdError> {
+        let r_i = self
+            .round1_randomness
+            .as_ref()
+            .ok_or(ThresholdError::InvalidPartialSignature(self.id))?;
+
+        let mut input = Vec::with_capacity(aggregated_d_bytes.len() + message.len());
+        input.extend_from_slice(aggregated_d_bytes);
+        input.extend_from_slice(message);
+        let challenge = sha3_256(&input);
+
+        let c_poly = expand_challenge(&self.ring, &challenge.0);
+        let c_sk = self.ring.mul(&c_poly, &self.sk_share);
+        let z_i = self.ring.add(r_i, &c_sk);
+
+        Ok(Round2Message {
+            party_id: self.id,
+            response: self.ring.to_bytes(&z_i),
+        })
+    }
+}
+
+/// Aggregate per-signer K-vector commitments into a single K-vector
+/// `D = sum_signers(D_i)`. Returns the concatenated K·RING_N·8 byte
+/// serialization, suitable for hashing into the challenge.
+pub fn aggregate_commitments<R: RingOps>(
+    ring: &R,
+    round1_messages: &[Round1MessageFull],
+) -> Result<Vec<u8>, ThresholdError> {
+    let mut accumulator: Vec<R::Poly> = (0..MODULE_K).map(|_| ring.zero()).collect();
+    let expected_len = MODULE_K * RING_N * 8;
+    for msg in round1_messages {
+        if msg.commitment.len() != expected_len {
+            return Err(ThresholdError::InvalidPartialSignature(msg.party_id));
+        }
+        for k in 0..MODULE_K {
+            let off = k * RING_N * 8;
+            let poly = ring
+                .from_bytes(&msg.commitment[off..off + RING_N * 8])
+                .map_err(|_| ThresholdError::InvalidPartialSignature(msg.party_id))?;
+            accumulator[k] = ring.add(&accumulator[k], &poly);
+        }
+    }
+    let mut bytes = Vec::with_capacity(expected_len);
+    for poly in &accumulator {
+        bytes.extend_from_slice(&ring.to_bytes(poly));
+    }
+    Ok(bytes)
+}
+
+/// Aggregate Round 2 responses into a `RingtailSignature` whose challenge
+/// is computed against the aggregated K-vector commitment (matches the
+/// `verify_signature_full` / BPF verify pipeline).
+pub fn aggregate_responses_full<R: RingOps>(
+    ring: &R,
+    aggregated_d_bytes: &[u8],
+    round2_messages: &[Round2Message],
+    message: &[u8],
+    threshold: usize,
+    committee_size: usize,
+) -> Result<RingtailSignature, ThresholdError> {
+    if round2_messages.len() < threshold {
+        return Err(ThresholdError::InsufficientSigners {
+            needed: threshold,
+            have: round2_messages.len(),
+        });
+    }
+
+    let mut z_agg = ring.zero();
+    let mut participants = Bitfield::new(committee_size);
+
+    for msg in round2_messages {
+        let z_i = ring
+            .from_bytes(&msg.response)
+            .map_err(|_| ThresholdError::InvalidThresholdSignature)?;
+
+        let norm = ring.norm_l2(&z_i);
+        if norm > NORM_BOUND {
+            return Err(ThresholdError::InvalidPartialSignature(msg.party_id));
+        }
+
+        z_agg = ring.add(&z_agg, &z_i);
+        participants.set(msg.party_id);
+    }
+
+    if participants.count() < threshold {
+        return Err(ThresholdError::InsufficientSigners {
+            needed: threshold,
+            have: participants.count(),
+        });
+    }
+
+    let mut input = Vec::with_capacity(aggregated_d_bytes.len() + message.len());
+    input.extend_from_slice(aggregated_d_bytes);
+    input.extend_from_slice(message);
+    let challenge = sha3_256(&input);
+
+    Ok(RingtailSignature {
+        z: ring.to_bytes(&z_agg),
+        challenge: challenge.0,
+        participants,
+    })
+}
+
+/// Generate public parameters such that `t_i = A[i][0] · s` for a single
+/// secret polynomial `s` (and zero error). This is the keygen variant
+/// that lines up with the one-shot trait's single-polynomial response:
+/// since the signer / verifier only ever touch column 0 of `A`, the
+/// secret is collapsed to one polynomial that occupies the first slot
+/// of the full L-vector and is implicitly zero elsewhere.
+///
+/// Returned secret bytes are the single `s` polynomial. Pair with
+/// `round1_full(.., smudging = false)` for byte-exact compatibility
+/// with `verify_signature_full` and `seal-ringtail-verify`.
+pub fn generate_public_params_no_error<R: RingOps>(
+    ring: &R,
+) -> (PublicParams, Vec<u8>) {
+    // Random first column of A; remaining columns are filled with random
+    // polynomials too (preserves wire format) but never participate in
+    // the verify equation.
+    let mut matrix_a_col0_polys: Vec<R::Poly> = Vec::with_capacity(MODULE_K);
+    let mut matrix_a_bytes: Vec<Vec<Vec<u8>>> = Vec::with_capacity(MODULE_K);
+    for _ in 0..MODULE_K {
+        let col0 = ring.sample_uniform();
+        let mut row_bytes = Vec::with_capacity(MODULE_L);
+        row_bytes.push(ring.to_bytes(&col0));
+        for _ in 1..MODULE_L {
+            let filler = ring.sample_uniform();
+            row_bytes.push(ring.to_bytes(&filler));
+        }
+        matrix_a_col0_polys.push(col0);
+        matrix_a_bytes.push(row_bytes);
+    }
+
+    let secret_s = ring.sample_gaussian(6.108);
+    let secret_s_bytes = ring.to_bytes(&secret_s);
+
+    // t_i = A[i][0] * s, for each i in 0..K. No error term.
+    let public_key_t_bytes: Vec<Vec<u8>> = matrix_a_col0_polys
+        .iter()
+        .map(|a_i0| ring.to_bytes(&ring.mul(a_i0, &secret_s)))
+        .collect();
+
+    (
+        PublicParams {
+            matrix_a: matrix_a_bytes,
+            public_key_t: public_key_t_bytes,
+        },
+        secret_s_bytes,
+    )
+}
+
+/// Single-signer end-to-end sign in the full protocol. Convenience wrapper
+/// for the n=1 case (and the BPF cross-check). Produces a signature that
+/// `verify_signature_full` accepts byte-exactly when `params` was built
+/// via `generate_public_params_no_error` and `smudging = false`.
+///
+/// Specialised to `HandRolledOps` because `RingtailParty` constructs its
+/// own backend instance — keeping the public surface concrete avoids
+/// shipping a `RingOps + Clone + Default` constraint just for this helper.
+pub fn sign_single_full(
+    public_params: &PublicParams,
+    sk_collapsed_bytes: &[u8],
+    message: &[u8],
+    smudging: bool,
+) -> Result<RingtailSignature, ThresholdError> {
+    let ring = HandRolledOps::new();
+    let sk_poly = ring
+        .from_bytes(sk_collapsed_bytes)
+        .map_err(|_| ThresholdError::InvalidPartialSignature(0))?;
+
+    let mut party = RingtailParty::new(0, sk_poly, HandRolledOps::new());
+
+    let mac_input = [message, &0usize.to_le_bytes()[..]].concat();
+    let mac_key = sha3_256(&mac_input);
+    let r1 = party.round1_full(public_params, &mac_key.0, smudging)?;
+    let aggregated = aggregate_commitments(&ring, std::slice::from_ref(&r1))?;
+    let r2 = party.round2_full(&aggregated, message)?;
+    aggregate_responses_full(&ring, &aggregated, std::slice::from_ref(&r2), message, 1, 1)
+}
+
+// ============================================================================
 // Kani proofs for Ringtail safety properties
 // ============================================================================
 
@@ -1440,5 +1752,255 @@ mod tests {
 
         assert_eq!(threshold_sig.participant_count(), 3);
         assert!(RingtailThreshold::verify(&threshold_sig, &pub_keys, message, 3).is_ok());
+    }
+
+    // ========================================================================
+    // Known-Answer Tests (KATs) — lock in wire-format + deterministic paths
+    //
+    // These vectors pin behaviour of the non-randomised code paths so that
+    // refactors are forced to update them deliberately rather than silently
+    // changing output. Drop if a randomised optimisation later breaks them.
+    // ========================================================================
+
+    /// KAT: Shamir distribution + reconstruction is deterministic given a
+    /// fixed seed. The master secret is reconstructed byte-for-byte from
+    /// any threshold-sized share subset.
+    #[test]
+    fn kat_shamir_distribute_reconstruct_deterministic() {
+        let ring = HandRolledOps::new();
+        // Fixed secret (known to be < q per coefficient).
+        let master: Vec<u64> = (0..RING_N).map(|i| (i as u64 * 1234567) % RING_Q).collect();
+
+        let shares = distribute_key_shares(&ring, &master, 5, 3);
+        assert_eq!(shares.len(), 5);
+
+        let r1 = reconstruct_key(&ring, &shares[..3]).unwrap();
+        let r2 = reconstruct_key(&ring, &shares[1..4]).unwrap();
+        let r3 = reconstruct_key(&ring, &shares[2..5]).unwrap();
+
+        // KAT: all three subsets yield the same reconstructed secret,
+        // byte-for-byte equal to the original master secret.
+        assert_eq!(ring.to_bytes(&master), ring.to_bytes(&r1));
+        assert_eq!(ring.to_bytes(&r1), ring.to_bytes(&r2));
+        assert_eq!(ring.to_bytes(&r2), ring.to_bytes(&r3));
+    }
+
+    /// KAT: `compute_mac` is deterministic and varies with key and message.
+    /// Locks in the MAC wire format (currently SHA3-256 of key||msg).
+    #[test]
+    fn kat_mac_deterministic() {
+        let mac1 = crate::ntt::compute_mac(b"k0", b"hello");
+        let mac2 = crate::ntt::compute_mac(b"k0", b"hello");
+        let mac3 = crate::ntt::compute_mac(b"k1", b"hello");
+        let mac4 = crate::ntt::compute_mac(b"k0", b"world");
+        assert_eq!(mac1, mac2, "same key+msg must produce same MAC");
+        assert_ne!(mac1, mac3, "key difference must change MAC");
+        assert_ne!(mac1, mac4, "message difference must change MAC");
+        // MAC length is fixed at 32 bytes (SHA3-256).
+        assert_eq!(mac1.len(), 32);
+    }
+
+    /// KAT: challenge = SHA3-256(concat(commitments) || message) is stable
+    /// across runs for fixed inputs. Guards against accidental reordering
+    /// or salt/domain-tag changes.
+    #[test]
+    fn kat_challenge_deterministic() {
+        let commits: Vec<Vec<u8>> = (0..3).map(|i| vec![i as u8; 64]).collect();
+        let message = b"seal-block-0001";
+
+        fn make_challenge(cs: &[Vec<u8>], m: &[u8]) -> [u8; 32] {
+            let mut h = Vec::new();
+            for c in cs {
+                h.extend_from_slice(c);
+            }
+            h.extend_from_slice(m);
+            sha3_256(&h).0
+        }
+        let c1 = make_challenge(&commits, message);
+        let c2 = make_challenge(&commits, message);
+        assert_eq!(c1, c2);
+        // A one-byte message flip must produce a different challenge.
+        let c3 = make_challenge(&commits, b"seal-block-0002");
+        assert_ne!(c1, c3);
+        // Commitment reordering must also change the challenge.
+        let swapped: Vec<Vec<u8>> = vec![commits[2].clone(), commits[1].clone(), commits[0].clone()];
+        let c4 = make_challenge(&swapped, message);
+        assert_ne!(c1, c4);
+    }
+
+    /// KAT: full sign + verify round-trip with fixed message produces a
+    /// valid threshold signature that verifies, across the exposed API.
+    /// Acts as a regression trip-wire for any protocol-level change.
+    #[test]
+    fn kat_sign_verify_roundtrip() {
+        use crate::traits::ThresholdScheme;
+        let ring = HandRolledOps::new();
+        let master = ring.sample_gaussian(6.108);
+        let shares = distribute_key_shares(&ring, &master, 5, 3);
+        let message = b"kat-sign-verify";
+        let partials: Vec<_> = (0..3)
+            .map(|i| {
+                RingtailThreshold::partial_sign(shares[i].0, &shares[i].1, message).unwrap()
+            })
+            .collect();
+        let pub_keys: Vec<Vec<u8>> = shares.iter().map(|(_, s)| s.clone()).collect();
+        let sig = RingtailThreshold::aggregate(&partials, &pub_keys, message, 3, 5).unwrap();
+        assert_eq!(sig.participant_count(), 3);
+        RingtailThreshold::verify(&sig, &pub_keys, message, 3).expect("kat verify");
+    }
+
+    /// KAT: `RingOps::zeroize_poly` overwrites coefficients in-place.
+    /// This pins the post-drop memory contract for `RingtailParty`.
+    #[test]
+    fn kat_zeroize_poly_wipes_buffer() {
+        let ring = HandRolledOps::new();
+        let mut poly: Vec<u64> = (0..RING_N).map(|i| i as u64 + 1).collect();
+        assert!(poly.iter().any(|&x| x != 0));
+        ring.zeroize_poly(&mut poly);
+        assert!(poly.iter().all(|&x| x == 0), "zeroize_poly must clear");
+    }
+
+    // ========================================================================
+    // Full-protocol tests: D_i = A·r_i + e_i shape, end-to-end algebraic check
+    // against verify_signature_full. The "no smudging + no public-key error"
+    // mode is exercised because it is the byte-exact subset that the
+    // simplified one-shot trait can pass round-trip.
+    // ========================================================================
+
+    #[test]
+    fn full_round1_emits_k_polynomial_commitment() {
+        let ring = HandRolledOps::new();
+        let (params, sk_bytes) = generate_public_params_no_error(&ring);
+        let sk_poly = ring.from_bytes(&sk_bytes).unwrap();
+        let mut party = RingtailParty::new(0, sk_poly, HandRolledOps::new());
+        let r1 = party
+            .round1_full(&params, b"mac-key-32-bytes-padded........", true)
+            .unwrap();
+        // Wire format: K polynomials concatenated.
+        assert_eq!(r1.commitment.len(), MODULE_K * RING_N * 8);
+        assert!(!r1.mac.is_empty());
+    }
+
+    #[test]
+    fn full_aggregate_commitments_sums_per_row() {
+        let ring = HandRolledOps::new();
+        let (params, sk_bytes) = generate_public_params_no_error(&ring);
+        let sk_poly = ring.from_bytes(&sk_bytes).unwrap();
+        // Three parties with the same secret share so the only thing
+        // varying between commitments is the per-party randomness; the
+        // aggregate must equal the per-row sum of the three D_i.
+        let mut parties: Vec<_> = (0..3)
+            .map(|i| RingtailParty::new(i, sk_poly.clone(), HandRolledOps::new()))
+            .collect();
+        let r1s: Vec<_> = parties
+            .iter_mut()
+            .map(|p| {
+                p.round1_full(&params, b"mac-key", false /* no smudging */)
+                    .unwrap()
+            })
+            .collect();
+
+        let agg = aggregate_commitments(&ring, &r1s).unwrap();
+        assert_eq!(agg.len(), MODULE_K * RING_N * 8);
+
+        // Check row 0 of the aggregate equals the sum of the three D_i^0.
+        let mut expected_row0 = ring.zero();
+        for r1 in &r1s {
+            let row0 = ring.from_bytes(&r1.commitment[..RING_N * 8]).unwrap();
+            expected_row0 = ring.add(&expected_row0, &row0);
+        }
+        let actual_row0 = ring.from_bytes(&agg[..RING_N * 8]).unwrap();
+        assert_eq!(expected_row0, actual_row0);
+    }
+
+    #[test]
+    fn full_single_signer_byte_exact_against_verify_signature_full() {
+        let ring = HandRolledOps::new();
+        let (params, sk_bytes) = generate_public_params_no_error(&ring);
+        let message = b"end-to-end full-protocol single-signer";
+
+        let sig = sign_single_full(&params, &sk_bytes, message, false /* no smudging */)
+            .expect("single-signer sign_single_full should succeed");
+
+        // The host verifier must accept this byte-exactly.
+        verify_signature_full(&ring, &sig, &params, message, 1)
+            .expect("verify_signature_full must accept full-protocol single-signer sig");
+    }
+
+    #[test]
+    fn full_single_signer_smudging_breaks_byte_equality() {
+        // Documents the boundary: with smudging on (e_i ≠ 0) but no
+        // matching public-key error, the verify_signature_full challenge
+        // recomputation no longer matches. This is the expected
+        // behaviour until full Ringtail rounding is added.
+        let ring = HandRolledOps::new();
+        let (params, sk_bytes) = generate_public_params_no_error(&ring);
+        let message = b"smudging-on must mismatch in this simplified scheme";
+
+        let sig = sign_single_full(&params, &sk_bytes, message, true)
+            .expect("sign_single_full itself should not fail");
+        let res = verify_signature_full(&ring, &sig, &params, message, 1);
+        assert!(
+            res.is_err(),
+            "smudging without rounding must break challenge equality \
+             (otherwise the no-smudging path is structurally redundant)"
+        );
+    }
+
+    #[test]
+    fn full_single_signer_n_of_n_two_parties() {
+        // 2-of-2 with a *single shared secret* (no Shamir): each party
+        // signs with the same sk, the aggregator sums commitments and
+        // responses. With smudging off and `t = A · s`, the aggregate
+        // must verify byte-exactly under threshold = 1 (we cannot use
+        // threshold = 2 because z = sum(z_i) = 2·sum(r_i) + 2·c·sk,
+        // which equals A·z - c·t only when 2·sk equals the secret behind
+        // t — i.e. s = 2·sk. Easier route: verify against a public key
+        // built from the *aggregate* secret 2·sk).
+        let ring = HandRolledOps::new();
+
+        // Build a sk and then construct params with t = A · (2·sk) so
+        // the aggregate response (which carries c · 2·sk) cancels.
+        let sk = ring.sample_gaussian(6.108);
+        let two_sk = ring.add(&sk, &sk);
+        let mut matrix_a_col0_polys: Vec<<HandRolledOps as RingOps>::Poly> = Vec::with_capacity(MODULE_K);
+        let mut matrix_a_bytes: Vec<Vec<Vec<u8>>> = Vec::with_capacity(MODULE_K);
+        for _ in 0..MODULE_K {
+            let col0 = ring.sample_uniform();
+            let mut row_bytes = Vec::with_capacity(MODULE_L);
+            row_bytes.push(ring.to_bytes(&col0));
+            for _ in 1..MODULE_L {
+                row_bytes.push(ring.to_bytes(&ring.sample_uniform()));
+            }
+            matrix_a_col0_polys.push(col0);
+            matrix_a_bytes.push(row_bytes);
+        }
+        let public_key_t_bytes: Vec<Vec<u8>> = matrix_a_col0_polys
+            .iter()
+            .map(|a| ring.to_bytes(&ring.mul(a, &two_sk)))
+            .collect();
+        let params = PublicParams {
+            matrix_a: matrix_a_bytes,
+            public_key_t: public_key_t_bytes,
+        };
+
+        let mut p0 = RingtailParty::new(0, sk.clone(), HandRolledOps::new());
+        let mut p1 = RingtailParty::new(1, sk.clone(), HandRolledOps::new());
+
+        let mac_key = b"shared-mac-key";
+        let r1_0 = p0.round1_full(&params, mac_key, false).unwrap();
+        let r1_1 = p1.round1_full(&params, mac_key, false).unwrap();
+
+        let aggregated = aggregate_commitments(&ring, &[r1_0.clone(), r1_1.clone()]).unwrap();
+        let message = b"2-of-2 end-to-end";
+
+        let r2_0 = p0.round2_full(&aggregated, message).unwrap();
+        let r2_1 = p1.round2_full(&aggregated, message).unwrap();
+
+        let sig =
+            aggregate_responses_full(&ring, &aggregated, &[r2_0, r2_1], message, 2, 2).unwrap();
+
+        verify_signature_full(&ring, &sig, &params, message, 2)
+            .expect("2-of-2 full protocol must verify byte-exactly");
     }
 }

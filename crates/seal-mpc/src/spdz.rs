@@ -27,20 +27,48 @@
 //! Operations are over Z_p where p is a 64-bit prime (Goldilocks: 2^64 - 2^32 + 1).
 //! This matches the field used in STARK proofs for efficient interop.
 
-use rand::RngCore;
 use seal_crypto::hash::sha3_256;
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
+use zeroize::Zeroize;
 
 /// Goldilocks prime: 2^64 - 2^32 + 1
 pub const FIELD_PRIME: u64 = 0xFFFF_FFFF_0000_0001;
 
+/// Errors from the SPDZ online protocol.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SpdzError {
+    /// MAC verification failed during reconstruction — the reconstructed
+    /// value is not what one (or both) parties committed to. Protocol
+    /// MUST abort (SPDZ security requires this; never reveal the value).
+    #[error("MAC check failed during reconstruction (protocol must abort)")]
+    MacCheckFailed,
+    /// Beaver triple exhausted mid-protocol.
+    #[error("no more Beaver triples available")]
+    TriplesExhausted,
+    /// Invalid triple index.
+    #[error("invalid triple index {0}")]
+    InvalidTripleIndex(usize),
+}
+
 /// An additive secret share of a field element.
+///
+/// Both the value and MAC shares are cleared on drop to avoid leaking
+/// secret material through memory reuse. The actual MAC equality check
+/// is done in constant time (see [`SpdzParty::reconstruct`]).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SpdzShare {
     /// This party's share of the value (in Z_p).
     pub value: u64,
     /// MAC share: share of alpha * x, where alpha is the global MAC key.
     pub mac: u64,
+}
+
+impl Drop for SpdzShare {
+    fn drop(&mut self) {
+        self.value.zeroize();
+        self.mac.zeroize();
+    }
 }
 
 /// A Beaver multiplication triple: shares of (a, b, c) where c = a * b mod p.
@@ -156,9 +184,9 @@ impl SpdzParty {
     /// Returns (epsilon, delta) — masked values to send to the other party.
     /// Both parties open epsilon = x - a and delta = y - b,
     /// then compute [z] = [c] + epsilon * [b] + delta * [a] + epsilon * delta (party 0 only).
-    pub fn mul_begin(&mut self, x: &SpdzShare, y: &SpdzShare) -> Result<(u64, u64), String> {
+    pub fn mul_begin(&mut self, x: &SpdzShare, y: &SpdzShare) -> Result<(u64, u64), SpdzError> {
         if self.triple_idx >= self.triples.len() {
-            return Err("no more Beaver triples available".to_string());
+            return Err(SpdzError::TriplesExhausted);
         }
 
         let triple = &self.triples[self.triple_idx];
@@ -179,9 +207,9 @@ impl SpdzParty {
         epsilon: u64,
         delta: u64,
         triple_idx: usize,
-    ) -> Result<SpdzShare, String> {
+    ) -> Result<SpdzShare, SpdzError> {
         if triple_idx >= self.triples.len() {
-            return Err("invalid triple index".to_string());
+            return Err(SpdzError::InvalidTripleIndex(triple_idx));
         }
 
         let triple = &self.triples[triple_idx];
@@ -212,20 +240,61 @@ impl SpdzParty {
         self.triples.len().saturating_sub(self.triple_idx)
     }
 
-    /// Reconstruct a value from both parties' shares.
+    /// Reconstruct a value from both parties' shares, with mandatory
+    /// constant-time MAC verification.
     ///
-    /// Returns the reconstructed value and whether MAC verification passed.
-    pub fn reconstruct(&self, our_share: &SpdzShare, their_share: &SpdzShare) -> (u64, bool) {
+    /// SPDZ security critically depends on aborting before revealing any
+    /// output when the MAC check fails. Returning a `Result` (rather than
+    /// a `(value, bool)` tuple) forces callers to handle that abort path.
+    ///
+    /// The MAC equality is checked via `subtle::ConstantTimeEq` so a
+    /// network adversary cannot learn whether the check passed by timing.
+    pub fn reconstruct(
+        &self,
+        our_share: &SpdzShare,
+        their_share: &SpdzShare,
+    ) -> Result<u64, SpdzError> {
         let value = field_add(our_share.value, their_share.value);
 
         // MAC check: alpha * value == mac_0 + mac_1
         let expected_mac = field_mul(self.alpha_share, value);
         let actual_mac = field_add(our_share.mac, their_share.mac);
 
-        // Note: In a real SPDZ implementation, the MAC check is done
-        // with a random linear combination for batch verification.
-        // This simplified version checks individual values.
-        (value, expected_mac == actual_mac)
+        // Constant-time equality; bool is the last thing derived so no
+        // branch on secret values happens before this point.
+        if bool::from(expected_mac.ct_eq(&actual_mac)) {
+            Ok(value)
+        } else {
+            Err(SpdzError::MacCheckFailed)
+        }
+    }
+
+    /// Batch-verify MACs on a slice of `(our_share, their_share)` pairs
+    /// before any of them is revealed.
+    ///
+    /// In real SPDZ the batch check uses a random linear combination
+    /// (Mac'n'Cheese-style) to avoid N individual field multiplications
+    /// leaking partial MAC information. This helper folds each pair's
+    /// `(alpha * (a+b) == mac_a + mac_b)` check into a single constant-
+    /// time aggregate: XOR of each per-pair mask bit → 0 iff all pass.
+    pub fn verify_all_macs(
+        &self,
+        pairs: &[(SpdzShare, SpdzShare)],
+    ) -> Result<(), SpdzError> {
+        // Accumulate `expected_mac ^ actual_mac` in a u64 so we only
+        // compare at the end. A single non-zero means at least one failed.
+        let mut acc: u64 = 0;
+        for (ours, theirs) in pairs {
+            let value = field_add(ours.value, theirs.value);
+            let expected_mac = field_mul(self.alpha_share, value);
+            let actual_mac = field_add(ours.mac, theirs.mac);
+            acc |= expected_mac ^ actual_mac;
+        }
+        if bool::from(acc.ct_eq(&0u64)) {
+            Ok(())
+        } else {
+            Err(SpdzError::MacCheckFailed)
+        }
     }
 }
 
@@ -465,5 +534,94 @@ mod tests {
         assert_eq!(field_pow(2, 10), 1024);
         assert_eq!(field_pow(0, 0), 1);
         assert_eq!(field_pow(FIELD_PRIME - 1, 2), 1); // (-1)^2 = 1
+    }
+
+    // ── Adversarial / MAC-check tests ───────────────────────────────
+    //
+    // These tests ensure the MAC-check in `reconstruct` / `verify_all_macs`
+    // cannot be bypassed by flipping individual bits of a share or MAC.
+
+    /// Build the two consistent shares of `value` that reconstruct+verify
+    /// correctly under MAC key `alpha`. Helper for adversarial tests.
+    fn shares_of(alpha: u64, value: u64, mask: u64) -> (SpdzShare, SpdzShare) {
+        let share0 = field_sub(value, mask);
+        let share1 = mask;
+        (
+            SpdzShare {
+                value: share0,
+                mac: field_mul(alpha, share0),
+            },
+            SpdzShare {
+                value: share1,
+                mac: field_mul(alpha, share1),
+            },
+        )
+    }
+
+    #[test]
+    fn test_reconstruct_honest_ok() {
+        let alpha = 12345u64;
+        // One party holds the whole alpha (2-of-2 with party 1's share = 0).
+        let party = SpdzParty::new(0, alpha, 1, b"seed");
+        let (s0, s1) = shares_of(alpha, 42, 99_999);
+        assert_eq!(party.reconstruct(&s0, &s1), Ok(42));
+    }
+
+    #[test]
+    fn test_reconstruct_flipped_mac_aborts() {
+        let alpha = 0xc0ffeeu64;
+        let party = SpdzParty::new(0, alpha, 1, b"seed");
+        let (s0, mut s1) = shares_of(alpha, 7, 13);
+        s1.mac ^= 0x1; // adversary tampers one bit of MAC share
+        assert_eq!(party.reconstruct(&s0, &s1), Err(SpdzError::MacCheckFailed));
+    }
+
+    #[test]
+    fn test_reconstruct_flipped_value_aborts() {
+        let alpha = 0xc0ffeeu64;
+        let party = SpdzParty::new(0, alpha, 1, b"seed");
+        let (s0, mut s1) = shares_of(alpha, 7, 13);
+        s1.value = field_add(s1.value, 1); // adversary shifts value by 1
+        assert_eq!(party.reconstruct(&s0, &s1), Err(SpdzError::MacCheckFailed));
+    }
+
+    #[test]
+    fn test_verify_all_macs_one_bad_aborts() {
+        let alpha = 0xdeadbeefu64;
+        let party = SpdzParty::new(0, alpha, 1, b"seed");
+        let mut pairs: Vec<(SpdzShare, SpdzShare)> = (0..4)
+            .map(|i| shares_of(alpha, 100 + i, 999 * (i + 1)))
+            .collect();
+        // All good → OK.
+        assert_eq!(party.verify_all_macs(&pairs), Ok(()));
+
+        // Corrupt one pair's MAC; the batch must abort.
+        pairs[2].1.mac ^= 0x80;
+        assert_eq!(
+            party.verify_all_macs(&pairs),
+            Err(SpdzError::MacCheckFailed)
+        );
+    }
+
+    #[test]
+    fn test_mul_finish_invalid_triple_index() {
+        let party = SpdzParty::new(0, 7, 2, b"seed");
+        // Only 2 triples preprocessed; idx 5 is bogus.
+        assert_eq!(
+            party.mul_finish(0, 0, 5),
+            Err(SpdzError::InvalidTripleIndex(5))
+        );
+    }
+
+    #[test]
+    fn test_mul_begin_triples_exhausted() {
+        let mut party = SpdzParty::new(0, 7, 1, b"seed");
+        let zero = SpdzShare { value: 0, mac: 0 };
+        let _ = party.mul_begin(&zero, &zero).unwrap();
+        // Now exhausted.
+        assert_eq!(
+            party.mul_begin(&zero, &zero),
+            Err(SpdzError::TriplesExhausted)
+        );
     }
 }

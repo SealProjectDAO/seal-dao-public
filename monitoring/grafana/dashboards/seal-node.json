@@ -1,0 +1,84 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "title": "Chain Height",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 0 },
+      "targets": [{ "expr": "seal_chain_height", "legendFormat": "Height" }],
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "fixed", "fixedColor": "#58a6ff" } } }
+    },
+    {
+      "title": "Peers Connected",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 0 },
+      "targets": [{ "expr": "seal_peers_connected", "legendFormat": "Peers" }],
+      "fieldConfig": { "defaults": { "unit": "none", "color": { "mode": "fixed", "fixedColor": "#3fb950" } } }
+    },
+    {
+      "title": "Uptime",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 0 },
+      "targets": [{ "expr": "seal_uptime_seconds", "legendFormat": "Uptime" }],
+      "fieldConfig": { "defaults": { "unit": "s" } }
+    },
+    {
+      "title": "Active Leases",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 0 },
+      "targets": [{ "expr": "seal_leases_active", "legendFormat": "Leases" }],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "title": "Block Production Rate",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "targets": [
+        { "expr": "rate(seal_blocks_produced[1m])*60", "legendFormat": "Blocks/min (produced)" },
+        { "expr": "rate(seal_blocks_received[1m])*60", "legendFormat": "Blocks/min (received)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "blocks/min" } }
+    },
+    {
+      "title": "Transaction Throughput",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "targets": [
+        { "expr": "rate(seal_txs_submitted[1m])*60", "legendFormat": "Submitted/min" },
+        { "expr": "rate(seal_txs_accepted[1m])*60", "legendFormat": "Accepted/min" },
+        { "expr": "rate(seal_txs_rejected[1m])*60", "legendFormat": "Rejected/min" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "tx/min" } }
+    },
+    {
+      "title": "SQL Operations",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "targets": [
+        { "expr": "rate(seal_sql_queries[1m])*60", "legendFormat": "Queries/min" },
+        { "expr": "rate(seal_sql_writes[1m])*60", "legendFormat": "Writes/min" }
+      ]
+    },
+    {
+      "title": "Fee Economics",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "targets": [
+        { "expr": "seal_fees_collected", "legendFormat": "Total Collected" },
+        { "expr": "seal_fees_burned", "legendFormat": "Total Burned" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } } }
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["seal", "blockchain", "testnet"],
+  "templating": { "list": [] },
+  "time": { "from": "now-1h", "to": "now" },
+  "title": "Seal Node Overview",
+  "uid": "seal-node-overview"
+}

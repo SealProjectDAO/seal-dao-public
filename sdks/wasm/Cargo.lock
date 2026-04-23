@@ -624,13 +624,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "seal-procs"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "serde",
+ "sha3",
+ "thiserror",
+ "wasmparser",
+]
+
+[[package]]
 name = "seal-sql"
 version = "0.1.0"
 dependencies = [
+ "hex",
+ "rand 0.8.5",
  "seal-crypto",
  "seal-merkle",
+ "seal-procs",
  "serde",
  "serde_json",
+ "sha3",
  "sqlparser",
  "thiserror",
 ]

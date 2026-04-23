@@ -17,7 +17,10 @@ use std::collections::HashMap;
 // ============================================================================
 
 /// Proposal track (GOVERNANCE.md §2).
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `PartialOrd + Ord` derived so `(String, ProposalTrack)` can key a
+/// `BTreeMap` — see `delegation.rs` for the Kani-motivated switch.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ProposalTrack {
     ParameterChange,
     ProtocolUpgrade,
@@ -701,6 +704,43 @@ impl TechnicalCouncil {
     pub fn has_quorum(&self) -> bool {
         self.members.len() >= self.min_size
     }
+
+    /// Count how many of the given public keys correspond to seated
+    /// council members. Duplicate pubkeys collapse to one vote.
+    pub fn count_valid_approvers(&self, approving_members: &[String]) -> usize {
+        let mut seen = std::collections::HashSet::new();
+        for pk in approving_members {
+            if self.members.contains_key(pk) {
+                seen.insert(pk.clone());
+            }
+        }
+        seen.len()
+    }
+
+    /// Smallest number of council members required for a 2/3
+    /// supermajority vote. Uses ceiling arithmetic — a 7-member
+    /// council needs 5 (not 4), a 11-member council needs 8.
+    pub fn two_thirds_threshold(&self) -> usize {
+        let n = self.members.len();
+        n.saturating_mul(2).div_ceil(3)
+    }
+
+    /// True if `approving_members` covers at least a 2/3 supermajority
+    /// of seated council members. Empty council always returns false
+    /// (caller must bootstrap before using supermajority gates).
+    pub fn has_two_thirds_approval(&self, approving_members: &[String]) -> bool {
+        if self.members.is_empty() {
+            return false;
+        }
+        self.count_valid_approvers(approving_members) >= self.two_thirds_threshold()
+    }
+
+    /// List all seated members (sorted by pubkey for determinism).
+    pub fn list_members(&self) -> Vec<CouncilMember> {
+        let mut out: Vec<CouncilMember> = self.members.values().cloned().collect();
+        out.sort_by(|a, b| a.pubkey.cmp(&b.pubkey));
+        out
+    }
 }
 
 // ============================================================================
@@ -1378,6 +1418,94 @@ mod tests {
             .unwrap();
         assert!(tc.is_vetoed(42));
         assert!(!tc.is_vetoed(43));
+    }
+
+    #[test]
+    fn test_tc_two_thirds_threshold_is_ceiling() {
+        let mut tc = TechnicalCouncil::new();
+        assert_eq!(tc.two_thirds_threshold(), 0);
+        for n in 1..=11 {
+            tc.add_member(CouncilMember {
+                pubkey: format!("m{}", n - 1),
+                name: format!("M{}", n - 1),
+                term_start_epoch: 0,
+                term_end_epoch: 26280,
+            })
+            .unwrap();
+            let expected = (n * 2usize).div_ceil(3);
+            assert_eq!(
+                tc.two_thirds_threshold(),
+                expected,
+                "n={} → expected {}",
+                n,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn test_tc_has_two_thirds_approval() {
+        let mut tc = TechnicalCouncil::new();
+        // Empty council — never approves.
+        assert!(!tc.has_two_thirds_approval(&[]));
+        assert!(!tc.has_two_thirds_approval(&["m0".into()]));
+
+        for i in 0..7 {
+            tc.add_member(CouncilMember {
+                pubkey: format!("m{}", i),
+                name: format!("M{}", i),
+                term_start_epoch: 0,
+                term_end_epoch: 26280,
+            })
+            .unwrap();
+        }
+        // 7 members → 2/3 threshold = ceil(14/3) = 5.
+        assert!(!tc.has_two_thirds_approval(&[
+            "m0".into(),
+            "m1".into(),
+            "m2".into(),
+            "m3".into(),
+        ]));
+        assert!(tc.has_two_thirds_approval(&[
+            "m0".into(),
+            "m1".into(),
+            "m2".into(),
+            "m3".into(),
+            "m4".into(),
+        ]));
+        // Non-members don't count.
+        assert!(!tc.has_two_thirds_approval(&[
+            "m0".into(),
+            "m1".into(),
+            "stranger".into(),
+            "ghost".into(),
+            "unknown".into(),
+        ]));
+        // Duplicates collapse.
+        assert!(!tc.has_two_thirds_approval(&[
+            "m0".into(),
+            "m0".into(),
+            "m1".into(),
+            "m1".into(),
+            "m2".into(),
+        ]));
+    }
+
+    #[test]
+    fn test_tc_list_members_sorted() {
+        let mut tc = TechnicalCouncil::new();
+        for pk in ["charlie", "alice", "bob"] {
+            tc.add_member(CouncilMember {
+                pubkey: pk.into(),
+                name: pk.into(),
+                term_start_epoch: 0,
+                term_end_epoch: 26280,
+            })
+            .unwrap();
+        }
+        let listed = tc.list_members();
+        let pks: Vec<_> = listed.iter().map(|m| m.pubkey.as_str()).collect();
+        assert_eq!(pks, vec!["alice", "bob", "charlie"]);
     }
 
     #[test]

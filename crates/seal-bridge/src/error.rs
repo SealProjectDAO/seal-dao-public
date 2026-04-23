@@ -31,4 +31,10 @@ pub enum BridgeError {
 
     #[error("transaction not found: {0}")]
     TransactionNotFound(String),
+
+    #[error("chain {chain} is paused: {reason}")]
+    ChainPaused { chain: String, reason: String },
+
+    #[error("chain {0} is not paused")]
+    ChainNotPaused(String),
 }

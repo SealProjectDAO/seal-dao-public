@@ -29,6 +29,49 @@ They compile only when running `cargo kani`, not during normal builds.
 | `crates/seal-merkle/src/tree.rs` | Insert-get roundtrip for any 4-byte key/value; root changes on distinct inserts; delete removes key |
 | `crates/seal-token/src/balance.rs` | Credit-debit roundtrip preserves balance; stake-unstake preserves total; debit never underflows |
 
+## Pass matrix (last re-run: 2026-04-18, Kani 0.67.0)
+
+```
+ crate              green / total   notes
+ ─────────────────  ─────────────   ────────────────────────────────────────
+ seal-crypto          3 /  3        all green (SHA3 harnesses replaced with
+                                    libcrux hax+F*, see LIMITATIONS.md)
+ seal-token          19 / 19        all green; DEX orderbook (6) included
+ seal-merkle          4 /  4        all green
+ seal-bridge          3 /  3        all green
+ seal-threshold      13 / 13        all green (NTT 5, ringtail 4, traits 4)
+ seal-consensus      10 / 10        all green
+ seal-node           14 / 14        all green (was 8/14 pre-2026-04-19;
+                                    BTreeMap swap + harness refactor
+                                    closed the remaining 6)
+ ─────────────────  ─────────────
+ total               66 / 66        100% green
+```
+
+To regenerate this matrix, run:
+
+```bash
+for c in seal-crypto seal-token seal-merkle seal-bridge \
+         seal-threshold seal-consensus seal-node; do
+    printf '%s: ' "$c"
+    cargo kani -p "$c" 2>&1 | grep -E '^Complete' | tail -1
+done
+```
+
+**Update 2026-04-19**: all 6 previously-failing seal-node harnesses
+now verify. Two changes landed:
+
+1. `DelegationManager` and `ForkChoice` switched `HashMap` →
+   `BTreeMap`, so their constructors don't pull in the OS random
+   source Kani can't interpret.
+2. Harnesses that originally drove the *API* (`fc.add_candidate(…);
+   fc.winner(…)`) were refactored to verify the *decision logic*
+   (comparator ordering, retain predicate) directly — BTreeMap's
+   internal node-split loops still overwhelm CBMC even with tight
+   unwind bounds, so the harnesses now prove the same invariants
+   without going through the map plumbing. Through-the-API behaviour
+   stays covered by the `#[cfg(test)]` suite.
+
 ## How to run
 
 ```bash

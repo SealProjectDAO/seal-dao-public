@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>forms.seal — encrypted survey demo</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>forms.seal</h1>
+    <p class="subtitle">PQC-encrypted surveys on Seal DAO</p>
+  </header>
+
+  <main>
+    <section id="connection">
+      <h2>1. Connect to a Seal node</h2>
+      <label>
+        RPC endpoint:
+        <input id="rpc-url" type="text" value="http://localhost:8545" />
+      </label>
+      <button id="rpc-test">Test connection</button>
+      <pre id="rpc-status" class="status">not connected</pre>
+    </section>
+
+    <section id="form-pick">
+      <h2>2. Pick a form</h2>
+      <p>The form's ML-KEM-768 public key is fetched from the
+        <code>forms</code> table. Your answer will be encapsulated against
+        it and only the owner can decrypt.</p>
+      <label>
+        Form ID:
+        <input id="form-id" type="number" value="1" min="1" />
+      </label>
+      <button id="form-load">Load form</button>
+      <pre id="form-meta" class="status"></pre>
+    </section>
+
+    <section id="answer">
+      <h2>3. Answer</h2>
+      <p id="answer-prompt">Load a form to see its prompt.</p>
+      <textarea id="answer-text" rows="4" cols="60"
+                placeholder="your answer..."></textarea>
+      <div class="row">
+        <button id="encrypt-btn" disabled>Encrypt locally</button>
+        <button id="submit-btn" disabled>Submit to chain</button>
+      </div>
+      <pre id="encrypted" class="status"></pre>
+    </section>
+
+    <section id="audit">
+      <h2>4. Audit (optional)</h2>
+      <p>Walks the trace chain from the form's genesis hash to the most
+        recent response and confirms it's intact. Auditors do not need
+        the encryption key — only the on-chain ciphertexts.</p>
+      <button id="audit-btn">Verify trace chain</button>
+      <pre id="audit-status" class="status"></pre>
+    </section>
+  </main>
+
+  <footer>
+    <small>This demo uses the WASM SDK at
+      <code>../../sdks/wasm/pkg/</code>. Build it with
+      <code>cd sdks/wasm &amp;&amp; ./build.sh</code> if the page reports
+      a missing module.</small>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

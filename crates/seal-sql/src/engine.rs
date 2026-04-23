@@ -52,6 +52,12 @@ pub struct Engine {
     block_seed: Option<Vec<u8>>,
     /// Monotonic counter for salt uniqueness within a block.
     salt_counter: usize,
+    /// Stored procedures registered via `CREATE FUNCTION ... LANGUAGE
+    /// sql | wasm`. The engine only stores them today — invocation
+    /// dispatching lives in `seal-procs::ProcedureEngine` and is
+    /// surfaced as a separate `CALL`/`SELECT proc(...)` path that
+    /// doesn't need the engine to do anything new at parse time.
+    pub procedures: seal_procs::ProcedureStore,
 }
 
 impl Engine {
@@ -63,6 +69,7 @@ impl Engine {
             last_write_log: None,
             block_seed: None,
             salt_counter: 0,
+            procedures: seal_procs::ProcedureStore::new(),
         }
     }
 
@@ -122,8 +129,199 @@ impl Engine {
                     rows_affected: 0,
                 })
             }
+            // ADR-001: register stored functions/procedures. Invocation
+            // is dispatched via `seal_procs::ProcedureEngine` and lives
+            // outside this match.
+            Statement::CreateFunction(cf) => self.execute_create_function(cf),
+            // ADR-001: `CALL proc(arg, arg, ...)` dispatches to the
+            // procedure store and runs the substituted body through this
+            // same engine. WASM bodies surface as `LanguageNotImplemented`
+            // until the runtime lands.
+            Statement::Call(func) => self.execute_call(func),
             _ => Err(SqlError::Unsupported(format!("statement: {}", stmt))),
         }
+    }
+
+    /// Dispatch `CALL proc(arg, arg, ...)` against the procedure store.
+    ///
+    /// Steps:
+    ///   1. Look up the procedure by name.
+    ///   2. Render each `FunctionArg` to its source-text representation
+    ///      (we don't pre-evaluate — the procedure body sees the raw
+    ///      literal so SQL bodies can use the substituted text inside
+    ///      WHERE clauses, RETURN expressions, etc.).
+    ///   3. SQL body: substitute `$N` placeholders and run the result
+    ///      through `self.execute(...)`. WASM body: refuse with a clear
+    ///      LanguageNotImplemented (validated already at registration).
+    fn execute_call(
+        &mut self,
+        func: &sqlparser::ast::Function,
+    ) -> Result<QueryResult, SqlError> {
+        use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
+
+        let proc_name = func.name.to_string();
+        let proc = self
+            .procedures
+            .get(&proc_name)
+            .cloned()
+            .ok_or_else(|| {
+                SqlError::Execution(format!("procedure '{proc_name}' not found"))
+            })?;
+
+        // Collect call-site arguments as their textual rendering.
+        let mut arg_strings: Vec<String> = Vec::new();
+        match &func.args {
+            FunctionArguments::None => {}
+            FunctionArguments::Subquery(_) => {
+                return Err(SqlError::Unsupported(
+                    "CALL with subquery argument".into(),
+                ));
+            }
+            FunctionArguments::List(list) => {
+                for arg in &list.args {
+                    let rendered = match arg {
+                        FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => e.to_string(),
+                        FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. }
+                        | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(e), .. } => {
+                            e.to_string()
+                        }
+                        _ => {
+                            return Err(SqlError::Unsupported(
+                                "CALL with wildcard / qualified-wildcard argument".into(),
+                            ));
+                        }
+                    };
+                    arg_strings.push(rendered);
+                }
+            }
+        }
+
+        if arg_strings.len() != proc.args.len() {
+            return Err(SqlError::Execution(format!(
+                "procedure '{proc_name}' expects {} arguments, got {}",
+                proc.args.len(),
+                arg_strings.len()
+            )));
+        }
+
+        // `$N` substitution is identical across SQL and PL/pgSQL bodies.
+        let mut body = proc.body.clone();
+        for (i, value) in arg_strings.iter().enumerate() {
+            let placeholder = format!("${}", i + 1);
+            body = body.replace(&placeholder, value);
+        }
+
+        match proc.language {
+            seal_procs::ProcedureLanguage::Sql => {
+                // The Postgres `RETURN <expr>` form in the stored body
+                // is rewritten into `SELECT <expr>` so the engine has
+                // something queryable.
+                let body_to_run = if body.trim_start().to_ascii_uppercase().starts_with("RETURN ") {
+                    let after = &body.trim_start()[7..];
+                    format!("SELECT {}", after)
+                } else {
+                    body
+                };
+                self.execute(&body_to_run)
+            }
+            seal_procs::ProcedureLanguage::PlPgSql => {
+                // Lower the BEGIN ... END block to a sequence of SQL
+                // statements, then execute them in order. The last
+                // statement's QueryResult becomes the CALL's result.
+                let stmts = seal_procs::plpgsql::lower_to_sql(&body)
+                    .map_err(|e| SqlError::Execution(e.to_string()))?;
+                let mut last = QueryResult {
+                    columns: vec![],
+                    rows: vec![],
+                    rows_affected: 0,
+                };
+                for s in stmts {
+                    last = self.execute(&s)?;
+                }
+                Ok(last)
+            }
+            seal_procs::ProcedureLanguage::Wasm => Err(SqlError::Unsupported(format!(
+                "CALL of LANGUAGE wasm procedure '{proc_name}': runtime not yet linked \
+                 (validated at registration; wasmtime engine pending)"
+            ))),
+        }
+    }
+
+    /// Register a `CREATE FUNCTION` definition into the procedure store
+    /// (ADR-001). The body is stored verbatim; invocation is the
+    /// caller's responsibility (see `seal-procs::SqlProcEngine`).
+    fn execute_create_function(
+        &mut self,
+        cf: &sqlparser::ast::CreateFunction,
+    ) -> Result<QueryResult, SqlError> {
+        use sqlparser::ast::CreateFunctionBody;
+
+        let name = cf.name.to_string();
+
+        // Extract LANGUAGE keyword. Reject anything that isn't `sql`
+        // or `wasm` — silently defaulting masks typos.
+        let language = match &cf.language {
+            None => seal_procs::ProcedureLanguage::Sql, // default: SQL
+            Some(ident) => seal_procs::ProcedureLanguage::from_keyword(&ident.value)
+                .ok_or_else(|| {
+                    SqlError::Unsupported(format!(
+                        "LANGUAGE '{}' (only 'sql' and 'wasm' are supported)",
+                        ident.value
+                    ))
+                })?,
+        };
+
+        // Argument list. Each arg's type stringification matches what
+        // the user typed — `seal-procs` doesn't normalise.
+        let args: Vec<seal_procs::ProcedureArg> = cf
+            .args
+            .as_ref()
+            .map(|args| {
+                args.iter()
+                    .map(|a| seal_procs::ProcedureArg {
+                        name: a
+                            .name
+                            .as_ref()
+                            .map(|n| n.value.clone())
+                            .unwrap_or_default(),
+                        type_keyword: a.data_type.to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let return_type = cf.return_type.as_ref().map(|t| t.to_string());
+
+        // Body: pull the literal string out of the AS expression. The
+        // `RETURN expr` form (Postgres LANGUAGE SQL) is also accepted;
+        // we render it back as `RETURN <expr>` so the body round-trips.
+        let body = match &cf.function_body {
+            Some(CreateFunctionBody::AsBeforeOptions(expr))
+            | Some(CreateFunctionBody::AsAfterOptions(expr)) => render_body_expr(expr),
+            Some(CreateFunctionBody::Return(expr)) => format!("RETURN {}", expr),
+            None => {
+                return Err(SqlError::Unsupported(
+                    "CREATE FUNCTION without a body (AS or RETURN)".into(),
+                ));
+            }
+        };
+
+        let proc = seal_procs::Procedure::new(name, args, return_type, language, body);
+
+        // CREATE OR REPLACE → upsert; otherwise refuse to clobber.
+        if cf.or_replace {
+            self.procedures.upsert(proc);
+        } else {
+            self.procedures
+                .register(proc)
+                .map_err(|e| SqlError::Execution(e.to_string()))?;
+        }
+
+        Ok(QueryResult {
+            columns: vec![],
+            rows: vec![],
+            rows_affected: 0,
+        })
     }
 
     fn execute_create_table(&mut self, stmt: &Statement) -> Result<QueryResult, SqlError> {
@@ -572,6 +770,24 @@ fn try_index_lookup(
         }
     }
     None
+}
+
+/// Pull a procedure body out of the AS expression. Postgres-style
+/// dollar-quoted bodies (`AS $$ SELECT 1 $$`) parse as a string-typed
+/// `Value::SingleQuotedString` (sqlparser strips the `$$` markers); we
+/// just hand back its inner contents. For non-string AS bodies the
+/// stringified expr is faithful enough for round-tripping.
+fn render_body_expr(expr: &Expr) -> String {
+    match expr {
+        Expr::Value(Value::SingleQuotedString(s))
+        | Expr::Value(Value::DoubleQuotedString(s))
+        | Expr::Value(Value::DollarQuotedString(sqlparser::ast::DollarQuotedString {
+            value: s,
+            ..
+        }))
+        | Expr::Value(Value::EscapedStringLiteral(s)) => s.clone(),
+        other => other.to_string(),
+    }
 }
 
 /// Evaluate a SQL expression to a SealValue (for INSERT values and SET clauses).
@@ -1024,6 +1240,219 @@ mod tests {
 
         assert!(engine.indexes.has_index("users", "name"));
         assert!(!engine.indexes.has_index("users", "email"));
+    }
+
+    // ────────────────────────────────────────────────────────────────
+    // CREATE FUNCTION (ADR-001) tests
+    // ────────────────────────────────────────────────────────────────
+
+    /// Default `LANGUAGE` is SQL when omitted, and the body is stored
+    /// verbatim. Hash matches what `seal_procs::Procedure::new` would
+    /// produce — i.e. the engine and the registry agree on the wire
+    /// layout.
+    #[test]
+    fn create_function_default_language_is_sql() {
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE FUNCTION double(x INTEGER) RETURNS INTEGER AS $$SELECT x * 2$$;")
+            .unwrap();
+
+        let proc = engine.procedures.get("double").expect("registered");
+        assert_eq!(proc.language, seal_procs::ProcedureLanguage::Sql);
+        assert_eq!(proc.body.trim(), "SELECT x * 2");
+        assert_eq!(proc.args.len(), 1);
+        assert_eq!(proc.args[0].name, "x");
+        assert_eq!(proc.return_type.as_deref(), Some("INTEGER"));
+    }
+
+    /// Explicit `LANGUAGE wasm` round-trips. The body is hex / base64
+    /// / arbitrary text — the engine doesn't decode it; that's the
+    /// `WasmProcEngine`'s job.
+    #[test]
+    fn create_function_language_wasm_stores_body() {
+        let mut engine = Engine::new();
+        engine
+            .execute(
+                "CREATE FUNCTION foo() RETURNS INTEGER LANGUAGE wasm AS $$00deadbeef$$;",
+            )
+            .unwrap();
+        let proc = engine.procedures.get("foo").unwrap();
+        assert_eq!(proc.language, seal_procs::ProcedureLanguage::Wasm);
+        assert_eq!(proc.body, "00deadbeef");
+    }
+
+    /// Unsupported language keyword is rejected — silent default
+    /// would mask typos like `LANGUAGE plpgsq` and ship the wrong
+    /// engine.
+    #[test]
+    fn create_function_unknown_language_rejected() {
+        let mut engine = Engine::new();
+        let err = engine
+            .execute("CREATE FUNCTION f() RETURNS INT LANGUAGE plpython AS $$pass$$;")
+            .unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("LANGUAGE 'plpython'"),
+            "expected unsupported-language message, got {}",
+            msg
+        );
+    }
+
+    /// Re-creating without `OR REPLACE` is rejected (`Duplicate`);
+    /// `OR REPLACE` overwrites cleanly.
+    #[test]
+    fn create_function_duplicate_vs_or_replace() {
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE FUNCTION f() RETURNS INT AS $$SELECT 1$$;")
+            .unwrap();
+        let err = engine
+            .execute("CREATE FUNCTION f() RETURNS INT AS $$SELECT 2$$;")
+            .unwrap_err();
+        assert!(format!("{}", err).contains("already exists"));
+
+        // OR REPLACE wins.
+        engine
+            .execute("CREATE OR REPLACE FUNCTION f() RETURNS INT AS $$SELECT 3$$;")
+            .unwrap();
+        assert_eq!(
+            engine.procedures.get("f").unwrap().body.trim(),
+            "SELECT 3"
+        );
+    }
+
+    /// Multiple distinct functions coexist; the engine's procedure
+    /// store is keyed by name and grows as expected.
+    #[test]
+    fn create_function_multiple_coexist() {
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE FUNCTION inc(x INT) RETURNS INT AS $$SELECT x + 1$$;")
+            .unwrap();
+        engine
+            .execute("CREATE FUNCTION dec(x INT) RETURNS INT AS $$SELECT x - 1$$;")
+            .unwrap();
+        assert_eq!(engine.procedures.len(), 2);
+        assert!(engine.procedures.get("inc").is_some());
+        assert!(engine.procedures.get("dec").is_some());
+        // Distinct hashes (different bodies + names).
+        assert_ne!(
+            engine.procedures.get("inc").unwrap().code_hash,
+            engine.procedures.get("dec").unwrap().code_hash
+        );
+    }
+
+    /// End-to-end: register a SQL function, then dispatch through
+    /// `SqlProcEngine::invoke` — proves the stored body + arg list is
+    /// what the registry hands to the runtime.
+    #[test]
+    fn invoke_sql_function_through_seal_procs() {
+        use seal_procs::{ProcedureEngine, SqlProcEngine};
+
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE FUNCTION add(a INT, b INT) RETURNS INT AS $$SELECT $1 + $2$$;")
+            .unwrap();
+        let proc = engine.procedures.get("add").unwrap().clone();
+
+        // Executor closure simulates the SQL engine: just echo the
+        // substituted body so the test asserts on what would be run.
+        let mut sql_engine = SqlProcEngine::new(|sql: &str| Ok(sql.as_bytes().to_vec()));
+        let out = sql_engine
+            .invoke(&proc, &["10".into(), "20".into()])
+            .unwrap();
+        assert_eq!(out, b"SELECT 10 + 20");
+    }
+
+    #[test]
+    fn call_dispatches_sql_proc_through_engine() {
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE TABLE counters (id BIGINT PRIMARY KEY, n BIGINT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO counters (id, n) VALUES (1, 10), (2, 20), (3, 30)")
+            .unwrap();
+        // SELECT body — the substituted `$1` lands inside the WHERE clause.
+        engine
+            .execute(
+                "CREATE FUNCTION get_n(target BIGINT) RETURNS BIGINT \
+                 AS $$SELECT n FROM counters WHERE id = $1$$;",
+            )
+            .unwrap();
+
+        let result = engine.execute("CALL get_n(2)").expect("CALL must succeed");
+        assert_eq!(result.rows.len(), 1, "exactly one row should match id = 2");
+        // First column of the returned row should be 20.
+        let value = format!("{:?}", result.rows[0].values[0]);
+        assert!(value.contains("20"), "expected 20 in {value}");
+    }
+
+    #[test]
+    fn call_unknown_proc_errors() {
+        let mut engine = Engine::new();
+        let err = engine.execute("CALL nonexistent()").unwrap_err();
+        assert!(
+            matches!(&err, SqlError::Execution(s) if s.contains("not found")),
+            "expected not-found error, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn call_arg_count_mismatch_errors() {
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE FUNCTION takes_two(a INT, b INT) RETURNS INT AS $$SELECT $1 + $2$$;")
+            .unwrap();
+        let err = engine.execute("CALL takes_two(1)").unwrap_err();
+        assert!(matches!(err, SqlError::Execution(s) if s.contains("expects 2")));
+    }
+
+    #[test]
+    fn call_plpgsql_proc_runs_block_and_returns_last() {
+        let mut engine = Engine::new();
+        engine
+            .execute("CREATE TABLE bumps (id BIGINT PRIMARY KEY, n BIGINT)")
+            .unwrap();
+        engine
+            .execute(
+                "CREATE FUNCTION bump(amount BIGINT) RETURNS BIGINT LANGUAGE plpgsql \
+                 AS $$BEGIN INSERT INTO bumps (id, n) VALUES (1, $1); SELECT n FROM bumps; END;$$;",
+            )
+            .unwrap();
+
+        let result = engine
+            .execute("CALL bump(99)")
+            .expect("plpgsql CALL must succeed");
+        assert_eq!(result.rows.len(), 1, "SELECT after INSERT should see the new row");
+        let value = format!("{:?}", result.rows[0].values[0]);
+        assert!(value.contains("99"), "expected 99 in {value}");
+    }
+
+    #[test]
+    fn call_plpgsql_proc_rejects_unsupported_constructs() {
+        let mut engine = Engine::new();
+        engine
+            .execute(
+                "CREATE FUNCTION declares() RETURNS INT LANGUAGE plpgsql \
+                 AS $$BEGIN DECLARE x INT; RETURN 1; END;$$;",
+            )
+            .unwrap();
+        let err = engine.execute("CALL declares()").unwrap_err();
+        assert!(matches!(&err, SqlError::Execution(s) if s.contains("language not yet implemented")),
+                "expected LanguageNotImplemented surface, got {err:?}");
+    }
+
+    #[test]
+    fn call_wasm_proc_returns_unsupported() {
+        let mut engine = Engine::new();
+        engine
+            .execute(
+                "CREATE FUNCTION w() RETURNS INT LANGUAGE wasm AS $$00$$;",
+            )
+            .unwrap();
+        let err = engine.execute("CALL w()").unwrap_err();
+        assert!(matches!(err, SqlError::Unsupported(s) if s.contains("wasm")));
     }
 
     #[test]

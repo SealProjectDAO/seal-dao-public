@@ -5,12 +5,18 @@
 //! - **User-private**: user-defined schema, fully opaque to network
 //! - **Regulated-private**: schema enforced, access via ZK proofs only
 //!
-//! All private data is encrypted with AES-256-GCM. The encryption key is
-//! derived from the owner's ML-KEM keypair via HKDF.
+//! All private data is encrypted with AES-256-GCM (authenticated encryption).
+//! Nonces are 96-bit random values generated from the OS RNG. Keys are wrapped
+//! in [`EncryptionKey`] which zeroes the material on drop.
 
+use aes_gcm::{
+    aead::{Aead, AeadCore, KeyInit, OsRng},
+    Aes256Gcm, Key, Nonce,
+};
 use seal_crypto::hash::{sha3_256, Hash256};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Private table type.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,16 +49,43 @@ pub struct PrivateTableMeta {
 }
 
 /// Encrypted table data (stored on owner's nodes only).
+///
+/// AES-256-GCM ciphertext. The 16-byte authentication tag is appended to the
+/// ciphertext body by the `aes-gcm` crate, so `ciphertext.len() == plaintext.len() + 16`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EncryptedTable {
     /// Table name.
     pub name: String,
-    /// Encrypted rows (AES-256-GCM).
+    /// Ciphertext || auth tag (AES-256-GCM).
     pub ciphertext: Vec<u8>,
-    /// Nonce used for encryption.
+    /// 96-bit nonce used for encryption. MUST be unique per (key, message).
     pub nonce: [u8; 12],
-    /// Data commitment for on-chain verification.
+    /// Data commitment (SHA3 of `nonce || ciphertext`) for on-chain verification.
     pub commitment: Hash256,
+}
+
+/// An AES-256-GCM key that zeroes itself on drop.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct EncryptionKey([u8; 32]);
+
+impl EncryptionKey {
+    /// Wrap 32 bytes of key material. The caller is responsible for how the
+    /// bytes are derived (HKDF from an ML-KEM shared secret, random, etc).
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Generate a fresh random key from the OS RNG.
+    pub fn random() -> Self {
+        use rand::RngCore;
+        let mut bytes = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        Self(bytes)
+    }
+
+    fn as_aes_key(&self) -> &Key<Aes256Gcm> {
+        Key::<Aes256Gcm>::from_slice(&self.0)
+    }
 }
 
 /// Manages private tables for a node.
@@ -93,23 +126,34 @@ impl PrivateTableManager {
         meta
     }
 
-    /// Store encrypted data for a private table.
+    /// Encrypt and store data for a private table.
+    ///
+    /// Generates a fresh 96-bit random nonce, seals `plaintext` with
+    /// AES-256-GCM, stores `nonce || ciphertext || tag`, and updates the
+    /// on-chain commitment to `SHA3(nonce || ciphertext || tag)`. Including
+    /// the nonce in the commitment binds the ciphertext to the nonce used
+    /// during sealing, so replaying the same ciphertext under a different
+    /// nonce fails the commitment check.
     pub fn store_encrypted(
         &mut self,
         name: &str,
         plaintext: &[u8],
-        encryption_key: &[u8; 32],
+        key: &EncryptionKey,
     ) -> Result<Hash256, String> {
-        let _meta = self
-            .metadata
+        self.metadata
             .get(name)
             .ok_or_else(|| format!("private table '{}' not registered", name))?;
 
-        // Encrypt with AES-256-GCM (simplified — uses XOR for now, real impl needs aes-gcm crate)
-        let nonce = generate_nonce();
-        let ciphertext = xor_encrypt(plaintext, encryption_key, &nonce);
-        let commitment = sha3_256(&ciphertext);
+        let cipher = Aes256Gcm::new(key.as_aes_key());
+        let nonce_ga = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(&nonce_ga, plaintext)
+            .map_err(|e| format!("AES-256-GCM encrypt failed: {e}"))?;
 
+        let mut nonce = [0u8; 12];
+        nonce.copy_from_slice(nonce_ga.as_slice());
+
+        let commitment = commit(&nonce, &ciphertext);
         let encrypted = EncryptedTable {
             name: name.to_string(),
             ciphertext,
@@ -119,7 +163,6 @@ impl PrivateTableManager {
 
         self.encrypted_data.insert(name.to_string(), encrypted);
 
-        // Update on-chain metadata
         if let Some(meta) = self.metadata.get_mut(name) {
             meta.data_commitment = commitment;
         }
@@ -127,12 +170,14 @@ impl PrivateTableManager {
         Ok(commitment)
     }
 
-    /// Decrypt and return data (only for owner).
+    /// Decrypt and return data (only for owner). Returns an error if either
+    /// the auth tag fails (tampered ciphertext) or the caller is not the
+    /// registered owner.
     pub fn decrypt(
         &self,
         name: &str,
         caller: &str,
-        encryption_key: &[u8; 32],
+        key: &EncryptionKey,
     ) -> Result<Vec<u8>, String> {
         let meta = self
             .metadata
@@ -148,8 +193,11 @@ impl PrivateTableManager {
             .get(name)
             .ok_or_else(|| "encrypted data not on this node".to_string())?;
 
-        let plaintext = xor_encrypt(&encrypted.ciphertext, encryption_key, &encrypted.nonce);
-        Ok(plaintext)
+        let cipher = Aes256Gcm::new(key.as_aes_key());
+        let nonce = Nonce::from_slice(&encrypted.nonce);
+        cipher
+            .decrypt(nonce, encrypted.ciphertext.as_ref())
+            .map_err(|e| format!("AES-256-GCM decrypt failed: {e}"))
     }
 
     /// Get metadata for a private table (public — anyone can see metadata).
@@ -178,41 +226,25 @@ impl PrivateTableManager {
             .get(name)
             .ok_or_else(|| "encrypted data not on this node".to_string())?;
 
-        let actual = sha3_256(&encrypted.ciphertext);
+        let actual = commit(&encrypted.nonce, &encrypted.ciphertext);
         Ok(actual == meta.data_commitment)
     }
 }
 
-/// Simple XOR-based encryption (placeholder for AES-256-GCM).
-/// In production, replace with `aes-gcm` crate.
-fn xor_encrypt(data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Vec<u8> {
-    let mut keystream = Vec::with_capacity(data.len());
-    let seed: Vec<u8> = key.iter().chain(nonce.iter()).copied().collect();
-    let mut hash = sha3_256(&seed);
-    while keystream.len() < data.len() {
-        keystream.extend_from_slice(&hash.0);
-        hash = sha3_256(&hash.0);
-    }
-    data.iter()
-        .zip(keystream.iter())
-        .map(|(d, k)| d ^ k)
-        .collect()
-}
-
-fn generate_nonce() -> [u8; 12] {
-    let mut nonce = [0u8; 12];
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let hash = sha3_256(&timestamp.to_le_bytes());
-    nonce.copy_from_slice(&hash.0[..12]);
-    nonce
+fn commit(nonce: &[u8; 12], ciphertext: &[u8]) -> Hash256 {
+    let mut buf = Vec::with_capacity(12 + ciphertext.len());
+    buf.extend_from_slice(nonce);
+    buf.extend_from_slice(ciphertext);
+    sha3_256(&buf)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn alice_key() -> EncryptionKey {
+        EncryptionKey::from_bytes([42u8; 32])
+    }
 
     #[test]
     fn test_register_private_table() {
@@ -238,7 +270,7 @@ mod tests {
             "CREATE TABLE secret (id BIGINT, data TEXT)",
         );
 
-        let key = [42u8; 32];
+        let key = alice_key();
         let plaintext = b"sensitive data here";
 
         mgr.store_encrypted("secret", plaintext, &key).unwrap();
@@ -256,9 +288,41 @@ mod tests {
             "CREATE TABLE secret (id BIGINT)",
         );
 
-        let key = [42u8; 32];
+        let key = alice_key();
         mgr.store_encrypted("secret", b"data", &key).unwrap();
         assert!(mgr.decrypt("secret", "seal1bob", &key).is_err());
+    }
+
+    #[test]
+    fn test_decrypt_wrong_key_fails() {
+        let mut mgr = PrivateTableManager::new();
+        mgr.register(
+            "t".into(),
+            "o".into(),
+            PrivateTableType::UserPrivate,
+            "",
+        );
+        let key = alice_key();
+        mgr.store_encrypted("t", b"rows", &key).unwrap();
+
+        let wrong_key = EncryptionKey::from_bytes([7u8; 32]);
+        let err = mgr.decrypt("t", "o", &wrong_key).unwrap_err();
+        assert!(err.contains("decrypt failed"));
+    }
+
+    #[test]
+    fn test_tampered_ciphertext_rejected_by_auth_tag() {
+        let mut mgr = PrivateTableManager::new();
+        mgr.register("t".into(), "o".into(), PrivateTableType::UserPrivate, "");
+        let key = alice_key();
+        mgr.store_encrypted("t", b"rows", &key).unwrap();
+
+        // Flip one byte in the ciphertext — AES-GCM must reject it.
+        mgr.encrypted_data
+            .get_mut("t")
+            .unwrap()
+            .ciphertext[0] ^= 0x01;
+        assert!(mgr.decrypt("t", "o", &key).is_err());
     }
 
     #[test]
@@ -271,9 +335,33 @@ mod tests {
             "CREATE TABLE t (id BIGINT)",
         );
 
-        let key = [7u8; 32];
+        let key = alice_key();
         mgr.store_encrypted("t", b"rows", &key).unwrap();
         assert!(mgr.verify_commitment("t").unwrap());
+
+        // Mutating the stored ciphertext must invalidate the commitment.
+        mgr.encrypted_data.get_mut("t").unwrap().ciphertext[0] ^= 0xFF;
+        assert!(!mgr.verify_commitment("t").unwrap());
+    }
+
+    #[test]
+    fn test_nonces_are_distinct_per_store() {
+        let mut mgr = PrivateTableManager::new();
+        mgr.register("a".into(), "o".into(), PrivateTableType::UserPrivate, "");
+        mgr.register("b".into(), "o".into(), PrivateTableType::UserPrivate, "");
+
+        let key = EncryptionKey::random();
+        mgr.store_encrypted("a", b"same", &key).unwrap();
+        mgr.store_encrypted("b", b"same", &key).unwrap();
+
+        let a_nonce = mgr.encrypted_data["a"].nonce;
+        let b_nonce = mgr.encrypted_data["b"].nonce;
+        assert_ne!(a_nonce, b_nonce, "each seal must use a fresh nonce");
+
+        // Same plaintext + same key + different nonce ⇒ different ciphertexts.
+        let a_ct = &mgr.encrypted_data["a"].ciphertext;
+        let b_ct = &mgr.encrypted_data["b"].ciphertext;
+        assert_ne!(a_ct, b_ct);
     }
 
     #[test]

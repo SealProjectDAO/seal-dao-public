@@ -1,0 +1,14 @@
+/Users/bechaderenaud/work/seal/seal-dao-master/sdks/wasm/target/wasm32-unknown-unknown/release/deps/serde-fdbc3732ae4ca3bc.d: /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/lib.rs /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/integer128.rs /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/private/mod.rs /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/private/de.rs /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/private/ser.rs /Users/bechaderenaud/work/seal/seal-dao-master/sdks/wasm/target/wasm32-unknown-unknown/release/build/serde-ca8a37c4548ca5df/out/private.rs
+
+/Users/bechaderenaud/work/seal/seal-dao-master/sdks/wasm/target/wasm32-unknown-unknown/release/deps/libserde-fdbc3732ae4ca3bc.rlib: /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/lib.rs /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/integer128.rs /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/private/mod.rs /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/private/de.rs /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/private/ser.rs /Users/bechaderenaud/work/seal/seal-dao-master/sdks/wasm/target/wasm32-unknown-unknown/release/build/serde-ca8a37c4548ca5df/out/private.rs
+
+/Users/bechaderenaud/work/seal/seal-dao-master/sdks/wasm/target/wasm32-unknown-unknown/release/deps/libserde-fdbc3732ae4ca3bc.rmeta: /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/lib.rs /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/integer128.rs /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/private/mod.rs /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/private/de.rs /Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/private/ser.rs /Users/bechaderenaud/work/seal/seal-dao-master/sdks/wasm/target/wasm32-unknown-unknown/release/build/serde-ca8a37c4548ca5df/out/private.rs
+
+/Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/lib.rs:
+/Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/integer128.rs:
+/Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/private/mod.rs:
+/Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/private/de.rs:
+/Users/bechaderenaud/work/seal/seal-dao-master/vendor/serde-1.0.228/src/private/ser.rs:
+/Users/bechaderenaud/work/seal/seal-dao-master/sdks/wasm/target/wasm32-unknown-unknown/release/build/serde-ca8a37c4548ca5df/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/bechaderenaud/work/seal/seal-dao-master/sdks/wasm/target/wasm32-unknown-unknown/release/build/serde-ca8a37c4548ca5df/out

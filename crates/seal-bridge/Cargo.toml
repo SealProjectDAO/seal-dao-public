@@ -10,7 +10,14 @@ license.workspace = true
 seal-crypto = { path = "../seal-crypto" }
 seal-token = { path = "../seal-token" }
 serde = { workspace = true }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+] }
+base64 = "0.22"
 
 [dev-dependencies]
 proptest = { workspace = true }

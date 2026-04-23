@@ -279,7 +279,7 @@ Progress == \A h \in 1..MaxHeight : <>(finalized[h] /= "none")
 \*   4. Check temporal properties: Progress (with Fairness)
 \*
 \* With Apalache (symbolic model checker, for larger state spaces):
-\*   apalache-mc check --inv=Agreement SealConsensus.tla
+\*   apalache-mc check --cinit=ConstInit --inv=Agreement SealConsensus.tla
 \*
 \* Expected result: ALL PASS. If any fails, we have a protocol bug.
 \* ========================================================================
