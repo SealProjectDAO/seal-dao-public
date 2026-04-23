@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Seal Wallet — example dApp</title>
+    <style>
+      body {
+        font: 14px/1.5 system-ui, sans-serif;
+        max-width: 640px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+        color: #111;
+      }
+      h1 { margin-bottom: 0.25rem; }
+      .hint { color: #666; font-size: 12px; }
+      button {
+        margin: 0.25rem 0.25rem 0.25rem 0;
+        padding: 0.5rem 0.75rem;
+        font: inherit;
+        cursor: pointer;
+      }
+      input {
+        font: inherit;
+        padding: 0.4rem;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      pre {
+        background: #f4f4f6;
+        border: 1px solid #ddd;
+        padding: 0.75rem;
+        white-space: pre-wrap;
+        word-break: break-all;
+        min-height: 3rem;
+      }
+      .row { display: flex; gap: 0.5rem; align-items: center; }
+    </style>
+  </head>
+  <body>
+    <h1>Seal Wallet — example dApp</h1>
+    <p class="hint">
+      Serve this directory over HTTP (the extension's
+      <code>host_permissions</code> only grants <code>http://localhost:*/*</code>),
+      then click the buttons to exercise <code>window.seal.request(...)</code>.
+    </p>
+
+    <h2>1. Connect</h2>
+    <p class="hint">
+      First-time pages must connect before <code>seal_accounts</code> will
+      return anything — the wallet treats unknown origins as unapproved
+      and returns <code>[]</code>. Clicking "Connect" calls
+      <code>seal_requestAccounts</code>, which opens the extension popup
+      for Approve/Reject.
+    </p>
+    <button id="btn-connect">Connect (seal_requestAccounts)</button>
+    <button id="btn-accounts">seal_accounts</button>
+
+    <h2>2. Sign message</h2>
+    <div class="row">
+      <input id="msg" value="hello" />
+      <button id="btn-sign">seal_signMessage</button>
+    </div>
+
+    <h2>Output</h2>
+    <pre id="out">(no calls yet)</pre>
+
+    <script>
+      const out = document.getElementById("out");
+      function show(label, value) {
+        const pretty =
+          typeof value === "string" ? value : JSON.stringify(value, null, 2);
+        out.textContent = label + "\n" + pretty;
+      }
+
+      function requireSeal() {
+        if (!window.seal || !window.seal.isSealWallet) {
+          show(
+            "Error",
+            "window.seal is not present. Load the Seal Wallet extension (chrome://extensions → Load unpacked → apps/seal-wallet-extension/) and reload this page.",
+          );
+          return false;
+        }
+        return true;
+      }
+
+      document.getElementById("btn-connect").addEventListener("click", async () => {
+        if (!requireSeal()) return;
+        try {
+          const r = await window.seal.request({ method: "seal_requestAccounts" });
+          show("seal_requestAccounts →", r);
+        } catch (e) {
+          show("seal_requestAccounts error", e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-accounts").addEventListener("click", async () => {
+        if (!requireSeal()) return;
+        try {
+          const r = await window.seal.request({ method: "seal_accounts" });
+          show("seal_accounts →", r);
+        } catch (e) {
+          show("seal_accounts error", e.message || String(e));
+        }
+      });
+
+      document.getElementById("btn-sign").addEventListener("click", async () => {
+        if (!requireSeal()) return;
+        const msg = document.getElementById("msg").value;
+        try {
+          const r = await window.seal.request({
+            method: "seal_signMessage",
+            params: [msg],
+          });
+          show(`seal_signMessage(${JSON.stringify(msg)}) →`, r);
+        } catch (e) {
+          show("seal_signMessage error", e.message || String(e));
+        }
+      });
+    </script>
+  </body>
+</html>

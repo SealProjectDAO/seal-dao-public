@@ -1,0 +1,136 @@
+:root {
+  --bg: #0c0e16;
+  --fg: #e7e9f4;
+  --accent: #5a8dee;
+  --warn: #ffb86c;
+  --muted: #6e7290;
+  font-family: system-ui, -apple-system, sans-serif;
+  color-scheme: dark;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  width: 360px;
+  min-height: 480px;
+}
+
+header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-bottom: 1px solid #1d2031;
+}
+
+header h1 {
+  font-size: 16px;
+  margin: 0;
+}
+
+main {
+  padding: 16px;
+}
+
+h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin: 16px 0 6px;
+}
+
+code, pre {
+  background: #181b29;
+  padding: 8px;
+  border-radius: 6px;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 12px;
+  word-break: break-all;
+  white-space: pre-wrap;
+  display: block;
+}
+
+button {
+  background: var(--accent);
+  color: #fff;
+  border: 0;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover { filter: brightness(1.1); }
+button.secondary { background: #2a2e44; }
+button.danger { background: #c95252; }
+
+input, textarea {
+  width: 100%;
+  background: #181b29;
+  color: var(--fg);
+  border: 1px solid #2a2e44;
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  box-sizing: border-box;
+}
+
+ul#requests {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+ul#requests li {
+  background: #181b29;
+  padding: 10px;
+  border-radius: 6px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+ul#requests li .actions { margin-top: 6px; display: flex; gap: 6px; }
+
+.warn { color: var(--warn); }
+
+#screen-setpass input,
+#screen-unlock input {
+  margin-bottom: 8px;
+}
+
+#screen-setpass .actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+#screen-account #btn-lock {
+  margin-left: 6px;
+}
+
+#screen-changepass input,
+#screen-reset input {
+  margin-bottom: 8px;
+}
+
+#screen-changepass .actions,
+#screen-reset .actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+#screen-account #btn-change-pass,
+#screen-account #btn-reset-from-account {
+  margin-right: 6px;
+}
+
+#screen-unlock #btn-reset-from-unlock {
+  margin-top: 12px;
+}
+
+#chpass-ok {
+  color: #8af18a;
+}

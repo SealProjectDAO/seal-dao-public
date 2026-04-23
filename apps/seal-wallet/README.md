@@ -1,65 +1,52 @@
 # Seal Wallet — Desktop Application
 
-## Tech Stack
-- **Backend**: Rust (Tauri, uses seal-node + seal-wallet crates)
-- **Frontend**: Svelte (or React)
-- **Platform**: macOS, Linux, Windows via Tauri
+## Tech stack
+- **Shell**: Electron (`electron.cjs` loads `standalone.html`)
+- **UI**: single-file `standalone.html` (HTML + inline JS, no framework)
+- **Crypto**: in-process WebAssembly compiled from the Rust `seal-*` crates
+  (`seal_dao_wasm_bg.wasm` + `seal_dao_wasm.js`, built from `sdks/wasm/`)
+- **Platforms**: macOS, Linux, Windows (anywhere Electron runs)
 
-## Features (planned)
-- Generate/import/backup mnemonic (32-word phrase)
-- Display bech32m address + balance
-- Send SEAL tokens
-- Block explorer (browse chain)
-- App store (deploy/browse SQL schemas)
-- Governance (proposals + voting)
+## Features
+- Generate / import / backup a 24-word BIP-39 mnemonic
+- Display bech32m `sealt1…` address + balances
+- Sign and verify messages (ML-DSA-65)
+- Send SEAL + token transfers via node RPC
+- Block explorer, governance, DEX panels
 
-## Setup
+## Run
+
 ```bash
-# Prerequisites
-cargo install create-tauri-app tauri-cli
-npm install  # or pnpm install
-
-# Development
-cargo tauri dev
-
-# Build release
-cargo tauri build
+cd apps/seal-wallet
+npm install           # first time only
+npm run electron      # launches the desktop app
 ```
 
-## Architecture
+For the crypto library tests (covers create / import / sign / verify /
+BIP-39 / encrypted save+load):
+
+```bash
+cargo test -p seal-wallet
+```
+
+## Layout
+
 ```
 apps/seal-wallet/
-├── src-tauri/          ← Rust backend
-│   ├── src/
-│   │   └── main.rs     ← Tauri commands (calls seal-node, seal-wallet)
-│   ├── Cargo.toml
-│   └── tauri.conf.json
-├── src/                ← Svelte frontend
-│   ├── App.svelte
-│   ├── routes/
-│   │   ├── Wallet.svelte
-│   │   ├── Explorer.svelte
-│   │   └── Governance.svelte
-│   └── lib/
-│       └── api.ts       ← Tauri invoke wrappers
-├── package.json
-└── svelte.config.js
+├── electron.cjs            ← Electron main process; loads standalone.html
+├── standalone.html         ← the entire wallet UI (self-contained)
+├── seal_dao_wasm.js        ← WASM glue (generated from sdks/wasm)
+├── seal_dao_wasm_bg.wasm   ← Rust crypto compiled to WASM
+├── icon.svg, seal-logo.png ← assets
+└── package.json            ← Electron launch script
 ```
 
-## Tauri Commands (Rust → JavaScript)
-```rust
-#[tauri::command]
-fn get_wallet_info() -> WalletInfo { ... }
+The `src/`, `index.html`, and `vite.config.js` files are an older Svelte
+dev harness and are not used by the Electron build.
 
-#[tauri::command]
-fn send_transfer(to: String, amount: u64) -> Result<String, String> { ... }
+## Regenerating the WASM bundle
 
-#[tauri::command]
-fn get_block(height: u64) -> Option<BlockInfo> { ... }
-
-#[tauri::command]
-fn execute_sql(sql: String) -> Result<QueryResult, String> { ... }
-
-#[tauri::command]
-fn create_proposal(title: String, payload: String) -> Result<u64, String> { ... }
+```bash
+cd sdks/wasm && ./build.sh
+# then copy sdks/wasm/pkg/seal_dao_wasm{.js,_bg.wasm} into apps/seal-wallet/
 ```

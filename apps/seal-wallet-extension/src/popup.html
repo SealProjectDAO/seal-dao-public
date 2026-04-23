@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Seal Wallet</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <img src="../icons/icon-128.png" alt="" width="32" height="32" />
+      <h1>Seal Wallet</h1>
+    </header>
+
+    <main id="app">
+      <!-- screens are toggled by popup.js -->
+      <section id="screen-loading"><p>Loading…</p></section>
+
+      <section id="screen-empty" hidden>
+        <h2>No wallet</h2>
+        <p>Create a new account or import an existing one.</p>
+        <button id="btn-create">Create new wallet</button>
+        <details>
+          <summary>Import from mnemonic</summary>
+          <textarea id="import-mnemonic" rows="3" placeholder="24 words…"></textarea>
+          <button id="btn-import">Import</button>
+        </details>
+      </section>
+
+      <section id="screen-setpass" hidden>
+        <h2>Set a passphrase</h2>
+        <p>Encrypts the vault on disk. At least 8 characters.</p>
+        <input id="setpass-1" type="password" placeholder="Passphrase" autocomplete="new-password" />
+        <input id="setpass-2" type="password" placeholder="Confirm passphrase" autocomplete="new-password" />
+        <p id="setpass-err" class="warn" hidden></p>
+        <div class="actions">
+          <button id="btn-setpass">Continue</button>
+          <button class="secondary" id="btn-setpass-cancel">Cancel</button>
+        </div>
+      </section>
+
+      <section id="screen-unlock" hidden>
+        <h2>Unlock wallet</h2>
+        <p>Enter your passphrase to decrypt the vault.</p>
+        <input id="unlock-pass" type="password" placeholder="Passphrase" autocomplete="current-password" />
+        <p id="unlock-err" class="warn" hidden></p>
+        <button id="btn-unlock">Unlock</button>
+        <button class="danger" id="btn-reset-from-unlock">Reset wallet…</button>
+      </section>
+
+      <section id="screen-account" hidden>
+        <h2>Address</h2>
+        <code id="addr"></code>
+        <button id="btn-copy">Copy</button>
+        <button class="secondary" id="btn-lock">Lock</button>
+        <h2>Pending requests</h2>
+        <ul id="requests"></ul>
+        <h2>RPC endpoint</h2>
+        <input id="rpc-url" type="url" />
+        <button id="btn-save-rpc">Save</button>
+        <h2>Security</h2>
+        <button class="secondary" id="btn-change-pass">Change passphrase…</button>
+        <button class="danger" id="btn-reset-from-account">Reset wallet…</button>
+      </section>
+
+      <section id="screen-changepass" hidden>
+        <h2>Change passphrase</h2>
+        <p>Re-encrypts the vault. Your keys and address stay the same.</p>
+        <input id="chpass-old" type="password" placeholder="Current passphrase" autocomplete="current-password" />
+        <input id="chpass-new1" type="password" placeholder="New passphrase" autocomplete="new-password" />
+        <input id="chpass-new2" type="password" placeholder="Confirm new passphrase" autocomplete="new-password" />
+        <p id="chpass-err" class="warn" hidden></p>
+        <p id="chpass-ok" hidden>Passphrase updated.</p>
+        <div class="actions">
+          <button id="btn-chpass-save">Save</button>
+          <button class="secondary" id="btn-chpass-cancel">Cancel</button>
+        </div>
+      </section>
+
+      <section id="screen-reset" hidden>
+        <h2 class="warn">Reset wallet</h2>
+        <p class="warn">
+          This deletes the encrypted vault and account list from this
+          browser. <strong>If you have not saved your 24-word mnemonic
+          elsewhere, you will permanently lose access to any funds
+          controlled by this wallet.</strong>
+        </p>
+        <p>Type <code>RESET</code> below to confirm.</p>
+        <input id="reset-confirm" type="text" placeholder="RESET" autocapitalize="characters" />
+        <p id="reset-err" class="warn" hidden></p>
+        <div class="actions">
+          <button class="danger" id="btn-reset-confirm">Reset wallet</button>
+          <button class="secondary" id="btn-reset-cancel">Cancel</button>
+        </div>
+      </section>
+
+      <section id="screen-mnemonic" hidden>
+        <h2>Backup phrase</h2>
+        <p class="warn">Write this down. Anyone with it controls your funds.</p>
+        <pre id="mnemonic"></pre>
+        <button id="btn-mnemonic-done">I've saved it</button>
+      </section>
+    </main>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

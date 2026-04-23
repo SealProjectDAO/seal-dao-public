@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Seal Wallet",
+  "version": "0.1.0",
+  "description": "Post-quantum (ML-DSA) Seal DAO wallet — connects dApps to Seal nodes from your browser.",
+  "minimum_chrome_version": "119",
+  "icons": {
+    "128": "icons/icon-128.png"
+  },
+  "action": {
+    "default_title": "Seal Wallet",
+    "default_popup": "src/popup.html"
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["src/content.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/inject.js", "pkg/seal_dao_wasm.js", "pkg/seal_dao_wasm_bg.wasm"],
+      "matches": ["<all_urls>"]
+    }
+  ],
+  "permissions": ["storage", "scripting"],
+  "host_permissions": ["http://localhost:*/*"],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self';"
+  }
+}

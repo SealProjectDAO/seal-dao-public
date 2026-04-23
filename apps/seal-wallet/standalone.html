@@ -529,7 +529,8 @@ async function listPairs() {
   try {
     const r = await rpc('seal_listPairs');
     const pairs = r.pairs || [];
-    $('dexResult').textContent = pairs.length ? 'Pairs: ' + pairs.join(', ') : 'No pairs yet.';
+    const names = pairs.map(p => typeof p === 'string' ? p : (p.pair || `${p.base}/${p.quote}`));
+    $('dexResult').textContent = names.length ? 'Pairs: ' + names.join(', ') : 'No pairs yet.';
     $('dexResult').classList.remove('hidden');
   } catch (e) {
     $('dexResult').textContent = 'Error: ' + e.message;

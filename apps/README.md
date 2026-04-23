@@ -1,63 +1,58 @@
 # Seal DAO — Applications
 
-## Planned Apps
+## Apps
 
-### 1. Seal Wallet Desktop (Tauri + Svelte) — IMPLEMENTED
-- Rust backend: 11 IPC commands (create, import, sign, verify, save, load...)
-- Svelte UI: wallet dashboard, import/export, balance display, signing
-- All crypto in Rust (ML-DSA-65, SHA3-256, bech32m) — keys never leave Rust
-- 5 tests for the Rust command layer
+### 1. Seal Wallet Desktop (Electron) — IMPLEMENTED
+- Electron shell (`electron.cjs`) loading a self-contained `standalone.html`
+- All ML-DSA-65 / SHA3-256 / bech32m crypto runs in-process as WebAssembly
+  compiled from the Rust `seal-*` crates (see `sdks/wasm/`)
+- Supports: create / import / backup (24-word BIP-39), sign + verify,
+  encrypted save/load, node RPC (query, send, token, DEX)
+- See `seal-wallet/README.md`; crypto tests via `cargo test -p seal-wallet`
 
-### 2. Seal Wallet Android (Tauri Mobile or Kotlin) — PLANNED
-- Same Rust crypto backend via FFI (JNI or Tauri Mobile)
-- QR code for address sharing
-- Biometric auth for encrypted wallet
-- See `seal-wallet-android/README.md` for architecture + build plan
+### 2. Seal Wallet Browser Extension (MV3) — IMPLEMENTED
+- Chromium MV3 extension at `seal-wallet-extension/`
+- Same WASM crypto; EIP-1193-shaped `window.seal` injected provider
 
-### 3. Seal Marketplace — IMPLEMENTED
-- Interactive REPL: .list, .buy, .browse, .balances, .produce
-- Multi-user marketplace with checked balance transfers
-- Demonstrates: app deployment, RLS, SQL-as-transactions, Merkle state
+### 3. Seal Wallet Android — PLANNED
+- Kotlin UI + Rust crypto via JNI
+- See `seal-wallet-android/README.md`
 
-## Tech Stack
+### 4. Seal Explorer (web) — IMPLEMENTED
+- `seal-explorer-web/`: block/tx/account browser
+
+### 5. Seal Marketplace — IMPLEMENTED
+- `examples/seal-marketplace/`: interactive REPL
+  (.list, .buy, .browse, .balances, .produce)
+
+## Tech stack
 
 ```
-Frontend: Svelte (or React)
-Backend:  Rust (seal-node as library)
-Desktop:  Tauri (Rust + WebView)
-Mobile:   Tauri Mobile or Kotlin + JNI
+Desktop shell:     Electron
+Wallet UI:         plain HTML + inline JS (standalone.html)
+Crypto:            Rust → WebAssembly (sdks/wasm/)
+Mobile (planned):  Kotlin + JNI to the same Rust crates
 ```
 
-## Getting Started
+## Getting started
 
 ```bash
-# Install Tauri prerequisites
-# macOS:
-xcode-select --install
-brew install pkg-config
-
-# Install Tauri CLI
-cargo install create-tauri-app
-cargo install tauri-cli
-
-# Create wallet app (when ready):
-cd apps/
-cargo tauri init
+cd apps/seal-wallet
+npm install
+npm run electron       # launches the desktop wallet
 ```
 
-## Architecture
+## Layout
 
 ```
 apps/
-├── README.md                ← This file
-├── seal-wallet/             ← Desktop wallet (Tauri + Svelte)
-│   ├── src-tauri/           ← Rust backend (commands.rs)
-│   ├── src/                 ← Svelte frontend (App.svelte)
-│   └── package.json
-├── seal-wallet-android/     ← Android wallet (planned)
-│   └── README.md            ← Architecture + build plan
-└── (seal-marketplace)       ← In examples/seal-marketplace/
+├── README.md                  ← this file
+├── seal-wallet/               ← Electron desktop wallet
+│   ├── electron.cjs           ← Electron main process
+│   ├── standalone.html        ← the wallet UI
+│   └── seal_dao_wasm*         ← Rust crypto, compiled to WASM
+├── seal-wallet-extension/     ← Chromium MV3 extension
+├── seal-wallet-android/       ← Android wallet (planned)
+├── seal-explorer-web/         ← Web block explorer
+└── seal-explorer/             ← CLI explorer
 ```
-
-The Tauri backend calls seal-node and seal-wallet crates directly —
-no RPC or HTTP needed. Rust ↔ JavaScript communication via Tauri commands.
