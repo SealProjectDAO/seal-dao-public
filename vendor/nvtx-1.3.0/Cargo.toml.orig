@@ -1,0 +1,14 @@
+[package]
+name = "nvtx"
+version = "1.3.0"
+authors = ["Spencer Imbleau <spencer@imbleau.com>"]
+edition = "2021"
+description = "Rust bindings for the NVIDIA® Tools Extension SDK (NVTX)"
+repository = "https://github.com/simbleau/nvtx"
+license = "MIT OR Apache-2.0"
+categories = ["api-bindings", "no-std"]
+readme = "README.md"
+include = ["nvtx-sys/NVTX/c/*", "nvtx-sys/export.c", "src/*", "build.rs"]
+
+[build-dependencies]
+cc = "1.0"

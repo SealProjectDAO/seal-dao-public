@@ -1,0 +1,35 @@
+[package]
+name = "ringbuffer"
+version = "0.15.0"
+authors = [
+    "Victor Roest <victor@xirion.net>",
+    "Jonathan Dönszelmann <jonabent@gmail.com>",
+]
+edition = "2021"
+rust-version = "1.59"
+description = "A fixed-size circular buffer"
+repository = "https://github.com/NULLx76/ringbuffer/"
+keywords = ["ring", "cyclic", "circular", "buffer", "no-std"]
+categories = ["data-structures"]
+license = "MIT"
+
+[dev-dependencies]
+criterion = "0.4.0"
+compiletest_rs = "0.10.0"
+
+[features]
+default = ["alloc"]
+# disable the alloc based ringbuffer, to make RingBuffers work in no_alloc environments
+alloc = []
+
+[[bench]]
+name = "bench"
+harness = false
+
+[profile.bench]
+opt-level = 3
+lto = true
+
+[profile.release]
+opt-level = 3
+lto = true
