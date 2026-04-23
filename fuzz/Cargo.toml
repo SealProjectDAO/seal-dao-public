@@ -59,6 +59,11 @@ path = "fuzz_targets/fuzz_ringtail_verify.rs"
 doc = false
 
 [[bin]]
+name = "fuzz_ringtail_sign"
+path = "fuzz_targets/fuzz_ringtail_sign.rs"
+doc = false
+
+[[bin]]
 name = "fuzz_committee_vote"
 path = "fuzz_targets/fuzz_committee_vote.rs"
 doc = false
