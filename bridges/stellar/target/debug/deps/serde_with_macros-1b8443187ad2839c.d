@@ -1,0 +1,8 @@
+/Users/bechaderenaud/work/seal/seal-dao-master/bridges/stellar/target/debug/deps/serde_with_macros-1b8443187ad2839c.d: /Users/bechaderenaud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_with_macros-3.18.0/src/lib.rs /Users/bechaderenaud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_with_macros-3.18.0/src/apply.rs /Users/bechaderenaud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_with_macros-3.18.0/src/lazy_bool.rs /Users/bechaderenaud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_with_macros-3.18.0/src/utils.rs
+
+/Users/bechaderenaud/work/seal/seal-dao-master/bridges/stellar/target/debug/deps/libserde_with_macros-1b8443187ad2839c.dylib: /Users/bechaderenaud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_with_macros-3.18.0/src/lib.rs /Users/bechaderenaud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_with_macros-3.18.0/src/apply.rs /Users/bechaderenaud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_with_macros-3.18.0/src/lazy_bool.rs /Users/bechaderenaud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_with_macros-3.18.0/src/utils.rs
+
+/Users/bechaderenaud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_with_macros-3.18.0/src/lib.rs:
+/Users/bechaderenaud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_with_macros-3.18.0/src/apply.rs:
+/Users/bechaderenaud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_with_macros-3.18.0/src/lazy_bool.rs:
+/Users/bechaderenaud/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde_with_macros-3.18.0/src/utils.rs:

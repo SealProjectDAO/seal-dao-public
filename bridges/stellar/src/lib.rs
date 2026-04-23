@@ -1,9 +1,12 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, symbol_short, Address, Bytes, BytesN, Env,
-    log,
+    contract, contractimpl, contracttype, contracterror, symbol_short, token, Address, Bytes,
+    BytesN, Env, log,
 };
+// Soroban SDK 22 moved `to_xdr` onto the `ToXdr` trait; import it so
+// Address::to_xdr(&env) remains callable.
+use soroban_sdk::xdr::ToXdr;
 
 /// Seal DAO <-> Stellar Bridge Contract (Skeleton)
 ///
@@ -19,10 +22,20 @@ use soroban_sdk::{
 // Storage keys
 // ---------------------------------------------------------------------------
 
-const ADMIN_KEY: &str = "admin";
-const BRIDGE_KEY: &str = "brkey";
-const TOTAL_LOCKED: &str = "locked";
-const NONCE_KEY: &str = "nonce";
+// Storage key strings are inlined at `symbol_short!("…")` sites below
+// (soroban-sdk 22 requires literal strings there). These constants
+// are kept as documentation of which short-symbol maps to which slot;
+// `#[allow(dead_code)]` silences the "unused" warning.
+#[allow(dead_code)] const ADMIN_KEY: &str = "admin";
+#[allow(dead_code)] const BRIDGE_KEY: &str = "brkey";
+#[allow(dead_code)] const TOTAL_LOCKED: &str = "locked";
+#[allow(dead_code)] const NONCE_KEY: &str = "nonce";
+/// Address of the Stellar Asset Contract (SAC) for the token the
+/// bridge operates on. For native XLM this is the SAC derived from
+/// the Asset::Native() XDR on the target network; for a non-native
+/// asset it's the contract ID returned by `stellar contract asset
+/// deploy --asset <code:issuer>`.
+#[allow(dead_code)] const XLM_SAC_KEY: &str = "xlm_sac";
 
 /// Storage key prefix for processed nonces.
 /// Each processed nonce is stored as "done:{nonce}" -> true.
@@ -83,36 +96,46 @@ pub struct SealBridgeContract;
 impl SealBridgeContract {
     /// Initialize the bridge contract.
     ///
-    /// Must be called exactly once. Sets the admin address and the Seal DAO
-    /// committee public key used for verifying unlock proofs.
+    /// Must be called exactly once. Sets the admin address, the Seal
+    /// DAO committee public key used for verifying unlock proofs, and
+    /// the Stellar Asset Contract (SAC) address for the asset this
+    /// bridge operates on.
     ///
     /// # Arguments
     /// * `env` - Soroban environment
     /// * `admin` - Address that can perform admin operations
-    /// * `seal_bridge_key` - The Seal DAO committee's public key (32 bytes)
-    ///                       used to verify threshold signatures on unlocks
+    /// * `seal_bridge_key` - The Seal DAO committee's public key
+    ///                       (32 bytes) used to verify threshold
+    ///                       signatures on unlocks
+    /// * `xlm_sac` - SAC contract address for XLM (or another asset).
+    ///               Derived per-network via
+    ///               `stellar contract id asset --asset native`.
     pub fn initialize(
         env: Env,
         admin: Address,
         seal_bridge_key: BytesN<32>,
+        xlm_sac: Address,
     ) -> Result<(), BridgeError> {
         // Ensure not already initialized
-        if env.storage().instance().has(&symbol_short!(ADMIN_KEY)) {
+        if env.storage().instance().has(&symbol_short!("admin")) {
             return Err(BridgeError::AlreadyInitialized);
         }
 
         env.storage()
             .instance()
-            .set(&symbol_short!(ADMIN_KEY), &admin);
+            .set(&symbol_short!("admin"), &admin);
         env.storage()
             .instance()
-            .set(&symbol_short!(BRIDGE_KEY), &seal_bridge_key);
+            .set(&symbol_short!("brkey"), &seal_bridge_key);
         env.storage()
             .instance()
-            .set(&symbol_short!(TOTAL_LOCKED), &0i128);
+            .set(&symbol_short!("xlm_sac"), &xlm_sac);
         env.storage()
             .instance()
-            .set(&symbol_short!(NONCE_KEY), &0u64);
+            .set(&symbol_short!("locked"), &0i128);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("nonce"), &0u64);
 
         log!(&env, "Seal bridge initialized. Admin: {}", admin);
 
@@ -136,7 +159,7 @@ impl SealBridgeContract {
         seal_address: BytesN<32>,
     ) -> Result<(), BridgeError> {
         // Verify the contract is initialized
-        if !env.storage().instance().has(&symbol_short!(ADMIN_KEY)) {
+        if !env.storage().instance().has(&symbol_short!("admin")) {
             return Err(BridgeError::NotInitialized);
         }
 
@@ -148,39 +171,42 @@ impl SealBridgeContract {
             return Err(BridgeError::InvalidAmount);
         }
 
-        // Transfer XLM from sender to this contract via SAC.
-        // The native XLM SAC address is derived from the network passphrase.
-        // In production, the SAC contract ID is stored during initialize().
-        //
-        // Uncomment when deploying to testnet/mainnet:
-        //   let xlm_sac = env.storage().instance()
-        //       .get::<_, Address>(&symbol_short!("XLM_SAC"))
-        //       .expect("XLM SAC not configured");
-        //   let xlm_client = token::Client::new(&env, &xlm_sac);
-        //   xlm_client.transfer(&sender, &env.current_contract_address(), &amount);
+        // Transfer XLM from sender to this contract via the SAC
+        // (Stellar Asset Contract). The SAC address was set during
+        // `initialize` — for native XLM it's derived via
+        // `stellar contract id asset --asset native` per network.
+        // `transfer` requires `sender.require_auth()` which we already
+        // asserted above.
+        let xlm_sac: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("xlm_sac"))
+            .ok_or(BridgeError::NotInitialized)?;
+        let xlm = token::Client::new(&env, &xlm_sac);
+        xlm.transfer(&sender, &env.current_contract_address(), &amount);
 
         // Update total locked
         let total_locked: i128 = env
             .storage()
             .instance()
-            .get(&symbol_short!(TOTAL_LOCKED))
+            .get(&symbol_short!("locked"))
             .unwrap_or(0);
         let new_total = total_locked
             .checked_add(amount)
             .ok_or(BridgeError::InsufficientBalance)?;
         env.storage()
             .instance()
-            .set(&symbol_short!(TOTAL_LOCKED), &new_total);
+            .set(&symbol_short!("locked"), &new_total);
 
         // Increment and read nonce
         let nonce: u64 = env
             .storage()
             .instance()
-            .get(&symbol_short!(NONCE_KEY))
+            .get(&symbol_short!("nonce"))
             .unwrap_or(0);
         env.storage()
             .instance()
-            .set(&symbol_short!(NONCE_KEY), &(nonce + 1));
+            .set(&symbol_short!("nonce"), &(nonce + 1));
 
         // Emit lock event
         env.events().publish(
@@ -225,7 +251,7 @@ impl SealBridgeContract {
         proof: Bytes,
     ) -> Result<(), BridgeError> {
         // Verify the contract is initialized
-        if !env.storage().instance().has(&symbol_short!(ADMIN_KEY)) {
+        if !env.storage().instance().has(&symbol_short!("admin")) {
             return Err(BridgeError::NotInitialized);
         }
 
@@ -240,12 +266,19 @@ impl SealBridgeContract {
             return Err(BridgeError::AlreadyProcessed);
         }
 
-        // Verify the threshold signature / proof
-        // TODO: Real ML-DSA (post-quantum) threshold signature verification.
-        // Currently a placeholder that accepts any non-empty proof.
-        // In production this MUST verify a Ringtail threshold signature
-        // from the Seal DAO committee over (recipient, amount, nonce).
+        // Verify the committee signature. This checks that the
+        // submitted `proof` is HMAC-SHA-256(seal_bridge_key, canonical
+        // message) — the same committee-MAC construction used on the
+        // Solana side. See `verify_proof` for exactly what is and is
+        // not checked.
         verify_proof(&env, &recipient, amount, nonce, &proof)?;
+
+        // Algebraic Ringtail verify. Off by default — see Cargo.toml
+        // `ringtail-verify` feature. When on, this is stacked on top
+        // of the committee-MAC as a second layer of defense during
+        // the transition to a pure lattice-verified bridge.
+        #[cfg(feature = "ringtail-verify")]
+        verify_ringtail_proof(&env, &recipient, amount, nonce, &proof)?;
 
         // Mark nonce as processed
         env.storage().persistent().set(&nonce_key, &true);
@@ -254,22 +287,28 @@ impl SealBridgeContract {
         let total_locked: i128 = env
             .storage()
             .instance()
-            .get(&symbol_short!(TOTAL_LOCKED))
+            .get(&symbol_short!("locked"))
             .unwrap_or(0);
         let new_total = total_locked
             .checked_sub(amount)
             .ok_or(BridgeError::InsufficientBalance)?;
         env.storage()
             .instance()
-            .set(&symbol_short!(TOTAL_LOCKED), &new_total);
+            .set(&symbol_short!("locked"), &new_total);
 
-        // Transfer XLM from this contract to recipient via SAC.
-        // Uncomment when deploying to testnet/mainnet:
-        //   let xlm_sac = env.storage().instance()
-        //       .get::<_, Address>(&symbol_short!("XLM_SAC"))
-        //       .expect("XLM SAC not configured");
-        //   let xlm_client = token::Client::new(&env, &xlm_sac);
-        //   xlm_client.transfer(&env.current_contract_address(), &recipient, &amount);
+        // Transfer XLM from this contract to recipient via the SAC.
+        // When the authority is the contract's own address, Soroban
+        // forwards the auth from the outer invocation boundary — the
+        // SAC recognises `current_contract_address` as a contract
+        // caller and allows the transfer without an extra auth
+        // signature. See soroban-sdk::token::Client::transfer.
+        let xlm_sac: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("xlm_sac"))
+            .ok_or(BridgeError::NotInitialized)?;
+        let xlm = token::Client::new(&env, &xlm_sac);
+        xlm.transfer(&env.current_contract_address(), &recipient, &amount);
 
         // Emit unlock event
         env.events().publish(
@@ -288,6 +327,32 @@ impl SealBridgeContract {
         Ok(())
     }
 
+    /// Rotate the committee verification key. Only callable by the
+    /// admin set at initialization. In production this is invoked
+    /// once per Seal epoch when the committee's aggregate key
+    /// changes.
+    pub fn rotate_committee_key(
+        env: Env,
+        new_key: BytesN<32>,
+    ) -> Result<(), BridgeError> {
+        if !env.storage().instance().has(&symbol_short!("admin")) {
+            return Err(BridgeError::NotInitialized);
+        }
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .ok_or(BridgeError::NotInitialized)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&symbol_short!("brkey"), &new_key);
+        env.events()
+            .publish((symbol_short!("keyrot"),), admin);
+        log!(&env, "Committee key rotated");
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // View functions
     // -----------------------------------------------------------------------
@@ -296,7 +361,7 @@ impl SealBridgeContract {
     pub fn get_total_locked(env: Env) -> i128 {
         env.storage()
             .instance()
-            .get(&symbol_short!(TOTAL_LOCKED))
+            .get(&symbol_short!("locked"))
             .unwrap_or(0)
     }
 
@@ -304,7 +369,7 @@ impl SealBridgeContract {
     pub fn get_nonce(env: Env) -> u64 {
         env.storage()
             .instance()
-            .get(&symbol_short!(NONCE_KEY))
+            .get(&symbol_short!("nonce"))
             .unwrap_or(0)
     }
 
@@ -316,42 +381,229 @@ impl SealBridgeContract {
 }
 
 // ---------------------------------------------------------------------------
-// Proof verification (STUB)
+// Committee signature verification
 // ---------------------------------------------------------------------------
 
-/// Threshold signature verification for bridge unlocks.
+/// Domain separator for the Stellar committee MAC. Distinct from the
+/// Solana tag so a signature for one chain can't be replayed on the
+/// other.
+const BRIDGE_DOMAIN_TAG: &[u8] = b"seal-bridge-stellar-v1";
+
+/// Size of the committee signature envelope (HMAC-SHA-256 output).
+const COMMITTEE_SIG_LEN: u32 = 32;
+
+/// Verify a committee-MAC authenticating an unlock.
 ///
-/// **Production design** (not yet active):
-/// 1. Retrieve the committee public key from storage (seal_bridge_key)
-/// 2. Reconstruct message: SHA3(recipient || amount || nonce || "seal-stellar-v1")
-/// 3. Verify Ringtail threshold signature against the committee key
+/// # What this checks
 ///
-/// **On-chain verification options** (Soroban budget ~25M instructions):
-/// - Option A: SHA3-HMAC relay — committee pre-hashes, cheaper to verify
-/// - Option B: ML-DSA verifier as Soroban WASM (~10M instructions estimated)
-/// - Option C: ZK proof of valid threshold sig (STARK verify)
+/// 1. `proof.len() == 32` — exact HMAC-SHA-256 output length.
+/// 2. `proof == HMAC-SHA-256(seal_bridge_key, recipient_bytes ||
+///    amount_be_16 || nonce_be_8 || BRIDGE_DOMAIN_TAG)`, compared in
+///    constant time.
 ///
-/// Current: accepts proofs matching SHA3 commitment of (recipient, amount, nonce).
-/// This is a development placeholder with message binding.
+/// The `seal_bridge_key` is the 32-byte shared verification key stored
+/// at `initialize` time. It rotates per Seal epoch via an admin
+/// action (rotate_committee_key, TODO).
+///
+/// # What this does NOT check
+///
+/// - Algebraic validity of a Ringtail threshold signature. Porting
+///   that to Soroban requires 48-bit prime polynomial arithmetic;
+///   tracked as B4 in `bridges/DEPLOYMENT.md`. Trust is anchored in
+///   per-epoch key rotation.
 fn verify_proof(
+    env: &Env,
+    recipient: &Address,
+    amount: i128,
+    nonce: u64,
+    proof: &Bytes,
+) -> Result<(), BridgeError> {
+    if proof.len() != COMMITTEE_SIG_LEN {
+        log!(
+            env,
+            "InvalidProof: expected {}-byte MAC, got {}",
+            COMMITTEE_SIG_LEN,
+            proof.len()
+        );
+        return Err(BridgeError::InvalidProof);
+    }
+    let committee_key: BytesN<32> = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("brkey"))
+        .ok_or(BridgeError::NotInitialized)?;
+
+    // Canonical message: serialized recipient address || amount
+    // (i128 big-endian, 16 bytes) || nonce (u64 big-endian, 8 bytes)
+    // || domain tag. RFC 2104 HMAC is hash-agnostic so byte order is
+    // arbitrary as long as both sides agree (host = Seal committee,
+    // chain = this contract).
+    let mut msg = Bytes::new(env);
+    msg.append(&recipient.to_xdr(env));
+    for byte in amount.to_be_bytes() {
+        msg.push_back(byte);
+    }
+    for byte in nonce.to_be_bytes() {
+        msg.push_back(byte);
+    }
+    msg.append(&Bytes::from_slice(env, BRIDGE_DOMAIN_TAG));
+
+    let key_bytes: Bytes = committee_key.into();
+    let expected = hmac_sha256(env, &key_bytes, &msg);
+    let expected_bytes: Bytes = expected.into();
+
+    if ct_eq_bytes(proof, &expected_bytes) {
+        Ok(())
+    } else {
+        log!(env, "InvalidProof: committee MAC mismatch");
+        Err(BridgeError::InvalidProof)
+    }
+}
+
+/// Algebraic Ringtail verification hook for Soroban.
+///
+/// When the `ringtail-verify` feature is enabled, unlock_xlm additionally
+/// decodes `proof` as a Ringtail envelope and runs the full algebraic
+/// verify via the no_std `seal-ringtail-verify` crate.
+///
+/// ```text
+/// proof layout (ringtail-verify feature):
+///   [0..32]      committee_mac     (HMAC-SHA-256)
+///   [32..34]     participant_count (u16 BE)
+///   [34..36]     threshold         (u16 BE)
+///   [36..68]     challenge         ([u8; 32])
+///   [68..2116]   z                 (256 LE-u64 = 2048 B)
+///   [2116..18500] matrix_a[K]      (K × 2048 B for K=8)
+///   [18500..34884] public_key_t[K] (K × 2048 B)
+/// ```
+///
+/// Soroban's `Bytes` is host-allocated; we materialize each slice
+/// into a stack `[u8; 2048]` buffer once via `copy_into_slice` so the
+/// verifier can borrow it. Per-verify allocation = 17 × 2048 B = 34 KB.
+#[cfg(feature = "ringtail-verify")]
+fn verify_ringtail_proof(
     env: &Env,
     _recipient: &Address,
     _amount: i128,
     _nonce: u64,
     proof: &Bytes,
 ) -> Result<(), BridgeError> {
-    if proof.len() == 0 {
+    use seal_ringtail_verify::{
+        verify as ringtail_verify, ntt::NttCtx, PublicParams,
+        Signature as RtSig, RING_N,
+    };
+
+    const RING_BYTES: u32 = (RING_N as u32) * 8;
+    const MODULE_K: usize = 8;
+    const MIN_ENVELOPE: u32 =
+        32 + 2 + 2 + 32 + RING_BYTES + (MODULE_K as u32) * RING_BYTES * 2;
+    if proof.len() < MIN_ENVELOPE {
+        log!(
+            env,
+            "Ringtail envelope too short: {} < {}",
+            proof.len(),
+            MIN_ENVELOPE
+        );
         return Err(BridgeError::InvalidProof);
     }
 
-    // Development mode: verify message binding via SHA3 commitment.
-    // In production, this will be replaced with real Ringtail verification.
-    // For now, accept any non-empty proof but log a warning.
-    log!(
-        env,
-        "Bridge proof verified (development mode — real Ringtail verification pending)."
-    );
+    // Materialize the envelope into a single linear buffer so the
+    // verifier can index into &[u8] slices.
+    let mut envelope = [0u8; (MIN_ENVELOPE as usize)];
+    let copy_len = MIN_ENVELOPE.min(proof.len());
+    proof
+        .slice(0..copy_len)
+        .copy_into_slice(&mut envelope[..copy_len as usize]);
+
+    let participant_count =
+        u16::from_be_bytes([envelope[32], envelope[33]]) as usize;
+    let threshold = u16::from_be_bytes([envelope[34], envelope[35]]) as usize;
+    let challenge_bytes: &[u8; 32] = (&envelope[36..68])
+        .try_into()
+        .map_err(|_| BridgeError::InvalidProof)?;
+
+    let z = &envelope[68..68 + RING_BYTES as usize];
+    let mut a_off = 68 + RING_BYTES as usize;
+    let mut matrix_a: [&[u8]; MODULE_K] = [&[]; MODULE_K];
+    for slot in matrix_a.iter_mut().take(MODULE_K) {
+        *slot = &envelope[a_off..a_off + RING_BYTES as usize];
+        a_off += RING_BYTES as usize;
+    }
+    let mut t_off = a_off;
+    let mut public_key_t: [&[u8]; MODULE_K] = [&[]; MODULE_K];
+    for slot in public_key_t.iter_mut().take(MODULE_K) {
+        *slot = &envelope[t_off..t_off + RING_BYTES as usize];
+        t_off += RING_BYTES as usize;
+    }
+
+    let sig = RtSig {
+        z,
+        challenge: challenge_bytes,
+        participant_count,
+    };
+    let pp = PublicParams { matrix_a, public_key_t };
+    let ctx = NttCtx::new();
+
+    // Algebraic verify. Once the signer pipes recipient/amount/nonce
+    // through to the hashed message, replace `b""` with the canonical
+    // bytes the host signs.
+    if ringtail_verify(&ctx, &sig, &pp, b"", threshold).is_err() {
+        log!(env, "Ringtail algebraic verify failed");
+        return Err(BridgeError::InvalidProof);
+    }
+
     Ok(())
+}
+
+/// HMAC-SHA-256 per RFC 2104, built on top of `Env::crypto().sha256`
+/// (Soroban's SHA-256 host function). Block size 64; IPAD 0x36; OPAD
+/// 0x5c. Keys longer than 64 bytes are pre-hashed. Inputs and output
+/// use Soroban's `Bytes` / `BytesN<32>` to stay zero-allocation on
+/// the guest heap.
+fn hmac_sha256(env: &Env, key: &Bytes, message: &Bytes) -> BytesN<32> {
+    const BLOCK: u32 = 64;
+    let mut padded = [0u8; 64];
+    if key.len() > BLOCK {
+        let pre = env.crypto().sha256(key).to_array();
+        padded[..32].copy_from_slice(&pre);
+    } else {
+        let mut i = 0u32;
+        while i < key.len() {
+            padded[i as usize] = key.get_unchecked(i);
+            i += 1;
+        }
+    }
+
+    let mut i_pad = [0u8; 64];
+    let mut o_pad = [0u8; 64];
+    for idx in 0..(BLOCK as usize) {
+        i_pad[idx] = padded[idx] ^ 0x36;
+        o_pad[idx] = padded[idx] ^ 0x5c;
+    }
+
+    let mut inner = Bytes::from_slice(env, &i_pad);
+    inner.append(message);
+    let inner_digest = env.crypto().sha256(&inner).to_array();
+
+    let mut outer = Bytes::from_slice(env, &o_pad);
+    outer.extend_from_slice(&inner_digest);
+    env.crypto().sha256(&outer).into()
+}
+
+/// Constant-time byte-slice equality. Both sides must have identical
+/// length; any mismatch returns false but does so after examining
+/// every byte, so timing cannot reveal where the mismatch occurred.
+fn ct_eq_bytes(a: &Bytes, b: &Bytes) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    let mut i = 0u32;
+    while i < a.len() {
+        diff |= a.get_unchecked(i) ^ b.get_unchecked(i);
+        i += 1;
+    }
+    diff == 0
 }
 
 // ---------------------------------------------------------------------------
@@ -362,18 +614,57 @@ fn verify_proof(
 mod test {
     use super::*;
     use soroban_sdk::testutils::Address as _;
-    use soroban_sdk::Env;
+    use soroban_sdk::{
+        token::{StellarAssetClient, TokenClient},
+        Env,
+    };
+
+    /// Register a mock Stellar Asset Contract under `issuer` and
+    /// return its address + a minting client.
+    fn setup_sac(env: &Env) -> (Address, Address) {
+        let issuer = Address::generate(env);
+        let sac = env.register_stellar_asset_contract(issuer.clone());
+        (sac, issuer)
+    }
+
+    /// A fixed 32-byte committee key used across tests. In production
+    /// the committee rotates this each epoch.
+    const TEST_COMMITTEE_KEY: [u8; 32] = [0x11u8; 32];
+
+    /// Compute the same HMAC-SHA-256 over the canonical unlock
+    /// message that `verify_proof` expects. Test-only helper so each
+    /// test produces a real MAC; keeping it close to the contract's
+    /// message layout means renames here force test rewrites too.
+    fn make_committee_sig(
+        env: &Env,
+        recipient: &Address,
+        amount: i128,
+        nonce: u64,
+    ) -> Bytes {
+        let mut msg = Bytes::new(env);
+        msg.append(&recipient.to_xdr(env));
+        for byte in amount.to_be_bytes() {
+            msg.push_back(byte);
+        }
+        for byte in nonce.to_be_bytes() {
+            msg.push_back(byte);
+        }
+        msg.append(&Bytes::from_slice(env, BRIDGE_DOMAIN_TAG));
+        let key = Bytes::from_slice(env, &TEST_COMMITTEE_KEY);
+        hmac_sha256(env, &key, &msg).into()
+    }
 
     #[test]
     fn test_initialize() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, SealBridgeContract);
         let client = SealBridgeContractClient::new(&env, &contract_id);
-
         let admin = Address::generate(&env);
-        let bridge_key = BytesN::from_array(&env, &[0u8; 32]);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let (sac, _) = setup_sac(&env);
 
-        client.initialize(&admin, &bridge_key);
+        client.initialize(&admin, &bridge_key, &sac);
 
         assert_eq!(client.get_total_locked(), 0);
         assert_eq!(client.get_nonce(), 0);
@@ -382,88 +673,205 @@ mod test {
     #[test]
     fn test_initialize_twice_fails() {
         let env = Env::default();
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, SealBridgeContract);
         let client = SealBridgeContractClient::new(&env, &contract_id);
-
         let admin = Address::generate(&env);
-        let bridge_key = BytesN::from_array(&env, &[0u8; 32]);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let (sac, _) = setup_sac(&env);
 
-        client.initialize(&admin, &bridge_key);
-
-        // Second initialization should fail
-        let result = client.try_initialize(&admin, &bridge_key);
+        client.initialize(&admin, &bridge_key, &sac);
+        let result = client.try_initialize(&admin, &bridge_key, &sac);
         assert!(result.is_err());
     }
 
     #[test]
-    fn test_lock_xlm() {
+    fn test_lock_xlm_moves_tokens_into_vault() {
         let env = Env::default();
         env.mock_all_auths();
-
         let contract_id = env.register_contract(None, SealBridgeContract);
         let client = SealBridgeContractClient::new(&env, &contract_id);
-
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
-        let bridge_key = BytesN::from_array(&env, &[0u8; 32]);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
         let seal_address = BytesN::from_array(&env, &[0xABu8; 32]);
+        let (sac, _) = setup_sac(&env);
 
-        client.initialize(&admin, &bridge_key);
+        StellarAssetClient::new(&env, &sac).mint(&sender, &10_000_000);
+        client.initialize(&admin, &bridge_key, &sac);
+        let token = TokenClient::new(&env, &sac);
+        assert_eq!(token.balance(&sender), 10_000_000);
+        assert_eq!(token.balance(&client.address), 0);
+
         client.lock_xlm(&sender, &1_000_000, &seal_address);
 
+        assert_eq!(token.balance(&sender), 9_000_000);
+        assert_eq!(token.balance(&client.address), 1_000_000);
         assert_eq!(client.get_total_locked(), 1_000_000);
         assert_eq!(client.get_nonce(), 1);
     }
 
     #[test]
-    fn test_unlock_xlm() {
+    fn test_unlock_xlm_with_valid_committee_mac() {
         let env = Env::default();
         env.mock_all_auths();
-
         let contract_id = env.register_contract(None, SealBridgeContract);
         let client = SealBridgeContractClient::new(&env, &contract_id);
-
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let bridge_key = BytesN::from_array(&env, &[0u8; 32]);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
         let seal_address = BytesN::from_array(&env, &[0xABu8; 32]);
+        let (sac, _) = setup_sac(&env);
 
-        client.initialize(&admin, &bridge_key);
-
-        // Lock first
+        StellarAssetClient::new(&env, &sac).mint(&sender, &10_000_000);
+        client.initialize(&admin, &bridge_key, &sac);
         client.lock_xlm(&sender, &1_000_000, &seal_address);
 
-        // Unlock with dummy proof
-        let proof = Bytes::from_slice(&env, &[0x01, 0x02, 0x03]);
+        let proof = make_committee_sig(&env, &recipient, 500_000, 0);
         client.unlock_xlm(&recipient, &500_000, &0, &proof);
 
+        let token = TokenClient::new(&env, &sac);
+        assert_eq!(token.balance(&client.address), 500_000);
+        assert_eq!(token.balance(&recipient), 500_000);
         assert_eq!(client.get_total_locked(), 500_000);
         assert!(client.is_nonce_processed(&0));
+    }
+
+    #[test]
+    fn test_unlock_rejects_wrong_key() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SealBridgeContract);
+        let client = SealBridgeContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let seal_address = BytesN::from_array(&env, &[0xABu8; 32]);
+        let (sac, _) = setup_sac(&env);
+
+        StellarAssetClient::new(&env, &sac).mint(&sender, &10_000_000);
+        client.initialize(&admin, &bridge_key, &sac);
+        client.lock_xlm(&sender, &1_000_000, &seal_address);
+
+        // Compute a MAC with a wrong key — must be rejected.
+        let wrong_key = Bytes::from_slice(&env, &[0x22u8; 32]);
+        let mut msg = Bytes::new(&env);
+        msg.append(&recipient.to_xdr(&env));
+        for byte in 500_000i128.to_be_bytes() {
+            msg.push_back(byte);
+        }
+        for byte in 0u64.to_be_bytes() {
+            msg.push_back(byte);
+        }
+        msg.append(&Bytes::from_slice(&env, BRIDGE_DOMAIN_TAG));
+        let bad_proof: Bytes = hmac_sha256(&env, &wrong_key, &msg).into();
+
+        let result = client.try_unlock_xlm(&recipient, &500_000, &0, &bad_proof);
+        assert!(result.is_err(), "unlock with wrong key must fail");
+    }
+
+    #[test]
+    fn test_unlock_rejects_flipped_bit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SealBridgeContract);
+        let client = SealBridgeContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let seal_address = BytesN::from_array(&env, &[0xABu8; 32]);
+        let (sac, _) = setup_sac(&env);
+
+        StellarAssetClient::new(&env, &sac).mint(&sender, &10_000_000);
+        client.initialize(&admin, &bridge_key, &sac);
+        client.lock_xlm(&sender, &1_000_000, &seal_address);
+
+        // Valid proof, then flip one bit.
+        let good_proof_bytes = make_committee_sig(&env, &recipient, 500_000, 0);
+        let good_fixed: BytesN<32> = good_proof_bytes.try_into().unwrap();
+        let mut tampered = good_fixed.to_array();
+        tampered[0] ^= 1;
+        let tampered_bytes = Bytes::from_slice(&env, &tampered);
+
+        let result = client.try_unlock_xlm(&recipient, &500_000, &0, &tampered_bytes);
+        assert!(result.is_err(), "bit-flipped MAC must fail");
+    }
+
+    #[test]
+    fn test_unlock_rejects_wrong_length() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SealBridgeContract);
+        let client = SealBridgeContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let seal_address = BytesN::from_array(&env, &[0xABu8; 32]);
+        let (sac, _) = setup_sac(&env);
+
+        StellarAssetClient::new(&env, &sac).mint(&sender, &10_000_000);
+        client.initialize(&admin, &bridge_key, &sac);
+        client.lock_xlm(&sender, &1_000_000, &seal_address);
+
+        let short = Bytes::from_slice(&env, &[0u8; 31]);
+        let result = client.try_unlock_xlm(&recipient, &500_000, &0, &short);
+        assert!(result.is_err(), "wrong-length proof must fail");
     }
 
     #[test]
     fn test_unlock_replay_protection() {
         let env = Env::default();
         env.mock_all_auths();
-
         let contract_id = env.register_contract(None, SealBridgeContract);
         let client = SealBridgeContractClient::new(&env, &contract_id);
-
         let admin = Address::generate(&env);
         let sender = Address::generate(&env);
         let recipient = Address::generate(&env);
-        let bridge_key = BytesN::from_array(&env, &[0u8; 32]);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
         let seal_address = BytesN::from_array(&env, &[0xABu8; 32]);
+        let (sac, _) = setup_sac(&env);
 
-        client.initialize(&admin, &bridge_key);
+        StellarAssetClient::new(&env, &sac).mint(&sender, &10_000_000);
+        client.initialize(&admin, &bridge_key, &sac);
         client.lock_xlm(&sender, &2_000_000, &seal_address);
 
-        let proof = Bytes::from_slice(&env, &[0x01, 0x02, 0x03]);
+        let proof = make_committee_sig(&env, &recipient, 500_000, 0);
         client.unlock_xlm(&recipient, &500_000, &0, &proof);
 
-        // Second unlock with same nonce should fail
         let result = client.try_unlock_xlm(&recipient, &500_000, &0, &proof);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_rotate_committee_key_changes_verification() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SealBridgeContract);
+        let client = SealBridgeContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let seal_address = BytesN::from_array(&env, &[0xABu8; 32]);
+        let (sac, _) = setup_sac(&env);
+
+        StellarAssetClient::new(&env, &sac).mint(&sender, &10_000_000);
+        client.initialize(&admin, &bridge_key, &sac);
+        client.lock_xlm(&sender, &1_000_000, &seal_address);
+
+        // Before rotation, a MAC made with TEST_COMMITTEE_KEY verifies.
+        let old_proof = make_committee_sig(&env, &recipient, 500_000, 0);
+
+        // Rotate to a new key.
+        let new_key = BytesN::from_array(&env, &[0x22u8; 32]);
+        client.rotate_committee_key(&new_key);
+
+        // Same proof should now be rejected — keyed by the OLD key.
+        let result = client.try_unlock_xlm(&recipient, &500_000, &0, &old_proof);
+        assert!(result.is_err(), "proof under old key must fail after rotation");
     }
 }

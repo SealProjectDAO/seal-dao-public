@@ -70,6 +70,9 @@ soroban contract deploy \
   --network testnet \
   --source <YOUR_SECRET_KEY>
 
+# Resolve the SAC address for native XLM on this network
+XLM_SAC=$(stellar contract id asset --asset native --network testnet)
+
 # Initialize the contract
 soroban contract invoke \
   --id <CONTRACT_ID> \
@@ -77,13 +80,27 @@ soroban contract invoke \
   --source <YOUR_SECRET_KEY> \
   -- initialize \
   --admin <ADMIN_ADDRESS> \
-  --seal_bridge_key <32_BYTE_HEX_KEY>
+  --seal_bridge_key <32_BYTE_HEX_KEY> \
+  --xlm_sac "$XLM_SAC"
 ```
+
+The `xlm_sac` address is the Stellar Asset Contract for the asset the
+bridge operates on. For native XLM it's derived from the network
+passphrase via `stellar contract id asset --asset native`; for a
+non-native asset (e.g. USDC) use
+`stellar contract id asset --asset USDC:<issuer>`. The contract uses
+this SAC to do real `transfer` calls on `lock_xlm` / `unlock_xlm`.
 
 ## TODO
 
-- [ ] Implement ML-DSA threshold signature verification (Ringtail)
-- [ ] Integrate Stellar Asset Contract (SAC) for actual XLM transfers
+- [x] Committee MAC signature verify (HMAC-SHA-256 via
+      `Env::crypto().sha256`) — `verify_proof`. Not a full algebraic
+      Ringtail verify; see B4 in `bridges/DEPLOYMENT.md` for the
+      long-form upgrade path.
+- [x] Committee-key rotation (`rotate_committee_key`, admin-only).
+- [x] Integrate Stellar Asset Contract (SAC) for actual XLM transfers (B5).
+- [ ] Full algebraic Ringtail verify in Soroban (48-bit prime NTT
+      polynomial ops; ~10M instructions estimated).
 - [ ] Add pause/unpause admin functionality
 - [ ] Add fee collection mechanism
 - [ ] Add rate limiting / daily caps

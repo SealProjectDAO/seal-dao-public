@@ -1,0 +1,4 @@
+ℹ️  CARGO_BUILD_RUSTFLAGS=--remap-path-prefix=/Users/bechaderenaud/.cargo/registry/src/= cargo rustc --manifest-path=Cargo.toml --crate-type=cdylib --target=wasm32-unknown-unknown --release --features=ringtail-verify
+   Compiling soroban-sdk v22.0.11
+   Compiling seal-bridge-stellar v0.1.0 (/Users/bechaderenaud/work/seal/seal-dao-master/bridges/stellar)
+    Finished `release` profile [optimized] target(s) in 1.89s
