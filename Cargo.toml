@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["fuzz", "apps/seal-wallet/src-tauri", "apps/seal-wallet-android", "bridges", "sdks/wasm"]
+exclude = ["fuzz", "apps/seal-wallet-android", "bridges", "sdks/wasm", "crates/seal-zk/guest"]
 # Example apps
 # members also includes:
 #   "examples/seal-notes"
@@ -14,8 +14,10 @@ members = [
     "crates/seal-p2p",
     "crates/seal-token",
     "crates/seal-threshold",
+    "crates/seal-ringtail-verify",
     "crates/seal-zk",
     "crates/seal-mpc",
+    "crates/seal-procs",
     "crates/seal-bridge",
     "crates/seal-wallet",
     "crates/seal-tee",
@@ -24,6 +26,13 @@ members = [
     "crates/seal-cli",
     "examples/seal-notes",
     "examples/seal-marketplace",
+    "examples/seal-forms",
+    "examples/seal-social",
+    "examples/seal-auction",
+    "examples/seal-x402",
+    "examples/seal-copy-trading",
+    "examples/seal-kyc",
+    "examples/seal-kindle",
 ]
 
 [workspace.package]
@@ -82,7 +91,7 @@ sled = "0.34"
 tempfile = "3"
 
 # ZK proving backends
-risc0-zkvm = { version = "5.0.0-rc.1", default-features = false }
+risc0-zkvm = { version = "5.0.0-rc.1", default-features = false, features = ["client"] }
 sp1-sdk = { version = "6.0.2", default-features = false }
 
 # Testing
