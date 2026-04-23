@@ -4,7 +4,14 @@
 # Run:   docker run -it seal-node
 # Multi-node: docker-compose up (see docker-compose.yml)
 
-FROM rust:1.82 AS builder
+# Match the host dev env (`rustc --version` → 1.94.1). The MSRV from
+# the dependency graph keeps rising — `vendor/risc0-groth16-5.0.0-rc.1`
+# needs `edition = "2024"` (Rust 1.85+) and the transitive `icu_*`
+# family (via `idna`/`url`) bumps that to 1.86+. Pinning to the
+# workspace's actual Rust (1.94.1 per STATUS.md) keeps Docker builds
+# byte-identical to what we ship locally and absorbs future MSRV
+# bumps without Dockerfile churn.
+FROM rust:1.94-bookworm AS builder
 
 WORKDIR /app
 COPY . .
