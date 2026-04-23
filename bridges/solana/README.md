@@ -75,7 +75,13 @@ anchor deploy --provider.cluster devnet
 
 ## TODO
 
-- [ ] Implement ML-DSA threshold signature verification (Ringtail) on-chain
+- [x] Committee MAC signature verify (HMAC-SHA-256 via `sol_sha256`
+      syscall) — `verify_committee_sig`. Not a full algebraic
+      Ringtail verify yet; see B3 in `bridges/DEPLOYMENT.md` for the
+      long-form upgrade path once lattice arithmetic is ported to BPF.
+- [x] Committee-key rotation ix (`rotate_committee_key`, admin-only).
+- [ ] Full algebraic Ringtail verify in BPF (48-bit prime, sparse
+      polynomial ops; ~150-200K CU budget estimate).
 - [ ] Add nonce replay protection (bitmap or set)
 - [ ] Add pause/unpause admin functionality
 - [ ] Add fee collection mechanism

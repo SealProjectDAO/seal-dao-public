@@ -84,9 +84,14 @@ describe("seal-bridge", () => {
     // );
   });
 
+  // Shared committee key — in production this matches whatever the
+  // Seal node cluster broadcasts as the current epoch's committee MAC
+  // key. For the test we just pick a fixed 32-byte value.
+  const committeeKey = new Uint8Array(32).fill(0x11);
+
   it("initializes the bridge", async () => {
     const tx = await program.methods
-      .initialize()
+      .initialize(Array.from(committeeKey))
       .accounts({
         bridgeState: bridgeStatePda,
         authority: authority.publicKey,
@@ -100,6 +105,29 @@ describe("seal-bridge", () => {
     assert.ok(state.authority.equals(authority.publicKey));
     assert.equal(state.totalLocked.toNumber(), 0);
     assert.equal(state.nonce.toNumber(), 0);
+    assert.deepEqual(Array.from(state.committeeKey), Array.from(committeeKey));
+  });
+
+  it("rotates the committee key", async () => {
+    const newKey = new Uint8Array(32).fill(0x22);
+    await program.methods
+      .rotateCommitteeKey(Array.from(newKey))
+      .accounts({
+        bridgeState: bridgeStatePda,
+        authority: authority.publicKey,
+      })
+      .rpc();
+    const state = await program.account.bridgeState.fetch(bridgeStatePda);
+    assert.deepEqual(Array.from(state.committeeKey), Array.from(newKey));
+
+    // Rotate back so subsequent tests can use the original key.
+    await program.methods
+      .rotateCommitteeKey(Array.from(committeeKey))
+      .accounts({
+        bridgeState: bridgeStatePda,
+        authority: authority.publicKey,
+      })
+      .rpc();
   });
 
   it("locks tokens into the bridge", async () => {

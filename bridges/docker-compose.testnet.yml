@@ -1,0 +1,196 @@
+# Seal DAO — Bridge e2e local testnet stack
+#
+# Brings up a self-contained cross-chain testbed:
+#   * `solana-test-validator` (Solana CLI; Solana 1.18)
+#   * `stellar/quickstart` (Horizon + Stellar Core + friendbot)
+#   * 3 Seal validator nodes
+#
+# Usage:
+#   cd bridges
+#   docker-compose -f docker-compose.testnet.yml up -d
+#   ../scripts/bridge-e2e.sh           # runs the lock->unlock loop
+#   docker-compose -f docker-compose.testnet.yml down -v
+#
+# Exposed ports (on localhost):
+#   Solana RPC           :8899
+#   Solana WebSocket     :8900
+#   Stellar Horizon      :8000
+#   Stellar Core peer    :11626
+#   Seal node 1 RPC      :8545
+#   Seal node 2 RPC      :8546
+#   Seal node 3 RPC      :8547
+#
+# This file is deliberately isolated from ../docker-compose.yml (the
+# 5-validator monitoring stack). Run only one at a time, or adjust
+# ports if you need both.
+
+services:
+  # ── Solana local validator ──────────────────────────────────
+  solana:
+    image: solanalabs/solana:v1.18.26
+    # Solana Labs does not publish arm64 manifests for v1.18.x —
+    # pin linux/amd64 so Docker Desktop transparently runs it
+    # through Rosetta 2 on Apple Silicon. This just silences the
+    # "image's platform does not match the detected host platform"
+    # warning; the validator runs identically either way, just
+    # ~2-3x slower under emulation (fine for bridge e2e testing).
+    # v2.x Solana does ship arm64-native images — when we bump,
+    # remove this pin.
+    platform: linux/amd64
+    container_name: seal-bridge-solana
+    # --reset wipes the ledger on boot for reproducibility.
+    # --bind-address 0.0.0.0 so RPC is reachable from the host.
+    # --rpc-port / --rpc-pubsub-port pinned to well-known defaults.
+    command: >
+      solana-test-validator
+      --reset
+      --bind-address 0.0.0.0
+      --rpc-port 8899
+      --rpc-pubsub-enable-block-subscription
+      --log /root/.solana-log
+    ports:
+      - "8899:8899"
+      - "8900:8900"
+    volumes:
+      - solana-ledger:/test-ledger
+    networks:
+      - seal-bridge-net
+    healthcheck:
+      # solana-test-validator exposes /health on the RPC port once
+      # the validator is caught up, but `solanalabs/solana:v1.18.26`
+      # ships without curl/wget (verified 2026-04-23 — the old
+      # `curl http://localhost:8899/health` probe failed with
+      # "/bin/sh: 1: curl: not found", keeping the container stuck
+      # in "unhealthy" and blocking every seal-* service that does
+      # `depends_on: solana: service_healthy`). The `solana` CLI is
+      # on PATH though; `cluster-version` succeeds (exit 0) once the
+      # RPC is up, which is exactly what we want.
+      test: ["CMD-SHELL", "solana cluster-version --url http://localhost:8899 >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+
+  # ── Stellar local network (Horizon + Core + friendbot) ──────
+  stellar:
+    # stellar/quickstart tag scheme is `latest` / `testing` /
+    # `future` / `nightly` (Horizon+Core stream, not a semver pin).
+    # `:latest` is the stable mainline and matches the Soroban
+    # 22.x contract SDK we use in `bridges/stellar/`. Drift risk
+    # is real — if the CLI breaks again (as it did when
+    # `--enable-horizon` was removed), pin a dated nightly like
+    # `stellar/quickstart:v636-b1011.1-nightly`.
+    image: stellar/quickstart:latest
+    # stellar/quickstart publishes arm64 manifests, so Apple
+    # Silicon runs this natively. If you see an `exec format
+    # error` in `docker logs seal-bridge-stellar`, uncomment
+    # `platform: linux/amd64` to force Rosetta emulation.
+    # platform: linux/amd64
+    container_name: seal-bridge-stellar
+    # --local: isolated test network (distinct from testnet/pubnet).
+    # Horizon + Core + friendbot come up together by default on
+    # recent quickstart images; the old `--enable-horizon` /
+    # `--enable-core` flags were removed (`Unknown container arg
+    # --enable-horizon` at boot if they're still present).
+    command: --local
+    ports:
+      - "8000:8000"
+      - "11626:11626"
+    volumes:
+      - stellar-data:/opt/stellar/data
+    networks:
+      - seal-bridge-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000 >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60 # Horizon takes ~30s to catch up on first boot
+    # Quickstart is heavy; give it room.
+    mem_limit: 4g
+
+  # ── Seal validators ─────────────────────────────────────────
+  # Dockerfile at repo root builds seal-node; we pin validator
+  # index and bootstrap peers here.
+  seal-1:
+    build: ..
+    container_name: seal-bridge-node-1
+    environment:
+      SEAL_VALIDATOR_INDEX: "0"
+      SEAL_P2P_PORT: "4001"
+      SEAL_RPC_PORT: "8545"
+      SEAL_CHAIN_ID: "seal-bridge-local"
+      SEAL_SLOTS_PER_EPOCH: "32"
+      SEAL_COMMITTEE_SIZE: "3"
+      SEAL_VALIDATOR_COUNT: "3"
+      RUST_LOG: "seal_node=info,seal_bridge=debug"
+      # Point the observers at the sibling containers (Docker DNS).
+      SEAL_SOLANA_RPC: "http://solana:8899"
+      SEAL_STELLAR_HORIZON: "http://stellar:8000"
+    ports:
+      - "8545:8545"
+      - "4001:4001"
+    volumes:
+      - seal-1-data:/data
+    depends_on:
+      solana: { condition: service_healthy }
+      stellar: { condition: service_healthy }
+    networks:
+      - seal-bridge-net
+
+  seal-2:
+    build: ..
+    container_name: seal-bridge-node-2
+    environment:
+      SEAL_VALIDATOR_INDEX: "1"
+      SEAL_P2P_PORT: "4001"
+      SEAL_RPC_PORT: "8545"
+      SEAL_CHAIN_ID: "seal-bridge-local"
+      SEAL_SLOTS_PER_EPOCH: "32"
+      SEAL_COMMITTEE_SIZE: "3"
+      SEAL_VALIDATOR_COUNT: "3"
+      SEAL_BOOTSTRAP_PEERS: "/dns4/seal-1/tcp/4001"
+      RUST_LOG: "seal_node=info,seal_bridge=debug"
+      SEAL_SOLANA_RPC: "http://solana:8899"
+      SEAL_STELLAR_HORIZON: "http://stellar:8000"
+    ports:
+      - "8546:8545"
+    volumes:
+      - seal-2-data:/data
+    depends_on:
+      - seal-1
+    networks:
+      - seal-bridge-net
+
+  seal-3:
+    build: ..
+    container_name: seal-bridge-node-3
+    environment:
+      SEAL_VALIDATOR_INDEX: "2"
+      SEAL_P2P_PORT: "4001"
+      SEAL_RPC_PORT: "8545"
+      SEAL_CHAIN_ID: "seal-bridge-local"
+      SEAL_SLOTS_PER_EPOCH: "32"
+      SEAL_COMMITTEE_SIZE: "3"
+      SEAL_VALIDATOR_COUNT: "3"
+      SEAL_BOOTSTRAP_PEERS: "/dns4/seal-1/tcp/4001"
+      RUST_LOG: "seal_node=info,seal_bridge=debug"
+      SEAL_SOLANA_RPC: "http://solana:8899"
+      SEAL_STELLAR_HORIZON: "http://stellar:8000"
+    ports:
+      - "8547:8545"
+    volumes:
+      - seal-3-data:/data
+    depends_on:
+      - seal-1
+    networks:
+      - seal-bridge-net
+
+volumes:
+  solana-ledger:
+  stellar-data:
+  seal-1-data:
+  seal-2-data:
+  seal-3-data:
+
+networks:
+  seal-bridge-net:
+    driver: bridge

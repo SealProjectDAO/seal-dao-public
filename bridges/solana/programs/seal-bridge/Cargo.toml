@@ -15,6 +15,41 @@ no-log-ix-name = []
 cpi = ["no-entrypoint"]
 default = []
 
+# Required by anchor 0.31 to generate the program's IDL during build.
+# Without this feature the build fails with "idl-build feature is
+# missing" on `anchor build`.
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+# Algebraic Ringtail verify (lattice-based, on-chain).
+#
+# When ON, `unlock_tokens` additionally decodes a Ringtail envelope
+# appended to the committee signature and runs the algebraic verify
+# via seal-ringtail-verify. Upgrades the trust model from "committee-
+# MAC with a shared key" to "algebraic Ringtail verify against a
+# public lattice key". Currently gated because:
+#   (1) BPF build size / CU cost needs measurement.
+#   (2) seal-threshold's signer has a known inconsistency with
+#       verify_signature_full (simplified D_i = r_i + e_i vs
+#       D_i = A*r_i + e_i). Separate ticket.
+# Keep OFF for default testnet/mainnet-initial builds until both
+# blockers are resolved.
+ringtail-verify = ["dep:seal-ringtail-verify"]
+
 [dependencies]
-anchor-lang = "0.30"
-anchor-spl = "0.30"
+# Anchor 0.31.x brings in a newer solana-program stack whose blake3
+# pulls constant_time_eq ^0.4 — which builds on Solana's shipped
+# rustc 1.89. Staying on 0.30 pinned the old solana-program 1.18.26
+# whose blake3 needed `constant_time_eq = "^0.4.2"` — but the 0.4.x
+# series requires rustc 1.95 (beyond Solana's bundled compiler),
+# creating a no-build corner. The 0.31 line resolves it.
+anchor-lang = "0.31"
+anchor-spl = "0.31"
+
+# no_std-compatible Ringtail verifier. Optional until BPF CU and
+# signer-fix blockers are cleared.
+seal-ringtail-verify = { path = "../../../../crates/seal-ringtail-verify", optional = true }
+
+[dev-dependencies]
+# Reference HMAC-SHA-256 implementation for unit tests. Not linked
+# into the on-chain BPF binary (dev-dependency only).
+sha2 = "0.10"

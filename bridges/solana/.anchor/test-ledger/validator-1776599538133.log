@@ -1,0 +1,14 @@
+[2026-04-19T11:52:18.133828000Z INFO  solana_test_validator] agave-validator 3.1.13 (src:437252fc; feat:534737035, client:Agave)
+[2026-04-19T11:52:18.134109000Z INFO  solana_test_validator] Starting validator with: ArgsOs {
+        inner: [
+            "solana-test-validator",
+            "--ledger",
+            ".anchor/test-ledger",
+            "--mint",
+            "CiNftNGs76Eu1G7V5Y19xupSHYpNq1ntTfWn8rdAaxB3",
+            "--bpf-program",
+            "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS",
+            "/Users/bechaderenaud/work/seal/seal-dao-master/bridges/solana/target/deploy/seal_bridge.so",
+        ],
+    }
+[2026-04-19T11:52:18.134287000Z WARN  solana_perf] CUDA is disabled
