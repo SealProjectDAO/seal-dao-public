@@ -11,9 +11,7 @@ use alloc::vec::Vec;
 use sha3::{Digest, Sha3_256};
 
 use crate::challenge::expand;
-use crate::field::{
-    mod_sub, norm_sq, AGGREGATE_NORM_BOUND, MODULE_K, RING_N, RING_Q,
-};
+use crate::field::{mod_sub, norm_sq, AGGREGATE_NORM_BOUND, MODULE_K, RING_N, RING_Q};
 use crate::ntt::NttCtx;
 
 /// Ringtail signature in a form suitable for on-chain verification.
@@ -135,7 +133,7 @@ fn deserialize_poly(bytes: &[u8], out: &mut [u64; RING_N]) -> Result<(), VerifyE
     if bytes.len() < RING_N * 8 {
         return Err(VerifyError::BadLength);
     }
-    for i in 0..RING_N {
+    for (i, slot) in out.iter_mut().enumerate() {
         let off = i * 8;
         let arr: [u8; 8] = bytes[off..off + 8]
             .try_into()
@@ -143,7 +141,7 @@ fn deserialize_poly(bytes: &[u8], out: &mut [u64; RING_N]) -> Result<(), VerifyE
         // Host signer does `from_bytes % RING_Q` to reduce. Mirror it so
         // canonical and non-canonical encodings of the same coefficient
         // produce the same internal value.
-        out[i] = u64::from_le_bytes(arr) % RING_Q;
+        *slot = u64::from_le_bytes(arr) % RING_Q;
     }
     Ok(())
 }
@@ -159,7 +157,11 @@ mod tests {
     fn rejects_trivial_challenge() {
         let z = [0u8; RING_N * 8];
         let challenge = [0u8; 32];
-        let sig = Signature { z: &z, challenge: &challenge, participant_count: 67 };
+        let sig = Signature {
+            z: &z,
+            challenge: &challenge,
+            participant_count: 67,
+        };
         let a_bytes = [0u8; RING_N * 8];
         let t_bytes = [0u8; RING_N * 8];
         let pp = PublicParams {
@@ -175,7 +177,11 @@ mod tests {
     fn rejects_insufficient_signers() {
         let z = [0u8; RING_N * 8];
         let challenge = [1u8; 32];
-        let sig = Signature { z: &z, challenge: &challenge, participant_count: 50 };
+        let sig = Signature {
+            z: &z,
+            challenge: &challenge,
+            participant_count: 50,
+        };
         let a_bytes = [0u8; RING_N * 8];
         let t_bytes = [0u8; RING_N * 8];
         let pp = PublicParams {
@@ -184,14 +190,24 @@ mod tests {
         };
         let ctx = NttCtx::new();
         let err = verify(&ctx, &sig, &pp, b"msg", 67).unwrap_err();
-        assert_eq!(err, VerifyError::InsufficientSigners { needed: 67, have: 50 });
+        assert_eq!(
+            err,
+            VerifyError::InsufficientSigners {
+                needed: 67,
+                have: 50
+            }
+        );
     }
 
     #[test]
     fn rejects_bad_length() {
         let z = [0u8; 100]; // too short
         let challenge = [1u8; 32];
-        let sig = Signature { z: &z, challenge: &challenge, participant_count: 67 };
+        let sig = Signature {
+            z: &z,
+            challenge: &challenge,
+            participant_count: 67,
+        };
         let a_bytes = [0u8; RING_N * 8];
         let t_bytes = [0u8; RING_N * 8];
         let pp = PublicParams {

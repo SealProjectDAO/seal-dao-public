@@ -28,21 +28,12 @@ pub fn transfer(
         });
     }
 
-    // Debit sender
-    let from_balance = store
-        .get_mut(from)
-        .ok_or_else(|| TokenError::AccountNotFound(from.into()))?;
-    from_balance.debit(amount)?;
-    let from_bal = from_balance.available;
+    // Debit sender — errors if the sender doesn't exist.
+    store.update(from, |b| b.debit(amount))?;
+    let from_bal = store.available(from);
 
-    // Credit receiver (create account if needed)
-    if store.get_mut(to).is_none() {
-        store.mint(to, 0)?;
-    }
-    store
-        .get_mut(to)
-        .ok_or_else(|| TokenError::AccountNotFound(to.into()))?
-        .credit(amount)?;
+    // Credit receiver (create account if needed).
+    store.update_or_create(to, |b| b.credit(amount))?;
     let to_bal = store.available(to);
 
     Ok(TransferResult {

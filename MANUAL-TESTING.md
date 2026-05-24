@@ -5,6 +5,9 @@ code changes to verify end-to-end functionality.
 
 Sections 1–14 cover the original feature set; sections 15–19 cover
 the RPC / bridge / Ringtail-verify surface added 2026-04-18 onwards.
+Sections 26–28 cover the **testnet-readiness batch landed
+2026-05-10** (state-sync RPC trio + late-joiner bootstrap,
+validator-registration portal, PQC-native release pipeline).
 
 > **Coverage note — 2026-04-23 interim release.** This session drove
 > §1 through §16 end-to-end (wallet ops, SQL, DEX, consensus, P2P,
@@ -22,6 +25,33 @@ the RPC / bridge / Ringtail-verify surface added 2026-04-18 onwards.
 > value, re-run it yourself — the patterns are correct but individual
 > edge cases (e.g. fresh-account policy, token-symbol canonicalization)
 > may have shifted since the last live run.
+
+> **Coverage note — 2026-05-10 testnet-readiness batch.** §26
+> (state-sync RPC trio + late-joiner bootstrap), §27 (validator
+> registration portal), and §28 (release pipeline + sign-file /
+> verify-file) shipped with full unit-test coverage and round-trip
+> tests against in-memory mocks (1077 → 1116 tests, +39 new), but
+> the late-joiner bootstrap path (§26.5) was not exercised against
+> a real two-node testnet in this session — the encode / decode
+> primitives have a deterministic state-root cross-check at the
+> end of `bootstrap_from_peer`, so a divergence would surface as
+> `BootstrapError::StateRootDivergence` rather than silent
+> corruption, but the live multi-node smoke is still owed. The
+> Stellar quickstart pin (§7.5) was validated by `docker compose
+> -f bridges/docker-compose.testnet.yml config` parsing cleanly;
+> a full `bridge-testnet-demo.sh` round-trip wasn't run on this
+> dev machine. See [`TODOS/SESSION-2026-05-10-testnet-readiness.md`](TODOS/SESSION-2026-05-10-testnet-readiness.md)
+> for the full state.
+
+> **Coverage note — 2026-05-16 EOD "no excuse bordel" batch.**
+> Bridge multi-validator Ringtail integration landed (P1#5 layer 4
+> end-to-end, P8 mainnet gates, in-flight session persistence,
+> 3-validator smoke). The operator-side bring-up is documented as
+> a dedicated end-to-end runbook — see
+> [`docs/RUNBOOK-TESTNET-OPERATOR.md`](docs/RUNBOOK-TESTNET-OPERATOR.md).
+> Validator-count + bridge-committee sizing recipes for 3 / 5 / 7
+> validators live in
+> [`docs/TESTNET-VALIDATOR-SIZES.md`](docs/TESTNET-VALIDATOR-SIZES.md).
 
 ## Prerequisites
 
@@ -293,6 +323,40 @@ cargo test -p seal-p2p test_two_nodes_start
 
 **Expected:** Starts 3 local nodes that discover each other via mDNS.
 
+### 6.4 Persistent validator identity
+
+`seal-node --validator-key <path>` pins the on-chain ML-DSA identity
+across restarts. Same keyfile in two consecutive runs → same address,
+same VRF state, same signing keys. Without the flag the node generates
+a fresh keypair every start (fine for local dev, restart-unsafe for
+testnet — the address you registered on the portal would drift away
+from the address your node actually signs with).
+
+```bash
+# Generate once, reuse across restarts:
+cargo run -p seal-cli -- keygen --output /tmp/v1.json
+ADDR=$(jq -r .address /tmp/v1.json)
+
+# Run 1 — confirm the loaded address matches:
+cargo run -p seal-node -- --slots 1 \
+    --validator-key /tmp/v1.json --port 4099 --rpc-port 0 \
+    2>&1 | grep "Validator identity loaded"
+# → Validator identity loaded from /tmp/v1.json (address sealt1…matches $ADDR)
+
+# Run 2 with the same key — identical address.
+# Run 3 without the flag — different ephemeral address each time.
+```
+
+**Negative paths:**
+- Missing / unreadable file: exit 2 with `error: --validator-key
+  <path>: read: …`.
+- Missing or malformed hex fields: exit 2 with `missing 'signing_key'
+  field` / `signing_key hex: …`.
+- HRP mismatch (testnet keyfile on `--mainnet` node, or vice versa):
+  exit 2 with `network mismatch: keyfile is for 'testnet' but node
+  is running in 'mainnet' mode (toggle --mainnet to match)`. Prevents
+  silently signing on the wrong chain.
+
 ## 7. Bridge
 
 ### 7.1 Bridge Tests
@@ -335,22 +399,127 @@ chain-native toolchains and build both programs with the
 ```
 
 **Expected (after install):**
-- `solana-cli` (Anza stable), `anchor-cli` 0.31.1, `stellar-cli` 22.0.0
+- `solana-cli` (Anza stable), `anchor-cli` 0.31.1, `stellar-cli` 25.2.0
   all on PATH.
 - `~/.cargo/bin/{cargo,rustc,rustdoc}` symlinked to rustup (proxies
   for `cargo +<toolchain>` directives used internally by anchor +
   soroban build chains).
 
+> **stellar-cli version note:** The CLI (`stellar-cli` on crates.io)
+> and the Soroban SDK (`soroban-sdk`) share the same major version
+> scheme but are separate crates with independent patch releases.
+> `stellar-cli 25.2.0` + `soroban-sdk 25.3.1` are the matching pair
+> for `stellar-rpc 25.1.0` (shipped in `stellar/quickstart:v637-*`).
+> Do **not** install `stellar-cli 22.0.0` — that was the protocol-22
+> era. Install with:
+> `cargo install stellar-cli --version "25.2.0" --locked`
+
 **Expected (after test):**
 - `bridges/solana/programs/seal-bridge/target/deploy/seal_bridge.so`
   ≈ 270 KB (268 808 bytes at 2026-04-19 landing).
-- `bridges/stellar/target/wasm32-unknown-unknown/release/seal_bridge_stellar.wasm`
-  ≈ 8.6 KB (8 794 bytes at 2026-04-19 landing).
+- `bridges/stellar/target/wasm32v1-none/release/seal_bridge_stellar.wasm`
+  ≈ 8.6 KB (size may vary slightly after sdk-25 rebuild).
 
 **Negative test:** move `.cargo/config.toml` back in place and re-run
 the test script — it should fail fast with a vendor-source error,
 which the script auto-handles by moving the config aside during
 the build and restoring it on EXIT.
+
+### 7.5 Stellar quickstart protocol-25 migration (completed 2026-05-13)
+
+`bridges/docker-compose.testnet.yml` pins a dated nightly image
+(`stellar/quickstart:v637-b1054.1-nightly`, stellar-rpc 25.1.0)
+and runs at the image's native protocol 25. The earlier
+`--protocol-version 22` pin was dropped when protocol-22-era images
+expired (6-month nightly window); stellar-rpc 25.1.0 also requires
+`ContractLedgerCostExtV0` which only exists in a protocol-25 ledger.
+`bridges/stellar/Cargo.toml` pins `soroban-sdk = "25"` to match;
+the WASM build target changed from `wasm32-unknown-unknown` to
+`wasm32v1-none` (required by soroban-sdk 25 on Rust 1.82+).
+
+```bash
+# Compose syntax sanity-check (works on dev machines without
+# spinning up the full stack):
+docker compose -f bridges/docker-compose.testnet.yml config | grep -A 2 "image: stellar"
+```
+
+**Expected:** `image: stellar/quickstart:v637-b1054.1-nightly`
+followed by `command: ["--local"]` (no `--protocol-version` flag).
+
+```bash
+# Full round-trip (requires Docker + Solana + Stellar deployer
+# keys; not safe in CI):
+cd bridges
+docker compose -f docker-compose.testnet.yml up -d
+../scripts/bridge-e2e.sh    # lock→mint→burn→unlock
+```
+
+**Expected:** `stellar contract install` succeeds against
+protocol-25 RPC; the lock side reaches the mint event.
+
+**Stale volume hazard:** The `stellar/quickstart` container must
+start from a fresh volume each session. If `seal-bridge-stellar`
+stays in `starting` state beyond ~5 minutes, the `stellar-data`
+volume has stale state — tear down with `down -v` before retrying:
+```bash
+docker compose -f docker-compose.testnet.yml down -v
+docker compose -f docker-compose.testnet.yml up -d
+```
+
+**Pin expiry:** Stellar nightlies stop building after ~6 months.
+If `docker pull` 404s the tag, bump to a fresher
+`vNNN-bMMMM.M-nightly` from
+[hub.docker.com/r/stellar/quickstart/tags](https://hub.docker.com/r/stellar/quickstart/tags)
+and verify `stellar-rpc version` inside the container still reports
+25.x (matching `soroban-sdk = "25"` in Cargo.toml). Full runbook in
+[`bridges/DEPLOYMENT.md`](bridges/DEPLOYMENT.md).
+
+### 7.6 Port allocation: validator stack vs bridge stack
+
+The two docker-compose stacks in this repo were historically pinned
+to the same host ports (4001/8545+), and bringing one up while the
+other was running failed with:
+
+```
+Error response from daemon: failed to set up container networking:
+  ... Bind for 0.0.0.0:4001 failed: port is already allocated
+```
+
+**Fix landed 2026-05-16:** each stack owns a distinct host-port
+range, so they coexist by default. Container-internal ports stay at
+4001/8545 — only the host mapping differs.
+
+| Stack | File | Host P2P | Host RPC |
+|---|---|---|---|
+| Validator (5/7-node) | `docker-compose.yml` + `bridges/docker-compose.ringtail-5.override.yml` | 4001-4005 | 8545-8549 |
+| Host-side dev testnet | `scripts/testnet.sh` | 4001+ | 8545+ |
+| Bridge (3-node + Solana + Stellar) | `bridges/docker-compose.testnet.yml` | 4101 (seal-1 only) | 8645-8647 |
+| Bridge 5-of-7 ringtail | `+ bridges/docker-compose.ringtail-7.override.yml` | 4101 | 8645-8651 |
+
+Bridge scripts default `SEAL_RPC` to `http://localhost:8645`. The
+host-side dev testnet and the docker validator stack share canonical
+defaults (4001/8545) because they're never run simultaneously.
+
+**Diagnosis when a collision recurs:**
+
+```bash
+lsof -i :4001 -P -n | head
+lsof -i :8545 -P -n | head
+docker ps --format '{{.Names}}\t{{.Ports}}' | grep -E '4001|8545|4101|8645'
+```
+
+**If something other than the two stacks holds 4001/8545** (e.g.
+an orphaned validator container from a prior session, or a host-side
+seal-node started via `cargo run -- --port 4001 --rpc-port 8545`):
+identify the owner and stop it; do NOT remap the bridge stack back
+to 8545, as that re-introduces the original collision pattern.
+
+**If you need to relocate either stack** (e.g. multiple bridge
+stacks for fork testing): override compose port mappings via a
+local override file, and pass `SEAL_RPC=http://localhost:<port>` to
+the bridge scripts. The `:8545` / `:8645` references in script error
+messages now read off `${NODE_PORTS[0]}`, so changing the array in
+one place updates the messages too.
 
 ## 8. ZK Proofs
 
@@ -604,6 +773,76 @@ cargo test -p seal-node --lib -- persistent
 
 **Expected:** 3 tests: basic persistence, survives restart, empty start.
 
+### 12.3 Storage-lease RPCs (no auth, plain curl)
+
+Storage leases pay for keeping rows alive — every CREATE TABLE / INSERT
+charges the owner's balance, and the row is pruneable past
+`paid_through_us`. Two read paths:
+
+**Prereq — a seal-node with RPC enabled.** Either start a standalone
+host-side node:
+
+```bash
+cargo run -p seal-node -- --slots 0 --rpc-port 8545
+NODE=http://localhost:8545
+```
+
+…or reuse a running stack (§7.5 bridge stack publishes RPC on 8645;
+the docker validator stack on 8545 — see §7.6 for the allocation
+map):
+
+```bash
+NODE=http://localhost:8645   # bridge stack (seal-bridge-node-1)
+# NODE=http://localhost:8545 # validator stack or standalone node
+```
+
+**Get a real bech32m address to plug in.** There's no
+`seal_listAllAddresses` RPC — the state is address-keyed without an
+enumerable index. Three ways to obtain one:
+
+```bash
+# 1. Generate a fresh keypair (returns sealt1... in --output JSON):
+cargo run -p seal-cli -- keygen --output /tmp/probe.json
+ADDR=$(jq -r .address /tmp/probe.json)
+
+# 2. Pluck one from any *ByOwner-feeding RPC that already has state
+#    (skips silently if the node is fresh — `// empty` makes jq emit
+#    nothing when leases[] is empty, so xargs runs zero times):
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"seal_listLeases","params":{}}' \
+  | jq -r '.result.leases[0].owner_pubkey_hex // empty' \
+  | xargs -I {} cargo run -q -p seal-cli -- hex-to-addr {}
+
+# 3. Convert a validator's public_key_hex (snapshot of the active set):
+cargo run -q -p seal-cli -- validators
+```
+
+```bash
+# All leases on this node. Optional `{"expired_only": true}` filter
+# returns only leases past their paid_through. Each entry includes
+# table, owner_pubkey_hex, paid_through_us, row_count, byte_size,
+# rate, governance_hold, expired.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"seal_listLeases","params":{}}' | jq
+
+# Per-owner gap-closer — every lease the bech32m address pays for,
+# decoded via SHA3-256(verifying_key). Saves wallets from hex-matching
+# against the global stream.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d "$(jq -cn --arg a "$ADDR" \
+        '{jsonrpc:"2.0",id:2,method:"seal_listLeasesByOwner",
+          params:{address:$a}}')" | jq
+
+# Friendlier wrapper (same RPC, no JSON-RPC noise):
+cargo run -q -p seal-cli -- my-leases --address "$ADDR" --node "$NODE"
+```
+
+**Expected:** `{leases: [...], count, now_us}` from the global call;
+`{address, leases: [...], count}` from the per-owner one. Both empty
+on a fresh node — to populate, first create a table or insert rows
+via `cargo run -p seal-cli -- sql "CREATE TABLE …" --node $NODE --key /tmp/probe.json`
+(needs balance — see §15.1.1 for the `--dev-faucet` setup).
+
 ## 13. Private Tables (at-rest encryption)
 
 Private tables use AES-256-GCM (authenticated encryption) with a 96-bit
@@ -616,7 +855,7 @@ key material on drop.
 cargo test -p seal-node private_tables
 ```
 
-**Expected:** 8 tests pass:
+**Expected:** 9 tests pass:
 - `test_register_private_table`
 - `test_encrypt_decrypt_roundtrip`
 - `test_decrypt_wrong_owner_denied` — access control
@@ -626,6 +865,7 @@ cargo test -p seal-node private_tables
 - `test_nonces_are_distinct_per_store` — same plaintext/key ⇒ different nonce
   ⇒ different ciphertext
 - `test_table_types`
+- `test_tables_by_owner` — owner-filtered listing
 
 ### 13.2 Properties Worth Watching
 
@@ -666,19 +906,28 @@ Start a node with the JSON-RPC server enabled (the default is off —
 cargo run -p seal-node -- --slots 0 --rpc-port 8545
 ```
 
-In another shell:
+In another shell. Generate a real address first — bech32m validation
+rejects the genesis-mint labels (`seal1validators`, `seal1treasury`,
+etc. — those are internal-state keys, not queryable via this RPC):
 
 ```bash
+cargo run -p seal-cli -- keygen --output /tmp/probe.json
+ADDR=$(jq -r .address /tmp/probe.json)
 curl -s -X POST http://localhost:8545 -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"seal_getBalance","params":{"address":"seal1..."}}' | jq
+  -d "$(jq -cn --arg a "$ADDR" \
+        '{jsonrpc:"2.0",id:1,method:"seal_getBalance",params:{address:$a}}')" | jq
 ```
 
-**Expected:** `{"result":{"address":"seal1...","balance":N,"locked":M}}`.
+**Expected:** `{"result":{"address":"sealt1...","balance":N,"total_supply":S}}`
+— balance is 0 on a fresh address; `total_supply` is the chain-wide
+SEAL supply. (Older revisions of this doc claimed `locked: M`;
+that field never made it into the handler — see `handle_get_balance`
+in `crates/seal-node/src/rpc.rs`.)
 
 ### 15.1.1 seal_faucet (dev-only)
 
 Genesis pre-mints to fixed addresses (`seal1validators`,
-`seal1treasury`, …, `crates/seal-node/src/main.rs:119-124`), so a
+`seal1treasury`, …, `crates/seal-node/src/main.rs:237-247`), so a
 freshly-created wallet has balance 0 and no way to pay for anything.
 Start the node with `--dev-faucet` to enable a signature-less
 `seal_faucet` RPC that drips SEAL to any address (capped at 1000 SEAL
@@ -688,17 +937,18 @@ per address per rolling 24 h window, enforced server-side):
 # Node:
 cargo run -p seal-node -- --slots 0 --rpc-port 8545 --dev-faucet
 
-# Drip 100 SEAL (default) to your wallet:
-curl -s -X POST http://localhost:8545 -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"seal_faucet",
-       "params":{"address":"sealt1your-address…"}}' | jq
+# Get a real wallet address. `seal keygen` writes the keypair to JSON
+# and prints the bech32m address; we pull it out via jq. The literal
+# placeholder `sealt1your-address…` will NOT work — it's not a valid
+# bech32m string and the node will reject it with
+# "-32602 invalid address: bech32m: invalid character".
+cargo run -p seal-cli -- keygen --output /tmp/wallet.json
+ADDR=$(jq -r .address /tmp/wallet.json)               # e.g. sealt1…
 
-# If the address lives in a key file (from `seal keygen --output key.json`),
-# use an intermediate BODY variable — command substitution with jq's single-
-# quoted filter next to "$ADDR" is very easy to collapse into a single
-# argument when copy-pasted as one line, producing an "Invalid numeric
-# literal" from jq.
-ADDR=$(jq -r .address key.json)                       # e.g. sealt1…
+# Drip 100 SEAL (default) to that address. Using an intermediate
+# BODY variable avoids a copy-paste trap where the single-quoted jq
+# filter and "$ADDR" collapse into one argument and trigger
+# "Invalid numeric literal" from jq.
 BODY=$(jq -cn --arg a "$ADDR" '{jsonrpc:"2.0",id:1,method:"seal_faucet",params:{address:$a}}')
 curl -s -X POST http://localhost:8545 -H 'content-type: application/json' -d "$BODY" | jq
 
@@ -721,7 +971,8 @@ curl -s -X POST http://localhost:8545 -H 'content-type: application/json' -d "$B
 > faucet 500 SEAL     # 500 SEAL (explicit suffix)
 ```
 
-Without `--dev-faucet` the method returns `-32601 seal_faucet disabled`.
+Without `--dev-faucet` the method returns
+`-32601 seal_faucet disabled (start the node with --dev-faucet)`.
 **Never enable this on a shared/public node** — anyone can drain the
 faucet by minting to arbitrary addresses up to the cap.
 
@@ -730,7 +981,7 @@ faucet by minting to arbitrary addresses up to the cap.
 `seal_transfer` (and every mutating RPC listed in `requires_auth`) is
 ML-DSA-authenticated. The signed message is not the transfer payload —
 it is **`SHA3-256(method || serde_json::to_string(&params))`**
-(`crates/seal-node/src/rpc.rs:272-281`), and the request envelope
+(`crates/seal-node/src/rpc.rs:420-423`), and the request envelope
 carries `signature` (hex) + `sender` (verifying-key hex, **not**
 `caller` — the server derives the caller's address from `sender` via
 `SealAddress::from_verifying_key(&vk, testnet).to_string_encoding()`,
@@ -746,12 +997,31 @@ base units). Up to 9 fractional digits.
 Because hand-signing requires ML-DSA, the practical paths are all
 wallet-backed. Pick one:
 
-**A. Desktop wallet (§1.1) — not yet.** `apps/seal-wallet/standalone.html`
-has Connect / Sign / SQL / MPC / ZK / custom-token / DEX panels but
-**no native SEAL Send form** and no `seal_transfer` call site (the
-`signedRpc` helper at `standalone.html:340-350` is wired, nothing in
-the UI drives it for a plain transfer). Tracked in TODOS.md — for now
-use path B or C below.
+**A. Desktop wallet (§1.1).** `apps/seal-wallet/standalone.html` ships a
+native **Send SEAL** card (between Chain and SQL) that drives
+`signedRpc('seal_transfer', {to, amount})` — see the card markup at
+`standalone.html:125-141` and the `sendSeal()` handler at
+`standalone.html:529`. Typical flow once the Electron window is open:
+
+1. **Create New Wallet** (or **Import** a 24-word mnemonic / 64-hex
+   seed) — copy the `sealt1…` address shown under "Wallet".
+2. **Connect** to `http://localhost:8545`. When both a wallet is
+   loaded and the node is connected, the **Send SEAL** card appears
+   and starts a 5 s balance poll (`refreshBalances()` at
+   `standalone.html:433`).
+3. Fund the address from the dev faucet first (path B/C below) — the
+   wallet UI has no faucet button.
+4. Paste the recipient `sealt1…` into **`seal1… recipient address`**,
+   put the amount in **`amount (µSEAL)`** (units are **base units /
+   µSEAL** — 1 SEAL = 10⁹ µSEAL; enter `25000000000` to send 25 SEAL),
+   click **Send**. The result line shows `Sent N µSEAL → sealt1…
+   (tx: …)`; the balance refreshes 1.5 s later (one dev-devnet slot).
+
+The wallet handles the `method || params_json` canonicalization
+(`sortKeys` + `JSON.stringify` at `standalone.html:364-376`), the
+SHA3-256 hash, the ML-DSA-65 sign over the hash, and the
+`sender`/`signature` envelope — all via the `signedRpc` helper at
+`standalone.html:370`.
 
 **B. Interactive TUI** (`cargo run -p seal-cli -- wallet`). Typical
 session — paste each line at the `>` prompt:
@@ -770,7 +1040,7 @@ Status: confirmed
 
 The TUI handles the `method || params_json` canonicalization, the ML-DSA
 sign, and the `sender`/`signature` envelope fields — see
-`signed_rpc_call` at `crates/seal-cli/src/wallet.rs:735-754`.
+`signed_rpc_call` at `crates/seal-cli/src/wallet.rs:1014`.
 
 **C. One-shot from a key file (no TUI).** Native subcommands on
 `seal-cli` — each takes `--node` (default `http://localhost:8545`)
@@ -845,97 +1115,405 @@ Confirm with `seal_getBalance` on both sides (§15.1).
 
 ## 16. Custom Tokens (SPL-/Stellar-asset-style)
 
-Requires a node with RPC enabled (see §15.1).
+Requires a node with RPC enabled and `--dev-faucet` (see §15.1). All
+mutating RPCs (`seal_createToken`, `seal_mintToken`,
+`seal_transferToken`, `seal_burnToken`, `seal_setTransferFee`,
+`seal_freezeAccount`, `seal_setTokenFrozen`, etc.) are in
+`requires_auth()` (`crates/seal-node/src/rpc.rs`) and need an ML-DSA
+`signature` over `SHA3-256(method || params_json)` plus the verifying
+key as `sender` — same envelope as §15.2. The `seal-cli` subcommands
+below build that envelope for you; drive the flow from the CLI, not
+hand-crafted curl (hand-canonicalizing `params_json` will reach
+`-32003 signature verification failed` trivially).
+
+### 16.0 Scenario setup (run once for §16.1–§16.3)
+
+Each subsection below assumes these three key files and shell
+variables. Run this block in a fresh shell before §16.1:
+
+```bash
+export NODE=http://localhost:8545
+
+# Three identities: creator (mints), alice (transfers + burns),
+# bob (will get frozen). Addresses are computed from the keys; we
+# capture them into shell vars so every later snippet substitutes
+# real bech32m strings instead of `sealt1alice…` placeholders.
+cargo run -p seal-cli -- keygen --output creator.json
+cargo run -p seal-cli -- keygen --output alice.json
+cargo run -p seal-cli -- keygen --output bob.json
+
+export CREATOR_ADDR=$(jq -r .address creator.json)
+export ALICE_ADDR=$(jq -r .address alice.json)
+export BOB_ADDR=$(jq -r .address bob.json)
+echo "CREATOR=$CREATOR_ADDR"
+echo "ALICE  =$ALICE_ADDR"
+echo "BOB    =$BOB_ADDR"
+
+# Each address needs SEAL to cover any future native gas + so the
+# faucet rate-limit doesn't trip when we hit it three times in a row.
+# (Drop the alice / bob faucets if you only want to run §16.1 reads.)
+cargo run -p seal-cli -- faucet --node $NODE --key creator.json --amount '20 SEAL'
+cargo run -p seal-cli -- faucet --node $NODE --key alice.json   --amount '20 SEAL'
+cargo run -p seal-cli -- faucet --node $NODE --key bob.json     --amount '20 SEAL'
+
+# Sanity-fail loudly if any variable is empty (most common cause:
+# you opened a new terminal and skipped §16.0, so `$ALICE_ADDR`
+# expands to `''` and mint-token rejects with
+# `-32602 invalid 'to' address: invalid address: bech32m: no separator found`).
+: "${CREATOR_ADDR:?CREATOR_ADDR is empty — re-run §16.0 in this shell}"
+: "${ALICE_ADDR:?ALICE_ADDR is empty — re-run §16.0 in this shell}"
+: "${BOB_ADDR:?BOB_ADDR is empty — re-run §16.0 in this shell}"
+```
+
+**Already in a new shell?** If `echo $ALICE_ADDR` is empty but the
+key files still exist in the cwd, you don't need to re-`keygen` —
+just re-derive the vars:
+
+```bash
+export NODE=http://localhost:8545
+export CREATOR_ADDR=$(jq -r .address creator.json)
+export ALICE_ADDR=$(jq -r .address alice.json)
+export BOB_ADDR=$(jq -r .address bob.json)
+```
+
+A bare integer in `--amount` means base units (10⁻⁹ SEAL); a decimal
+or trailing ` SEAL` means whole SEAL. Same convention applies to
+`mint-token` and `transfer-token` below — there a bare int is **base
+units of the token**, a decimal is **whole token units**.
 
 ### 16.1 Create → mint → transfer → query
 
-`seal_createToken`, `seal_mintToken`, `seal_transferToken`, and
-`seal_setTransferFee` are all in `requires_auth` (see
-`crates/seal-node/src/rpc.rs` `requires_auth()`), so each request
-needs an ML-DSA `signature` over `SHA3-256(method || params_json)`
-plus the verifying key as `sender` (**not** `caller` — the server
-derives the address from `sender`). Same envelope as §15.2; the
-bech32m guard now rejects `seal1creator…`-style placeholders before
-the handler runs. Hand-crafted curl snippets can reach `-32003
-signature verification failed` trivially — drive the flow through
-the wallet TUI instead.
-
-**TUI session** (node must be running with RPC on 8545):
-
-```
-cargo run -p seal-cli -- wallet
-> create testnet
-> address                                 # copy this — you're the creator
-> connect http://localhost:8545
-> create-token GOLD "Gold Coin" 1000000   # symbol, name, max_supply (base units)
-> mint-token GOLD sealt1alice… 500.0      # decimal = GOLD units; bare int = base units
-> tokens                                  # list — includes transfer_fee_bps
-```
-
-GOLD uses the same 9-decimal convention as SEAL. Non-creator mint
-attempts fail with `-32000`. From a second wallet (Alice, imported
-from the minted address), transfer to Bob:
-
-```
-> transfer sealt1bob… 100.0               # actually `seal_transferToken` if the active
-                                          # token context is GOLD; today the TUI only
-                                          # transfers SEAL via `transfer` — use
-                                          # `mint-token` from the creator for first
-                                          # allocation, and see the follow-up below.
-```
-
-**Read paths (no auth, safe to `curl`):**
+Continues from §16.0 — needs `creator.json` / `alice.json` / `bob.json`
+in the cwd and the `NODE` / `CREATOR_ADDR` / `ALICE_ADDR` / `BOB_ADDR`
+shell vars set. The guard below short-circuits the rest of the
+section with a clear message if you opened a new terminal — without
+it, an unset `$ALICE_ADDR` silently expands to `''` and
+`mint-token` rejects with the misleading `-32602 invalid 'to'
+address: invalid address: bech32m: no separator found`.
 
 ```bash
-# Per-token balance for an address:
-curl -s -X POST http://localhost:8545 -H 'content-type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"seal_getTokenBalance",
-       "params":{"symbol":"GOLD","address":"sealt1alice…"}}' | jq
+: "${ALICE_ADDR:?ALICE_ADDR unset — see §16.0 (rehydrate block) to restore from key files}"
+: "${BOB_ADDR:?BOB_ADDR unset — see §16.0 (rehydrate block) to restore from key files}"
 
-# All tokens (includes transfer_fee_bps for each):
-curl -s -X POST http://localhost:8545 -H 'content-type: application/json' \
+# (1) Creator creates GOLD with 9 decimals and a 1 000 000-unit cap.
+#     create-token sets creator = mint_authority = freeze_authority =
+#     fee_authority by default. transfer_fee_bps starts at 0.
+cargo run -p seal-cli -- create-token \
+    --node $NODE --key creator.json \
+    --symbol GOLD --name 'Gold Coin' --decimals 9 --max-supply 1000000
+
+# (2) Creator mints 500 GOLD to Alice and 200 GOLD to Bob. `--amount 500`
+#     here = 500 base units (= 500 × 10⁻⁹ GOLD); pass `500.0` for whole
+#     GOLD units.
+cargo run -p seal-cli -- mint-token \
+    --node $NODE --key creator.json \
+    --symbol GOLD --to "$ALICE_ADDR" --amount 500
+cargo run -p seal-cli -- mint-token \
+    --node $NODE --key creator.json \
+    --symbol GOLD --to "$BOB_ADDR"   --amount 200
+
+# (3) Read paths (no auth, safe to curl):
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"seal_getTokenBalance\",
+       \"params\":{\"symbol\":\"GOLD\",\"address\":\"$ALICE_ADDR\"}}" | jq
+# → {"address":"…","balance":500,"symbol":"GOLD","total_supply":700}
+
+curl -s -X POST $NODE -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"seal_listTokens","params":{}}' | jq
+# → tokens[*] includes {symbol:"GOLD", transfer_fee_bps:0, total_supply:700,
+#                       creator, mint_authority, fee_authority, freeze_authority, …}
+
+# (4) Alice → Bob, signed `seal_transferToken` from the flat CLI.
+cargo run -p seal-cli -- transfer-token \
+    --node $NODE --key alice.json \
+    --symbol GOLD --to "$BOB_ADDR" --amount 100
+# → "Transferred 100 GOLD to sealt1…"
+
+# (5) Negative test: a non-creator can't mint (mint_authority gate).
+cargo run -p seal-cli -- mint-token \
+    --node $NODE --key alice.json \
+    --symbol GOLD --to "$BOB_ADDR" --amount 50
+# → "mint-token failed: RPC error (-32000): not mint authority"
 ```
 
-**Expected flow:** create succeeds; mint only works for the creator
-(non-creator → `-32000`); `listTokens` returns the token with
-`transfer_fee_bps: 0`. A one-shot `seal create-token / mint-token /
-transfer-token` flat-CLI subcommand pair is tracked in TODOS.md
-("One-shot non-REPL `seal-cli` mutations"); once it lands this
-section will grow the same path-C recipe that §15.2 has.
+**Expected:** create succeeds; both mints succeed; `listTokens` shows
+`total_supply: 700, transfer_fee_bps: 0`; Alice→Bob transfer lands
+(Alice 400 / Bob 300 after the block); non-creator mint rejects with
+`-32000 not mint authority`. GOLD uses the same 9-decimal convention
+as SEAL.
 
-### 16.2 Transfer fees (landed 2026-04-19)
+### 16.2 Transfer fees (landed 2026-04-19; CLI subcommand 2026-05-08; fee_authority 2026-05-09)
 
-> **⚠ Setting fees is not ready to drive from the CLI/TUI yet.**
-> The `seal_setTransferFee` RPC exists and enforces creator-only
-> auth + the 0–10 000 bps range, but there is no flat-CLI
-> `seal set-transfer-fee --key …` subcommand and the wallet TUI
-> has no command for it either. Until then, either:
-> (a) hand-craft the ML-DSA envelope (same canonicalization as
->     §15.2 path D — brittle, bring your own signer), or
-> (b) wait for the subcommand — tracked in `TODOS.md` under
->     "One-shot non-REPL `seal-cli` mutations" → Remaining →
->     `seal set-transfer-fee`.
-> The read side (`seal_getTransferFee`) is public and works today;
-> until a fee is set, every token's `fee_bps` is legitimately `0`
-> (that's the default, not a bug — verified by the handler at
-> `crates/seal-node/src/rpc.rs` `handle_get_transfer_fee`, which
-> errors with `-32000 token 'X' not found` for unknown symbols).
+`seal_setTransferFee` is `fee_authority`-gated, accepts 0–10 000 bps,
+and is exposed as `seal set-transfer-fee`. The fee_authority defaults
+to the creator at `create-token` time, is rotateable via
+`seal_setFeeAuthority` / `seal set-fee-authority`, and is permanently
+clearable via `seal_renounceFeeAuthority` / `seal renounce-fee-authority`
+(same shape as `mint_authority` / `freeze_authority`).
+
+**Where the fees land.** Every token also carries a `fee_recipient`
+field (`crates/seal-token/src/tokens.rs:41`) that defaults to the
+**creator** at create-token time (line 87). On each `seal_transferToken`
+where `fee_bps > 0` **and** `from != fee_recipient`
+(`tokens.rs:154-160`):
+
+- `fee = amount × fee_bps / 10_000` (truncating integer division)
+- `net = amount − fee` → debited from sender, credited to the `to` address
+- `fee` → debited from sender, credited to `fee_recipient`
+
+**Self-exemption:** when the `fee_recipient` itself is the sender, no
+fee is taken — the `from != fee_recipient` guard makes the transfer
+a no-op for the fee. Rotate the destination with
+`seal set-fee-recipient` / `seal_setFeeRecipient` (same `fee_authority`
+gate as `set-transfer-fee`; address is bech32m-validated, so an empty
+or malformed string is rejected at the RPC layer). `seal_listTokens`
+and `seal_getToken` surface the live `fee_recipient` alongside
+`transfer_fee_bps` and `fee_authority`, so you can read it any time.
+
+Continues from §16.1 — `$CREATOR_ADDR`, `$ALICE_ADDR`, `$BOB_ADDR`,
+`creator.json`, `alice.json`, `bob.json`, and the GOLD token must exist.
 
 ```bash
-# Read the current fee (no auth, works today):
-curl -s -X POST http://localhost:8545 -H 'content-type: application/json' \
+: "${ALICE_ADDR:?ALICE_ADDR unset — see §16.0 (rehydrate block) to restore from key files}"
+: "${BOB_ADDR:?BOB_ADDR unset — see §16.0 (rehydrate block) to restore from key files}"
+
+# (1) Read the current fee — starts at 0 bps for a freshly-created
+#     token. No auth; works any time.
+curl -s -X POST $NODE -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"seal_getTransferFee",
        "params":{"symbol":"GOLD"}}' | jq
+# → {"symbol":"GOLD","fee_bps":0}
+
+# (2) Creator (current fee_authority) sets the fee to 100 bps (1%).
+cargo run -p seal-cli -- set-transfer-fee \
+    --symbol GOLD --fee-bps 100 \
+    --node $NODE --key creator.json
+# → "Set transfer fee for GOLD to 100 bps (1%)"
+
+# (3) Re-read to confirm.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"seal_getTransferFee",
+       "params":{"symbol":"GOLD"}}' | jq
+# → {"symbol":"GOLD","fee_bps":100}
+
+# (4) Negative test: Alice tries to set the fee — rejected, she's
+#     not the fee_authority yet.
+cargo run -p seal-cli -- set-transfer-fee \
+    --symbol GOLD --fee-bps 50 \
+    --node $NODE --key alice.json
+# → "set-transfer-fee failed: RPC error (-32000): not fee authority"
+
+# (5) Rotate the fee_authority from Creator → Alice. Caller must be
+#     the *current* fee_authority (= creator), so sign with creator.json.
+#     Note: --new-authority takes a bech32m address with the node's
+#     HRP. On a default dev node that's `sealt1…` (testnet); only
+#     pass `seal1…` to a node started with `--mainnet`.
+cargo run -p seal-cli -- set-fee-authority \
+    --symbol GOLD --new-authority "$ALICE_ADDR" \
+    --node $NODE --key creator.json
+# → "set-fee-authority: fee authority on GOLD → sealt1…"
+
+# (6) Now Creator is no longer the fee_authority and is rejected; Alice
+#     can set it instead.
+cargo run -p seal-cli -- set-transfer-fee \
+    --symbol GOLD --fee-bps 200 \
+    --node $NODE --key creator.json
+# → "set-transfer-fee failed: RPC error (-32000): not fee authority"
+cargo run -p seal-cli -- set-transfer-fee \
+    --symbol GOLD --fee-bps 200 \
+    --node $NODE --key alice.json
+# → "Set transfer fee for GOLD to 200 bps (2%)"
+
+# (7) Read where the fee currently routes — defaults to creator
+#     since we never moved it. `seal_listTokens` is the canonical
+#     read; `seal_getToken` carries the same fields for a single
+#     symbol.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"seal_listTokens","params":{}}' \
+  | jq '.result.tokens[] | select(.symbol=="GOLD") | {symbol, fee_recipient, transfer_fee_bps, fee_authority}'
+# → fee_recipient is $CREATOR_ADDR, transfer_fee_bps:200, fee_authority is $ALICE_ADDR
+
+# (8) Rotate the fee_recipient from Creator → Bob. Caller must be the
+#     current fee_authority (= Alice). After this, every fee debit on
+#     a non-self GOLD transfer credits Bob, not Creator.
+cargo run -p seal-cli -- set-fee-recipient \
+    --symbol GOLD --new-recipient "$BOB_ADDR" \
+    --node $NODE --key alice.json
+# → "set-fee-recipient: GOLD fees now route to sealt1…(bob)"
+
+# (9) Read back to confirm.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"seal_listTokens","params":{}}' \
+  | jq '.result.tokens[] | select(.symbol=="GOLD") | .fee_recipient'
+# → "sealt1…(bob)"
+
+# (10) Negative tests for set-fee-recipient:
+#      (a) empty / malformed new-recipient is rejected at the bech32m
+#          layer before the handler runs.
+cargo run -p seal-cli -- rpc \
+    --node $NODE --key alice.json --method seal_setFeeRecipient \
+    --params '{"symbol":"GOLD","new_recipient":""}'
+# → "RPC error (-32602): invalid 'new_recipient': invalid address: bech32m: no separator found"
+#      (b) non-fee_authority is rejected. Creator no longer holds it.
+cargo run -p seal-cli -- set-fee-recipient \
+    --symbol GOLD --new-recipient "$CREATOR_ADDR" \
+    --node $NODE --key creator.json
+# → "set-fee-recipient failed: RPC error (-32000): not fee authority"
+
+# (11) Demonstrate the split. With fee_bps=200 and fee_recipient=bob,
+#      `alice → creator 100` charges fee=2, net=98, so:
+#        alice    -100   (debit)
+#        creator   +98   (net)
+#        bob        +2   (fee)
+#      Creator has no GOLD ledger entry (we only minted to alice/bob
+#      in §16.1), so the recipient-policy guard fires unless we opt in
+#      with `--confirm-new-recipient`. Without the flag you'd see:
+#        "RPC error (-32007): recipient sealt1…(creator) is a new
+#         account with no prior ledger entry; re-submit with
+#         confirm_new_recipient=true to acknowledge…"
+bal_of() {
+  curl -s -X POST $NODE -H 'content-type: application/json' \
+    -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"seal_getTokenBalance\",\"params\":{\"symbol\":\"GOLD\",\"address\":\"$1\"}}" | jq -r '.result.balance // 0'
+}
+echo "pre  alice/creator/bob: $(bal_of $ALICE_ADDR)/$(bal_of $CREATOR_ADDR)/$(bal_of $BOB_ADDR)"
+cargo run -p seal-cli -- transfer-token \
+    --node $NODE --key alice.json \
+    --symbol GOLD --to "$CREATOR_ADDR" --amount 100 \
+    --confirm-new-recipient
+echo "post alice/creator/bob: $(bal_of $ALICE_ADDR)/$(bal_of $CREATOR_ADDR)/$(bal_of $BOB_ADDR)"
+# → diffs: alice -100, creator +98, bob +2
+
+# (12) Self-exemption — Bob (= fee_recipient) initiating a transfer
+#      pays no fee. Sending 50 GOLD bob → alice moves exactly 50, not 49.
+echo "pre  alice/bob: $(bal_of $ALICE_ADDR)/$(bal_of $BOB_ADDR)"
+cargo run -p seal-cli -- transfer-token \
+    --node $NODE --key bob.json \
+    --symbol GOLD --to "$ALICE_ADDR" --amount 50
+echo "post alice/bob: $(bal_of $ALICE_ADDR)/$(bal_of $BOB_ADDR)"
+# → diffs: alice +50, bob -50 (no third leg — `from == fee_recipient` skips the fee branch)
+
+# (13) Out-of-range — fee_bps > 10 000 (100 %) is always rejected.
+cargo run -p seal-cli -- set-transfer-fee \
+    --symbol GOLD --fee-bps 10001 \
+    --node $NODE --key alice.json
+# → "set-transfer-fee failed: RPC error (-32000): fee cannot exceed 100%"
+
+# (14) Permanently lock the fee AND the recipient. Caller is the
+#      *current* fee_authority (= Alice). After this, both
+#      set-transfer-fee and set-fee-recipient reject regardless of
+#      caller — the same gate guards both fields.
+cargo run -p seal-cli -- renounce-fee-authority \
+    --symbol GOLD --node $NODE --key alice.json
+# → "renounce-fee-authority: fee authority on GOLD renounced (terminal)"
+
+# (15) Post-renounce: nobody can change the fee or the recipient.
+cargo run -p seal-cli -- set-transfer-fee \
+    --symbol GOLD --fee-bps 0 \
+    --node $NODE --key alice.json
+# → "set-transfer-fee failed: RPC error (-32000): not fee authority"
+cargo run -p seal-cli -- set-fee-recipient \
+    --symbol GOLD --new-recipient "$ALICE_ADDR" \
+    --node $NODE --key alice.json
+# → "set-fee-recipient failed: RPC error (-32000): not fee authority"
 ```
 
-**Expected** (once a signed `seal_setTransferFee` has been sent —
-currently gated on the CLI todo above):
-- Set returns `{"status":"updated","fee_bps":100}`.
-- Get returns `{"symbol":"GOLD","fee_bps":100}`.
-- Non-creator setting the fee → `-32000` "only creator can set fees".
-- `fee_bps > 10_000` → `-32000` "fee cannot exceed 100%".
-- Subsequent `seal_transferToken` debits the fee from the amount.
+**Expected:** the `fee_bps` goes 0 → 100 → 200 in the read calls;
+fee_authority rotates creator → alice; fee_recipient rotates creator
+→ bob (step 8) and is visible in `seal_listTokens` (step 9); the
+two split demos (step 11) and self-exemption check (step 12) move
+balances by the documented amounts; both the out-of-range check and
+the post-renounce gate (covering set-transfer-fee **and**
+set-fee-recipient) fire as `-32000 …`. Every subsequent
+`seal_transferToken` debits the locked fee from the sender and
+credits the locked `fee_recipient`.
+
+### 16.3 Burn + per-account freeze + global freeze
+
+Continues from §16.1 (and §16.2 if you ran it — the renounced fee
+authority does not block this section). Uses `creator.json`,
+`alice.json`, `bob.json` and the `$ALICE_ADDR` / `$BOB_ADDR` vars.
+
+```bash
+: "${ALICE_ADDR:?ALICE_ADDR unset — see §16.0 (rehydrate block) to restore from key files}"
+: "${BOB_ADDR:?BOB_ADDR unset — see §16.0 (rehydrate block) to restore from key files}"
+
+# (1) Alice burns 100 base units of GOLD she holds. Auth required;
+#     caller's own balance shrinks and total_supply drops by the
+#     same amount.
+cargo run -p seal-cli -- rpc --node $NODE --key alice.json \
+    --method seal_burnToken \
+    --params "{\"symbol\":\"GOLD\",\"amount\":100}"
+# → {"symbol":"GOLD","from":"sealt1…","amount":100,
+#    "total_supply":600,"status":"burned"}
+
+# (2) Creator (freeze_authority, by default) freezes Bob's account
+#     on GOLD. Per-account freeze blocks Bob from *initiating* a
+#     transfer; he can still be the recipient.
+cargo run -p seal-cli -- rpc --node $NODE --key creator.json \
+    --method seal_freezeAccount \
+    --params "{\"symbol\":\"GOLD\",\"address\":\"$BOB_ADDR\"}"
+# → {"symbol":"GOLD","address":"sealt1…","status":"frozen"}
+
+# (3) Read: confirm Bob is frozen on GOLD.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"seal_isFrozen\",
+       \"params\":{\"symbol\":\"GOLD\",\"address\":\"$BOB_ADDR\"}}" | jq
+# → {"symbol":"GOLD","address":"sealt1…","frozen":true}
+
+# (4) Bob tries to transfer — rejected by the freeze gate.
+cargo run -p seal-cli -- transfer-token \
+    --node $NODE --key bob.json \
+    --symbol GOLD --to "$ALICE_ADDR" --amount 10
+# → "transfer-token failed: RPC error (-32000): sender account is frozen"
+
+# (5) Enumerate every frozen account for GOLD (lex-sorted, capped at
+#     10 000).
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"seal_listFrozenAccounts",
+       "params":{"symbol":"GOLD"}}' | jq
+# → {"symbol":"GOLD","frozen":["sealt1…(bob)"],"count":1,"truncated":false}
+
+# (6) Inverse view — every token symbol on which $BOB_ADDR is frozen.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"seal_listFrozenSymbolsForAddress\",
+       \"params\":{\"address\":\"$BOB_ADDR\"}}" | jq
+# → {"address":"sealt1…","symbols":["GOLD"],"count":1}
+
+# (7) Global freeze: when true, *every* transfer of GOLD rejects,
+#     regardless of per-account state. Same freeze_authority gate.
+cargo run -p seal-cli -- rpc --node $NODE --key creator.json \
+    --method seal_setTokenFrozen \
+    --params '{"symbol":"GOLD","frozen":true}'
+# → {"symbol":"GOLD","status":"globally_frozen"}
+
+# (8) Now even Alice (who is *not* per-account frozen) cannot transfer.
+cargo run -p seal-cli -- transfer-token \
+    --node $NODE --key alice.json \
+    --symbol GOLD --to "$BOB_ADDR" --amount 5
+# → "transfer-token failed: RPC error (-32000): token is globally frozen"
+
+# (9) Negative test: a non-freeze_authority can't toggle either gate.
+cargo run -p seal-cli -- rpc --node $NODE --key alice.json \
+    --method seal_freezeAccount \
+    --params "{\"symbol\":\"GOLD\",\"address\":\"$ALICE_ADDR\"}"
+# → "RPC error (-32000): not freeze authority"
+
+# (10) Restore: unfreeze Bob, then clear the global freeze.
+cargo run -p seal-cli -- rpc --node $NODE --key creator.json \
+    --method seal_unfreezeAccount \
+    --params "{\"symbol\":\"GOLD\",\"address\":\"$BOB_ADDR\"}"
+# → {"symbol":"GOLD","address":"sealt1…","status":"unfrozen"}
+cargo run -p seal-cli -- rpc --node $NODE --key creator.json \
+    --method seal_setTokenFrozen \
+    --params '{"symbol":"GOLD","frozen":false}'
+# → {"symbol":"GOLD","status":"globally_unfrozen"}
+```
+
+**Expected outputs are inline above.** Freeze authority can be
+rotated (`seal_setFreezeAuthority`) and permanently locked
+(`seal_renounceFreezeAuthority`) using the exact same envelope as
+the fee-authority commands in §16.2 — substitute method name and
+`fee` → `freeze` in the `--method` flag.
 
 ## 17. Bridge JSON-RPC surface (landed 2026-04-19 batch)
 
@@ -943,27 +1521,63 @@ All bridge RPCs assume a node is running with RPC enabled (see §15.1).
 
 **Do I need extra config?** Yes — a freshly-started node has **zero
 observers registered** (`BridgeObserverSet::new()` at
-`crates/seal-node/src/rpc.rs:230`), so `seal_listBridgeObservers`
+`crates/seal-node/src/rpc.rs:346`), so `seal_listBridgeObservers`
 returns `{"count": 0}`, `seal_pollBridges` sees nothing, and
 `seal_getBridgeDeposits` is empty. Two paths to activity:
 
 - **Manual**: register observers below (`seal_addBridgeObserver`), but
   they only observe if the target chain is reachable on the URL you
   provide. Useful for wire-format debugging, not a full round-trip.
-- **Full stack**: run `./scripts/bridge-e2e.sh` — Docker-composed
+- **Full stack (local)**: run `./scripts/bridge-e2e.sh` — Docker-composed
   solana-test-validator + Stellar quickstart + 3 Seal nodes, with
   the bridge programs deployed on both sides and a scripted
   lock→mint→burn→unlock that populates the endpoints in §17.1–3
   with real data. Prerequisites are checked via
   `./scripts/bridge-e2e.sh check`.
+- **Full stack (public testnet)**: see
+  [`docs/BRIDGE-TESTNET.md`](docs/BRIDGE-TESTNET.md) for the
+  Solana devnet + Stellar testnet runbook (deploy contracts,
+  fund the authority, wire program IDs into seal-node). The
+  companion `scripts/bridge-testnet-demo.sh` automates the
+  round-trip — gated behind `BRIDGE_TESTNET_DEMO_LIVE=1` so it
+  never fires from CI (testnet airdrop quotas would be burned).
 
-**Auth**: per `requires_auth()` at `rpc.rs:319-347`, **only
-`seal_bridgeWithdraw` is ML-DSA-authenticated**. `addBridgeObserver`,
-`bridgeCouncilAdd/Remove`, `bridgePauseChain/UnpauseChain` are
-currently **un-authenticated alpha-testnet bootstrap endpoints** —
-anyone with RPC access can register an observer or seat a council
-member. Role-based auth for those is a separate SPEC item (not in
-this session's scope); drive them from plain `curl` until it lands.
+**Auth.** `seal_bridgeWithdraw` is in `requires_auth()`, so it always
+needs an ML-DSA signature (same envelope as a token transfer). The
+bootstrap endpoints — `seal_addBridgeObserver`,
+`seal_bridgeCouncilAdd` / `Remove`, `seal_bridgePauseChain` /
+`UnpauseChain`, `seal_bridgeRotateCommitteeKey` — are **admin-gated
+via `requires_admin_auth()`** (`crates/seal-node/src/rpc.rs:682`).
+The gate has two modes:
+
+- **Open mode (default).** When the node is started without
+  `--admin-address`, `admin_addresses` is empty and these RPCs
+  accept **unauthenticated `curl` calls** (`is_admin()` returns
+  true for everyone — `rpc.rs:698`). This preserves the
+  `scripts/bridge-e2e.sh` one-box bootstrap flow but means **anyone
+  who can reach the RPC port can register an arbitrary observer**
+  (steering deposit accounting), seat a council member, or pause a
+  chain. Do not run a shared / public-internet node like this.
+- **Admin mode.** Start the node with one or more
+  `--admin-address sealt1…` flags (repeatable; or place the set in
+  the genesis config — `crates/seal-node/src/main.rs:95`). The gate
+  flips on: every admin-gated request must (1) carry a valid
+  ML-DSA signature over `SHA3-256(method || params_json)` (same
+  envelope as §15.2), and (2) have the **caller's derived address
+  present in the admin set**, else the request fails with
+  `-32004 … requires admin authorization (address … not in admin
+  set)`. For M-of-N operator multisig (P8 / §4.3), additionally
+  pass `--admin-threshold n` at startup; each admin-gated request
+  then needs `n − 1` cosigners in an `admin_signatures: [{sender,
+  signature}, …]` param over the same payload with that field
+  stripped — see `verify_admin_multisig()` at `rpc.rs:711`.
+
+**Recommendation:** start the node with at least one
+`--admin-address sealt1…` even on a dev box, so the signed
+admin-mode form below is exercised by default and the unsigned
+curl form stays a one-box convenience path, not the muscle memory.
+On `--mainnet` without any admin address the node prints an
+explicit warning at startup (`main.rs:96-100`).
 
 The read-only calls are plain `curl`; signed writes use the generic
 `seal rpc --method <M> --params <JSON> --key <file>` passthrough
@@ -981,15 +1595,34 @@ NODE=http://localhost:8545
 
 ### 17.1 Observer management + status
 
-All read-only (no auth), plain `curl`:
+**Before registering anything**, confirm which auth mode the node is
+running in:
+
+```bash
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"seal_listAdminAddresses","params":{}}' | jq
+# → {"addresses":[...], "count":N, "mode":"open"|"gated", "threshold":t}
+# `mode:"open"` (count 0) → curl flow (b) below applies, anyone can
+# register an observer. `mode:"gated"` → curl flow (b) fails, you
+# must use the signed flow (a).
+```
+
+Read-only status and listings (always unauthenticated, plain `curl`):
 
 ```bash
 # List registered observers (starts at {"count": 0} on a fresh node)
 curl -s -X POST $NODE -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"seal_listBridgeObservers","params":{}}' | jq
 
-# Poll all registered observers once. With no observers this returns
-# {"observed": 0, "new": 0, "duplicate": 0} — expected.
+# Poll all registered observers once. Returns counters:
+#   observed   = deposits returned by *this* poll (NOT observer count
+#                — names is misleading; verified in `rpc.rs:4045`)
+#   new        = deposits newly recorded by the bridge manager
+#   duplicate  = deposits already known (cursor advanced past them)
+#   processed  = deposits that advanced to wrapped-balance mint
+# Once an observer's cursor has caught up, subsequent polls return
+# `observed:0` even though the deposit IS in seal_getBridgeDeposits;
+# don't read `observed:0` as "no observers registered".
 curl -s -X POST $NODE -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"seal_pollBridges","params":{}}' | jq
 
@@ -1009,21 +1642,89 @@ curl -s -X POST $NODE -H 'content-type: application/json' \
        '{jsonrpc:"2.0",id:5,method:"seal_getBridgeWrappedBalance",params:{address:$a,token:"WSOL"}}')" | jq
 ```
 
-Register an observer (no auth today — alpha bootstrap endpoint; see
-the §17 preamble):
+**Register an observer.** Two flows depending on how the node was
+started — see the §17 "Auth" paragraph for context.
+`scripts/bridge-e2e.sh` deploys the seal-bridge Anchor program and
+prints its id; substitute that for `<deployed-program-id>` (Solana)
+and the deployed Soroban contract id for `<soroban-contract-id>`
+(Stellar). `usdc_mint` (Solana, optional base58 SPL mint): when a
+`LockEvent`'s mint matches, the deposit routes to WUSDC; otherwise
+to WSOL. The canonical devnet USDC mint is
+`Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr` — omit the field if
+you only operate the SOL flow.
+
+**(a) Admin mode (recommended).** Node was started with
+`--admin-address sealt1…` matching the address of `admin.json`. The
+RPC carries an ML-DSA signature and the admin-membership check
+fires server-side.
 
 ```bash
-# Solana observer — params: {chain, rpc_url, program_id}.
-# Replace the program_id with the deployed seal-bridge Anchor program
-# id (scripts/bridge-e2e.sh deploys one and prints it).
+# Set up an admin signer once. The address must match (or already
+# be in) the node's --admin-address set; otherwise every call below
+# returns -32004 "requires admin authorization".
+cargo run -p seal-cli -- keygen --output admin.json
+ADMIN_ADDR=$(jq -r .address admin.json)
+echo "Start the node with: --admin-address $ADMIN_ADDR"
+
+# Solana observer
+cargo run -p seal-cli -- rpc --node $NODE --key admin.json \
+    --method seal_addBridgeObserver \
+    --params '{"chain":"Solana","rpc_url":"http://127.0.0.1:8899","program_id":"<deployed-program-id>","usdc_mint":"Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr"}'
+
+# Stellar observer
+cargo run -p seal-cli -- rpc --node $NODE --key admin.json \
+    --method seal_addBridgeObserver \
+    --params '{"chain":"Stellar","horizon_url":"http://127.0.0.1:8000","contract_id":"<soroban-contract-id>"}'
+```
+
+Expected failure if `admin.json` is not in the admin set:
+`RPC error (-32004): seal_addBridgeObserver requires admin
+authorization (address sealt1… not in admin set)`. For
+`--admin-threshold ≥ 2`, the single `seal rpc` form is **not
+sufficient** — you need an external helper to collect the
+cosigners' signatures and stitch them into an `admin_signatures`
+array on the payload (see `verify_admin_multisig` at
+`rpc.rs:711`). The `seal rpc` subcommand doesn't ship that
+multi-key flow today; track it as a follow-up if you need M-of-N
+on a shared box.
+
+**(b) Open mode (single-box dev only).** Node was started without
+`--admin-address`. The RPC accepts plain unauthenticated `curl`.
+**Anyone with RPC access can register an observer**, so don't run
+this configuration on a shared / public-internet node — switch
+flow (a) by restarting with `--admin-address sealt1…`.
+
+```bash
 curl -s -X POST $NODE -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"seal_addBridgeObserver",
-       "params":{"chain":"Solana","rpc_url":"http://127.0.0.1:8899","program_id":"<deployed-program-id>"}}' | jq
+       "params":{"chain":"Solana","rpc_url":"http://127.0.0.1:8899","program_id":"<deployed-program-id>","usdc_mint":"Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr"}}' | jq
 
-# Stellar observer — params: {chain, horizon_url, contract_id}.
 curl -s -X POST $NODE -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"seal_addBridgeObserver",
        "params":{"chain":"Stellar","horizon_url":"http://127.0.0.1:8000","contract_id":"<soroban-contract-id>"}}' | jq
+```
+
+**Per-owner gap-closer reads** (no auth, all object-param). Each
+returns the slice scoped to one address — useful for wallets asking
+"what crossed for me?" without filtering the global stream
+client-side:
+
+```bash
+# Inbound: every deposit whose seal_address (the on-Seal recipient) is $ADDR.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d "$(jq -cn --arg a "$TREASURY_ADDR" \
+       '{jsonrpc:"2.0",id:1,method:"seal_listBridgeDepositsByRecipient",params:{address:$a}}')" | jq
+
+# Outbound: every withdrawal $ADDR signed (burner-on-Seal).
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d "$(jq -cn --arg a "$TREASURY_ADDR" \
+       '{jsonrpc:"2.0",id:2,method:"seal_listBridgeWithdrawalsByInitiator",params:{address:$a}}')" | jq
+
+# Holdings: $ADDR's wrapped balance for every token at once
+# (avoids one getBridgeWrappedBalance call per token).
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d "$(jq -cn --arg a "$TREASURY_ADDR" \
+       '{jsonrpc:"2.0",id:3,method:"seal_listBridgeWrappedBalances",params:{address:$a}}')" | jq
 ```
 
 ### 17.2 Withdraw (auth required — the only signed bridge RPC today)
@@ -1036,9 +1737,23 @@ and `dest_address` is the *destination-chain* pubkey (Solana
 ed25519 base58 / Stellar G-address), not a Seal address.
 
 ```bash
+# Typed CLI (preferred — pairs with bridge-list-withdrawals /
+# bridge-get-withdrawal below):
+seal bridge-withdraw \
+    --dest-chain Solana \
+    --dest-address <solana-ed25519-pubkey> \
+    --token WSOL \
+    --amount 1000000 \
+    --node $NODE --key treasury.json
+# → Burned 1000000 WSOL → Solana:<pubkey>
+#   withdrawal_id: wd_sol_3
+#   Next: seal bridge-get-withdrawal --withdrawal-id wd_sol_3 ...
+
+# Generic-RPC equivalent (same request shape, manual envelope):
 seal rpc --node $NODE --key treasury.json \
   --method seal_bridgeWithdraw \
   --params '{"dest_chain":"Solana","dest_address":"<solana-ed25519-pubkey>","token":"WSOL","amount":1000000}'
+# → {"withdrawal_id":"wd_sol_3", "caller":"sealt1…"}
 ```
 
 **Expected:** `minted_on_seal <= locked_on_source` invariant always
@@ -1046,12 +1761,130 @@ holds; withdrawals above the caller's wrapped balance fail; to a
 paused chain fail with `ChainPaused`. Confirm via `seal_getBridgeStatus`
 (§17.1) — the invariant and `paused_chains` are both surfaced there.
 
+**Reverse-claim handoff (committee signature pickup):** the
+on-chain `unlock_tokens(amount, nonce, signature)` ix consumes
+three fields the burn produced. Fetch them via the typed CLI or
+the unauth RPCs:
+
+```bash
+# Typed (one-liner):
+seal bridge-get-withdrawal --withdrawal-id wd_sol_3 --node $NODE
+
+# All pending withdrawals (optional chain filter):
+seal bridge-list-withdrawals --chain Solana --node $NODE
+
+# Generic-RPC equivalents:
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"seal_getBridgeWithdrawal",
+       "params":{"withdrawal_id":"wd_sol_3"}}' | jq
+
+# Global list with optional `chain` filter. Same envelope per
+# entry. Both named ({chain:"Solana"}) and positional (["Solana"])
+# param shapes are accepted.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"seal_listBridgeWithdrawals",
+       "params":{"chain":"Solana"}}' | jq
+```
+
+Each record carries
+`{id, nonce, dest_chain, dest_address, seal_address, amount, token,
+committee_signature_hex, executed}`. `committee_signature_hex` is
+`null` until a committee signature is attached — populated
+immediately on burn when seal-node was started with
+`--bridge-committee-key` (single-validator testnet path), or
+later via the multi-validator Ringtail aggregate path.
+
+For the canonical bytes the on-chain `verify_committee_sig`
+recomputes:
+
+| Chain | Payload | Output |
+|---|---|---|
+| Solana | `recipient_pubkey(32) ‖ amount_le(8) ‖ nonce_le(8) ‖ "seal-bridge-solana-v1"` | HMAC-SHA-256 over `committee_key` |
+| Stellar | `Address::to_xdr(32–44 bytes) ‖ amount_be_16 ‖ nonce_be_8 ‖ "seal-bridge-stellar-v1"` | HMAC-SHA-256 over `committee_key` |
+
+`committee_key` is set per seal-node via `--bridge-committee-key
+<64-hex-chars>` and MUST match the value the on-chain bridge program
+was initialized with (Solana `BridgeState::committee_key`, Stellar
+`brkey` storage slot). Rotate via the on-chain `rotate_committee_key`
+ix + the host-side `seal_bridgeRotateCommitteeKey` RPC
+(council-gated; persists atomically to
+`<data_dir>/bridge-committee-key.hex` so seal-node restart no longer
+reverts the rotation). See §17.3 for the host-side recipe.
+
+**Claim the unlock on the destination chain.** Once
+`committee_signature_hex` is populated, hand the (amount, nonce,
+signature) tuple to the destination-chain unlock ix. The Anchor /
+Soroban programs recompute the canonical bytes from the table
+above and accept iff the bytes match.
+
+```bash
+# Solana — `anchor run unlock-tokens` (wraps the Solana ix; uses
+# the deployer keypair as authority). recipient_ata + vault_ata are
+# the SPL token accounts for the unlock recipient and the bridge
+# vault PDA respectively.
+JSON=$(seal bridge-get-withdrawal --withdrawal-id wd_sol_3 --node $NODE)
+NONCE=$(echo "$JSON" | jq -r '.withdrawal.nonce')
+SIG=$(echo "$JSON" | jq -r '.withdrawal.committee_signature_hex')
+cd bridges/solana
+anchor run unlock-tokens -- \
+  --amount 1000000 --nonce "$NONCE" --signature "$SIG" \
+  --recipient <solana-ed25519-pubkey> \
+  --recipient-ata <spl-token-account> \
+  --vault-ata $(anchor run derive-vault-ata -- --mint <mint> | awk '/vault ATA:/ {print $3}') \
+  --authority <authority-pubkey>
+
+# Stellar — `stellar contract invoke -- unlock_xlm`. recipient is the
+# G-address that receives the released XLM; proof = committee_signature_hex.
+stellar contract invoke --id "$(cat bridges/.stellar-testnet-contract-id)" \
+  --source seal-bridge-deployer --network testnet \
+  -- unlock_xlm \
+  --recipient <G-address> --amount 1000000 \
+  --nonce "$NONCE" --proof "$SIG"
+```
+
+**Expected:** Anchor rejects with `InvalidSignature` if any byte
+of the canonical payload disagrees (most common cause: pubkey-vs-
+ATA confusion on Solana, or byte-order on Stellar). Soroban rejects
+with `InvalidProof`. Replay attempts (same nonce twice) reject
+with `AlreadyClaimed` on either chain.
+
 ### 17.3 Emergency pause + Technical Council (landed 2026-04-19)
 
-None of the council RPCs are auth-gated today (alpha bootstrap —
-same caveat as observer registration). Plain `curl`. Council members
-are identified by an ML-DSA verifying-key hex (the `pubkey` field);
-generate one key file per seat so you have the hexes handy.
+**Auth.** `seal_bridgeCouncilAdd`, `seal_bridgeCouncilRemove`,
+`seal_bridgePauseChain`, `seal_bridgeUnpauseChain`, and
+`seal_bridgeRotateCommitteeKey` are all in `requires_admin_auth()`
+(`crates/seal-node/src/rpc.rs:682`) — same two-mode gate as
+`seal_addBridgeObserver` (§17.1):
+
+- **Open mode** (no `--admin-address` flags): every snippet below
+  works as plain `curl`. This is the case for the docker-composed
+  bridge stack (`bridges/docker-compose.testnet.yml`) and any node
+  started with bare `--rpc-port`, so a tester running locally will
+  hit this path.
+- **Admin mode** (node started with `--admin-address sealt1…`):
+  every `seal_bridgeCouncilAdd` / pause / rotate call needs an
+  ML-DSA-signed envelope from an admin-set address. Replace each
+  curl with `seal rpc --key admin.json --method <M> --params <JSON>`
+  (see §17.1 flow (a) for the canonical form). Plain curl returns
+  `-32004 ... not in admin set` on these methods.
+
+Quorum is independent of auth — every pause/rotate call still
+requires a 2/3 supermajority of council `approvers` regardless of
+the auth mode.
+
+Council members are identified by an ML-DSA verifying-key hex (the
+`pubkey` field); generate one key file per seat so you have the
+hexes handy.
+
+> ⚠️ **Known issue** (2026-05-20): the second `seal_bridgeRotateCommitteeKey`
+> call in a sequence — i.e. rotating *back* to a previous key after an
+> earlier rotation in the same node lifetime — silently fails the
+> council-quorum check inside the handler (the `info!` log line that
+> the first rotation emits does NOT appear for the second call). The
+> first rotation persists fine. `bridge-e2e.sh` skips the rotate-back
+> half of its smoke test by default for this reason
+> (`RUN_ROTATION_SMOKE=1` to enable). Tracked as a follow-up; the
+> bridge round trip itself is unaffected.
 
 ```bash
 # Generate seven seats.
@@ -1072,6 +1905,20 @@ done
 # List members (read-only):
 curl -s -X POST $NODE -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"seal_bridgeCouncilList","params":{}}' | jq
+
+# Look up a single member by their bech32m address. The handler
+# decodes the address to its 32-byte SHA3 hash and matches against
+# the stored member pubkeys, so the lookup works across testnet /
+# mainnet HRP. Returns {address, member: {...} | null}.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"seal_getCouncilMemberByAddress",
+       "params":{"address":"sealt1…"}}' | jq
+
+# Same shape for the validator set:
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"seal_getValidatorByAddress",
+       "params":{"address":"sealt1…"}}' | jq
+# Returns {address, validator: {public_key_hex, vrf_public_key_hex, stake, active} | null}.
 
 # Pause a chain. 2/3 quorum = 5 of 7. `approvers` is a JSON array of
 # council verifying-key hexes. Today this is a single-call vote (no
@@ -1094,6 +1941,32 @@ curl -s -X POST $NODE -H 'content-type: application/json' \
   -d "$(jq -cn --argjson a "$APPROVERS" \
         '{jsonrpc:"2.0",id:3,method:"seal_bridgeUnpauseChain",
           params:{chain:"Solana",approvers:$a}}')" | jq
+
+# Rotate the committee MAC key without restarting seal-node. Same
+# 2/3 rule as pause/unpause. `new_key_hex` is 64 hex chars (32 bytes).
+# The host installs the key in BridgeManager and emits the new
+# fingerprints in the response so the coordinator can cross-check
+# against the value passed to each chain's `rotate_committee_key` ix.
+NEW_KEY_HEX=$(openssl rand -hex 32)
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d "$(jq -cn --arg k "$NEW_KEY_HEX" --argjson a "$APPROVERS" \
+        '{jsonrpc:"2.0",id:4,method:"seal_bridgeRotateCommitteeKey",
+          params:{new_key_hex:$k,approvers:$a}}')" | jq
+
+# Read the host's current key state. Returns
+# {set, fingerprint_sha3_hex, fingerprint_sha2_hex}. Compare
+# `fingerprint_sha2_hex` against the on-chain `committee_key_hash`
+# view (Soroban, follow-up) or against SHA-256(getAccountInfo
+# bridge_state.committee_key) on Solana to detect drift.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":5,
+       "method":"seal_bridgeGetCommitteeKeyStatus","params":{}}' | jq
+
+# Typed CLI wrapper around the same RPC. Pretty-prints the result
+# and exits 1 if no key is installed, 2 if --expect-sha2 mismatches,
+# 0 on match — useful in bridge-e2e.sh or rotation runbooks:
+seal bridge-key-status --node "$NODE"
+seal bridge-key-status --node "$NODE" --expect-sha2 "$EXPECTED_SHA256_HEX"
 ```
 
 **Expected:**
@@ -1107,6 +1980,17 @@ curl -s -X POST $NODE -H 'content-type: application/json' \
   `-32000 technical council is empty; bootstrap via seal_bridgeCouncilAdd first`.
 - `seal_getBridgeStatus` (§17.1) includes `paused_chains` inline so
   you can verify without a separate RPC.
+- `seal_bridgeRotateCommitteeKey` with malformed hex →
+  `-32602 new_key_hex must be 64 hex chars (32 bytes)`; with valid
+  hex but <2/3 approvers → `-32000 insufficient council approval for
+  committee-key rotation: need N of M, got K valid`. Success returns
+  `{rotated: true, fingerprint_sha3_hex, fingerprint_sha2_hex}`.
+- `seal_bridgeGetCommitteeKeyStatus` is unauth and returns `{set:
+  false, fingerprint_sha3_hex: null, fingerprint_sha2_hex: null}`
+  before any rotation, then the fingerprints after.
+- `/metrics` mirrors the state: `seal_bridge_committee_key_set 1`
+  + `seal_bridge_committee_key_fingerprint{sha2_hex="..."} 1` after
+  rotate; both 0/empty before.
 
 ## 18. Ringtail BPF Verifier (landed 2026-04-19)
 
@@ -1167,13 +2051,16 @@ rpc '{"jsonrpc":"2.0","id":6,"method":"seal_getNodeInfo","params":{}}'
 
 **Expected:** `getHeight` returns 0 at genesis then increments each
 slot; `getBlock` returns `null` for non-existent heights; `getPeers`
-returns an empty list in single-node mode; `getNodeInfo` includes
-address + verifying-key + current epoch.
+returns `{received_blocks: N}`; `getNodeInfo` returns
+`{version, height, epoch, peers, validators, leases_active, uptime_secs}`.
+The node's own address / verifying-key is intentionally **not** in
+`getNodeInfo` — read it from the keyfile passed to `--key`, or via
+the wallet TUI's `> address` command.
 
 ## 19.1 SQL submission (auth required for writes)
 
 `seal_submitSql` and `seal_deployNamespace` are in `requires_auth()`
-(see `rpc.rs:323-326`), so writes need an ML-DSA signature. Use
+(see `rpc.rs:442-443`), so writes need an ML-DSA signature. Use
 `seal sql --key key.json` (typed wrapper) for DDL/DML, and `seal rpc
 --key key.json --method seal_deployNamespace` for namespace deploys.
 Reads stay on plain curl.
@@ -1252,37 +2139,46 @@ book; matching no longer has to be triggered manually.
 ## 19.3 MPC + ZK RPC handlers
 
 Both `seal_mpcAggregate` and `seal_zkProve` are currently **not
-auth-gated** (not listed in `requires_auth()` — see `rpc.rs:322-346`).
+auth-gated** (not listed in `requires_auth()` — see `rpc.rs:439-478`).
 Plain curl works today; tighten in a follow-up if these become
 billable.
 
 ```bash
-# SPDZ private aggregation (sum/count/avg). `values` is the local
-# party's shares; in production each party submits its own slice.
+# SPDZ-style private aggregation over a SQL column. The handler reads
+# `{table, column}` rows via SQL, then runs `function` over them
+# locally (in production this would shard across parties). Params:
+#   function ∈ {sum, count, avg}  (required)
+#   table    — table name         (required)
+#   column   — column to aggregate (required)
 curl -s -X POST $NODE -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"seal_mpcAggregate",
-       "params":{"values":[10,20,30],"op":"sum"}}' | jq
+       "params":{"function":"sum","table":"users","column":"balance"}}' | jq
 
-# ZK prove a state transition. `pre_state_root`, `post_state_root`,
-# and `tx_hash` are 32-byte SHA3 hex strings. Simulation mode by
-# default; feature-gate `risc0` or `sp1` for real provers (§8).
+# ZK-prove a predicate over a SQL table. Params:
+#   statement — SQL predicate that follows `WHERE` (e.g. "balance > 1000")
+#   table     — table to evaluate it over
+# The handler runs `SELECT * FROM <table> WHERE <statement>` and binds
+# the result into a state-transition shaped proof (StubProver by default;
+# real STARK proving requires the `risc0` / `sp1` feature gate per §8).
 curl -s -X POST $NODE -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":2,"method":"seal_zkProve",
-       "params":{"pre_state_root":"<32-byte hex>",
-                 "post_state_root":"<32-byte hex>",
-                 "block_height":1,"tx_count":3,
-                 "tx_hash":"<32-byte hex>"}}' | jq
+       "params":{"table":"users","statement":"balance > 1000"}}' | jq
 ```
 
 **Expected:**
-- MPC aggregate returns the sum/count without revealing per-party
-  values; uses `seal-mpc::spdz_sum` / `spdz_count` internally.
-- ZK prove returns a proof (simulation mode by default — real STARK
-  proving requires the `risc0` / `sp1` feature, §8).
+- MPC aggregate returns `{function, table, column, result}` — the
+  scalar aggregate without revealing per-row values. Underlying call
+  is `seal-mpc::spdz_sum` / `spdz_count` / `spdz_avg`. Missing any of
+  `function`/`table`/`column` → `-32602 missing 'X' param`; unknown
+  function → `-32602 unsupported function: …`.
+- ZK prove returns `{statement, table, satisfied, proof, proof_size,
+  prover, state_root, block_height, caller}`. `satisfied` is true iff
+  the predicate matched any row; `prover` names the active backend
+  ("stub" by default, `risc0` / `sp1` with the matching feature in §8).
 
 ## 19.4 Private tables RPC
 
-`seal_createPrivateTable` is auth-gated (`rpc.rs:333`);
+`seal_createPrivateTable` is auth-gated (`rpc.rs:463`);
 `seal_listPrivateTables` is a public read.
 
 ```bash
@@ -1303,49 +2199,85 @@ AEAD) — full test coverage already in §13.
 
 Six proposal tracks, conviction-multiplier voting (None/X1–X6),
 adaptive quorum biasing, vote delegation. All five RPCs are
-auth-gated (`rpc.rs:342-346`) — drive via `seal rpc --key`:
+auth-gated (`rpc.rs:472-476`) — drive via `seal rpc --key`:
 
 ```bash
-# 1. Propose. `track` ∈ {root, treasury, parameters, slashing,
-#    bridge_pause, council_membership}; `payload` is opaque bytes
-#    the proposal type interprets (e.g. JSON for parameter changes).
+# 1. Propose. `track` ∈ {parameter, protocol, treasury_small,
+#    treasury_large, emergency, constitutional} — case-insensitive,
+#    underscores optional (see parse_track in rpc.rs). Each track has
+#    its own approval threshold (50–75 %) and vote period (1–14 epochs)
+#    in governance.rs::ProposalTrack. `payload` is opaque bytes the
+#    proposal type interprets (e.g. JSON for parameter changes).
 cargo run -p seal-cli -- rpc --node $NODE --key alice.json \
     --method seal_govPropose \
-    --params '{"track":"treasury","title":"Bootstrap grant","payload":"{\"amount\":1000}"}'
+    --params '{"track":"treasury_small","title":"Bootstrap grant","payload":"{\"amount\":1000}"}'
 
-# 2. Vote. `choice` ∈ {aye, nay, abstain};
-#    `conviction` ∈ {none, x1, x2, x3, x4, x5, x6}.
-#    Higher conviction = more vote weight + longer lock.
+# 2. Vote. Required params:
+#    proposal_id (u64), choice ∈ {aye/yes, nay/no, abstain},
+#    stake (u64 — base units to commit to the vote).
+#    Optional: conviction ∈ {none|0, x1|1 … x6|6} (defaults to x1).
+#    Effective vote weight = stake × conviction multiplier.
 cargo run -p seal-cli -- rpc --node $NODE --key alice.json \
     --method seal_govVote \
-    --params '{"proposal_id":1,"choice":"aye","conviction":"x3"}'
+    --params '{"proposal_id":1,"choice":"aye","stake":1000,"conviction":"x3"}'
 
 # 3. Withdraw an unlocked vote (after the conviction lock expires).
 cargo run -p seal-cli -- rpc --node $NODE --key alice.json \
     --method seal_govWithdrawVote --params '{"proposal_id":1}'
 
-# 4. Delegate vote weight to another address.
+# 4. Delegate vote weight to another address. Params:
+#    delegate (sealt1… address), track, weight (u64 base units).
+#    Conviction lives on the votes the delegate casts, not on the
+#    delegation itself.
 cargo run -p seal-cli -- rpc --node $NODE --key alice.json \
     --method seal_govDelegate \
-    --params '{"track":"treasury","delegate":"sealt1…real-address…","conviction":"x2"}'
+    --params '{"track":"treasury_small","delegate":"sealt1…real-address…","weight":1000}'
 
 # 5. Revoke a delegation (subject to the conviction lock).
 cargo run -p seal-cli -- rpc --node $NODE --key alice.json \
-    --method seal_govRevokeDelegation --params '{"track":"treasury"}'
+    --method seal_govRevokeDelegation --params '{"track":"treasury_small"}'
 ```
 
 **Expected:** proposals advance through Pending → Voting → Decided
-states once the per-track period elapses; vote weight = balance ×
+states once the per-track period elapses; vote weight = stake ×
 conviction multiplier; adaptive quorum biases the threshold based on
 turnout (low turnout requires a stronger majority). Underlying
 mechanics live in `crates/seal-node/src/{governance,delegation}.rs`
 (~30 unit tests). Bridge-pause is gated separately on the Technical
 Council 2/3 supermajority — see §17.
 
+**Read paths (no auth, plain curl):**
+
+```bash
+# All proposals (id, track, title, proposer, start_epoch, status):
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"seal_govListProposals","params":{}}' | jq
+
+# One proposal in full (adds description + payload):
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"seal_govGetProposal","params":{"proposal_id":0}}' | jq
+
+# Votes cast on a proposal:
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"seal_govGetVotes","params":{"proposal_id":0}}' | jq
+
+# Tally the result (only succeeds once voting_period_epochs has
+# elapsed; otherwise -32000 "voting period not over yet"):
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":4,"method":"seal_govTally","params":{"proposal_id":0}}' | jq
+```
+
+Additional read paths: `seal_govListProposalsByProposer`,
+`seal_govListVotesByVoter`, `seal_govListDelegationsFrom/To`,
+`seal_govListLocksByVoter`, `seal_govEffectiveWeight`. Each takes the
+obvious identifier param (`address` or `voter`/`delegator`/`delegate`)
+and returns the matching slice — same JSON shape as the bulk
+endpoints above, sorted by id for diff-stable polling.
+
 ## 19.5 PQ-RPC handshake (ML-KEM native transport)
 
 The param is `client_public_key` (hex, not base64) — see
-`rpc.rs:1350`. The handshake itself is public; the encrypted frames
+`rpc.rs:2890`. The handshake itself is public; the encrypted frames
 that follow use the derived session key.
 
 ```bash
@@ -1357,9 +2289,13 @@ curl -s -X POST $NODE -H 'content-type: application/json' \
         '{jsonrpc:"2.0",id:1,method:"seal_pqHandshake",params:{client_public_key:$pk}}')" | jq
 ```
 
-**Expected:** server responds with a ciphertext (ML-KEM encapsulation
-of a symmetric session key). Subsequent encrypted frames use the
-derived session key with monotonic nonce + MAC verification. Unit
+**Expected:** server responds with
+`{ciphertext, server_public_key, session_id}` — `ciphertext` is the
+ML-KEM-768 encapsulation of the session key (decapsulated client-side
+with the matching ML-KEM secret in `kem.json`), `server_public_key` is
+the server's verifying key, and `session_id` is the per-session
+opaque handle for follow-up encrypted frames. Subsequent frames use
+the derived session key with monotonic nonce + MAC verification. Unit
 tests exercise this end-to-end in `seal-node::pq_rpc` (4 tests).
 
 ## 19.6 Internal-only state transitions (no RPC surface)
@@ -1369,16 +2305,18 @@ logic, not by direct RPC. Their manual verification is via unit
 tests + observation of on-chain state rather than RPC calls.
 
 ### Emission schedule
-- File: `crates/seal-node/src/emission.rs`, `consensus_runner.rs:342-358`
-- Wired: per-epoch emission applied during `produce_block_with_vrf`.
-- Test: `cargo test -p seal-node emission` (5+ tests).
+- File: `crates/seal-token/src/emission.rs`,
+  `crates/seal-node/src/consensus_runner.rs:475-490`
+- Wired: per-block reward applied inside `produce_block_with_vrf`
+  via `EmissionSchedule::default().block_reward(epoch)`.
+- Test: `cargo test -p seal-token emission`.
 - Observe: `seal_getBalance` on the emission recipient before and
-  after an epoch boundary.
+  after a block boundary.
 
 ### Treasury disbursement
-- File: `crates/seal-node/src/treasury.rs`
+- File: `crates/seal-token/src/treasury.rs`
 - Wired: 10 % of emission per epoch credited to treasury address.
-- Test: `cargo test -p seal-node treasury`.
+- Test: `cargo test -p seal-token treasury`.
 - Observe: treasury balance via `seal_getBalance`.
 
 ### Storage-lease expiry + pruning (#STORAGE-FORGET)
@@ -1410,10 +2348,10 @@ tests + observation of on-chain state rather than RPC calls.
   `cargo test -p seal-consensus`.
 
 ### Slashing
-- File: `crates/seal-node/src/slashing.rs`
+- File: `crates/seal-consensus/src/slashing.rs`
 - Wired: double-proposal + double-vote detection; slashed stake
   burned.
-- Test: `cargo test -p seal-node slashing`.
+- Test: `cargo test -p seal-consensus slashing`.
 
 ## 20 ADR-001 reference
 
@@ -1696,14 +2634,14 @@ Landed 2026-04-20 (cont.). Three new library crates under
 `examples/`:
 
 ```bash
-cargo test -p seal-copy-trading --lib \
-      -p seal-kyc --lib \
-      -p seal-kindle --lib
+cargo test -p seal-copy-trading -p seal-kyc -p seal-kindle --lib
 ```
 
-Expected: 21 tests pass total (7 each). Note the `--lib` on each
-package — the default-target invocation runs 0 tests for these
-crates (same Cargo-target quirk as §18.1).
+Expected: 21 tests pass total (7 each). Note the trailing `--lib` —
+the default-target invocation runs 0 tests for these crates (same
+Cargo-target quirk as §18.1), and the flag must come *after* every
+`-p` since `-p --lib -p …` confuses cargo's argument parsing and
+runs nothing.
 
 ### 25.1 copy-trading
 
@@ -1744,7 +2682,382 @@ Key tests:
 * `grant_unwrap_round_trip`
 * `unwrap_with_wrong_key_does_not_recover_bck`
 
+## 26 State-sync RPC trio + late-joiner bootstrap (landed 2026-05-10)
+
+The state-sync trio lets a fresh validator skip genesis-replay
+by pulling a recent state snapshot from a peer. Server side is
+three RPCs (`seal_listSnapshots` / `seal_getSnapshotManifest` /
+`seal_getSnapshotChunk`); client side is
+`seal-node --bootstrap-from-snapshot <peer-url>`.
+
+Wire-format source-of-truth in
+`crates/seal-storage/src/snapshot_chunks.rs`. Capture cadence
+fires from `ConsensusRunner::advance_slot` at every epoch
+boundary; default in-memory cap is 32 (rolling few-hour window
+at 32-slot epochs).
+
+### 26.1 Encoder / decoder + roster unit tests
+
+```bash
+cargo test -p seal-storage snapshot
+cargo test -p seal-token  --lib balance::tests::snapshot
+cargo test -p seal-node   --lib snapshot
+```
+
+**Expected:**
+- `seal-storage` runs 8 `SnapshotIndex` tests + 11
+  `snapshot_chunks` tests (chunk round-trip / oversized-row
+  exception / cap-split / fingerprint-order-sensitivity /
+  decoder truncation errors).
+- `seal-token` runs 6 balance-snapshot tests
+  (lexicographic-sort / dump→restore round-trip / malformed
+  bincode / dust-entry filtering / empty-store).
+- `seal-node` runs 3 capture-hook tests + 3 bootstrap-client
+  tests (round-trip against in-memory mock, empty list edge
+  case, hash-mismatch detection on a tampered byte).
+
+### 26.2 `seal_listSnapshots` (operator UX)
+
+After a node has been running long enough to cross at least
+one epoch boundary (default config: 256 slots × 4 s = ~17 min;
+override via `SEAL_SLOTS_PER_EPOCH=32` for a faster smoke):
+
+```bash
+cargo run -p seal-node -- --slots 0 --rpc-port 8545 --no-network &
+NODE_PID=$!
+# (wait for the first epoch boundary to fire; advance manually
+#  in a single-node config by submitting any tx that produces
+#  blocks — see §3.1 for the demo loop)
+cargo run -p seal-cli -- snapshots --node http://localhost:8545
+cargo run -p seal-cli -- snapshots --limit 5
+kill $NODE_PID
+```
+
+**Expected:** Newest-first table with columns
+`height / epoch / state_root[trunc] / captured_s`. If the node
+hasn't crossed an epoch boundary yet, the output reads
+`No snapshots retained yet (need at least one epoch boundary
+to fire).`.
+
+### 26.3 `seal_getSnapshotManifest` (operator UX)
+
+```bash
+HEIGHT=$(curl -s -X POST http://localhost:8545 \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","method":"seal_listSnapshots","params":{"limit":1},"id":1}' \
+    | jq -r '.result.snapshots[0].height')
+cargo run -p seal-cli -- snapshot-manifest --height $HEIGHT
+cargo run -p seal-cli -- snapshot-manifest --height $HEIGHT --json | jq '.chunks | length'
+```
+
+**Expected:** Summary block shows `state_root /
+tip_block_hash / manifest_hash / total_bytes / chunk_count`
+plus a chunk preview (first 8 + last 4 with `…` elision when
+>12 chunks). `--json` returns the raw RPC response for piping
+into the chunk-fetch loop.
+
+**Negative tests** (refuses pruned manifests):
+- Pick a `height` not in the retained roster → `-32004`
+  `snapshot at height N not retained`.
+- Pick a height whose snapshot the live state has moved past
+  (rare; race a query past the next epoch boundary) →
+  `-32005` with `live state_root … no longer matches snapshot
+  state_root …`.
+
+### 26.4 `seal_getSnapshotChunk` (operator UX)
+
+```bash
+cargo run -p seal-cli -- snapshot-chunk --height $HEIGHT --index 0
+cargo run -p seal-cli -- snapshot-chunk --height $HEIGHT --index 0 --out chunk0.bin
+```
+
+**Expected:** Prints `claimed_hash` (server-reported) +
+`recomputed_hash` (fresh local SHA3) + `(MATCH)`. The CLI
+exits 0 on MATCH, 2 on MISMATCH (the "host moved on
+mid-stream" signal). `--out chunk0.bin` writes the raw chunk
+bytes for offline diff against another peer.
+
+**Negative test:** `--index <chunk_count>` → `-32007`
+`chunk_index N out of range (snapshot has M chunks)`.
+
+### 26.5 `--bootstrap-from-snapshot` late-joiner (smoke owed)
+
+The full multi-node smoke (a fresh node converging against a
+2-node testnet without genesis-replay) is documented but not
+yet run on this dev machine — see the coverage note at the
+top. The intended invocation:
+
+```bash
+# On peer A (already at height >= 1 with at least one epoch
+# boundary crossed):
+cargo run -p seal-node -- --slots 0 --rpc-port 8545 --port 4001
+
+# On peer B (fresh):
+cargo run -p seal-node -- --slots 0 \
+    --rpc-port 8546 --port 4002 \
+    --bootstrap-peers /ip4/127.0.0.1/tcp/4001 \
+    --bootstrap-from-snapshot http://127.0.0.1:8545
+```
+
+**Expected log on peer B:**
+```
+Bootstrap-from-snapshot: connecting to http://127.0.0.1:8545…
+Bootstrap-from-snapshot: replayed N bytes across M chunk(s)
+  height = H, epoch = E, state_root = …
+Bootstrap-from-snapshot: balances populated, K account(s) live
+```
+
+The `Genesis: … SEAL minted` line **must NOT appear** on
+peer B — overlaying genesis on top of a bootstrap would
+diverge state from peers, and the binary is hard-coded to
+skip genesis when bootstrap succeeds. On bootstrap failure
+the binary exits with code 3 and a clear error rather than
+silently falling back to genesis.
+
+**Negative tests:**
+- Point at a non-existent peer URL → exit 3 with
+  `transport: curl exited …`.
+- Point at a peer that has zero snapshots retained → exit 3
+  with `bad response: peer has no snapshots retained`.
+- The hash-mismatch case is exercised by the in-memory mock
+  in `crates/seal-node/src/snapshot_bootstrap.rs::tests::
+  bootstrap_handles_chunk_hash_mismatch`.
+
+### 26.6 Explorer surface
+
+`apps/seal-explorer-web/index.html` gained a **State Snapshots**
+section between Namespaces and Tokens. Live-refreshes on the
+2 s tick, sig-skipped to avoid re-rendering on idle ticks.
+Older nodes without the RPC silently render an empty section
+— the chain itself stays functional.
+
+```bash
+# Same drill as §3.1 for explorer-web setup, then visit:
+#   http://localhost:8000/?rpc=http://localhost:8545
+```
+
+**Expected:** Header tile shows `(N of M retained)` count;
+table renders `height / epoch / state_root[trunc] /
+captured-at` newest-first. The header explanation points
+operators at `seal-node --bootstrap-from-snapshot`.
+
+## 27 Validator-registration portal (landed 2026-05-10)
+
+`apps/seal-registration` is a long-running axum service that
+collects ML-DSA-signed `(pubkey, vrf_pubkey, name, contact)`
+tuples from prospective testnet validators and exposes a
+public roster (with `contact` stripped). Mirrors the
+apps/seal-faucet shape; full runbook in
+[`docs/TESTNET-REGISTRATION.md`](docs/TESTNET-REGISTRATION.md).
+
+### 27.1 Unit tests
+
+```bash
+cargo test -p seal-registration
+```
+
+**Expected:** 7 tests pass:
+- `registration_message_is_canonical` — catches a future
+  field-reorder regression that would silently invalidate
+  every existing signature (the test asserts the
+  byte-string layout `register || pubkey_hex || vrf_pubkey_hex
+  || name || contact`).
+- `signature_verifies_for_authentic_request` — happy path.
+- `signature_fails_when_message_is_tampered` — flips the
+  name field, signature must reject.
+- `signature_fails_when_pubkey_is_substituted` — sign with
+  key A, verify against key B.
+- `cooldown_blocks_within_interval_and_clears_after` — the
+  per-IP rate limit math.
+- `append_and_load_jsonl_round_trip` — persistence layer.
+- `load_jsonl_missing_file_yields_empty_map` — fresh-install
+  edge case.
+
+### 27.2 End-to-end via curl
+
+```bash
+cargo run -p seal-registration -- --port 8547 &
+PORTAL_PID=$!
+sleep 0.5
+
+# Generate a fresh validator wallet; the keyfile is the same
+# shape the faucet expects.
+cargo run -p seal-cli -- keygen --output /tmp/reg-test.json
+PUB=$(jq -r .verifying_key /tmp/reg-test.json)
+
+# Sign the canonical message manually (until `seal
+# register-validator` lands — see TESTNET-REGISTRATION.md
+# for the recipe). Easiest path: drive it through Rust:
+SIG=$(cargo run --quiet -p seal-cli -- rpc \
+    --node "irrelevant" --method "irrelevant" --params '{}' --key /tmp/reg-test.json \
+    --print-sig-only 2>/dev/null || echo "manual-sig-needed")
+
+# OR construct the request body in a tiny Python helper:
+python3 - <<'PY'
+import json, hashlib
+# (driver code that builds the message bytes, signs via a
+#  Python ML-DSA binding or shells out to seal-cli; see
+#  docs/TESTNET-REGISTRATION.md for the canonical recipe.)
+PY
+
+curl -X POST http://127.0.0.1:8547/register \
+    -H 'Content-Type: application/json' \
+    -d "{\"pubkey_hex\":\"$PUB\",
+         \"vrf_pubkey_hex\":\"$(printf 'ab%.0s' {1..32})\",
+         \"name\":\"validator-alpha\",
+         \"contact\":\"alpha@example.com\",
+         \"signature_hex\":\"<hex from the helper>\"}"
+
+curl http://127.0.0.1:8547/registrations | jq
+
+kill $PORTAL_PID
+```
+
+**Expected:**
+- POST returns `{"status":"ok","pubkey_hex":"…","name":"validator-alpha"}`.
+- GET `/registrations` lists the entry **without** the
+  `contact` field (operator-private — that field stays on
+  the on-disk JSONL only).
+- A second identical POST returns
+  `{"status":"already-registered",…}` — idempotent re-submit
+  is a quiet 200, not an error.
+- Registration JSONL appears at `./registrations.jsonl` (or
+  the path passed to `--store`); each line is a one-record
+  JSON document including `accepted_at_unix_secs`.
+
+**Negative tests:**
+- Empty `name` or `contact` → 400 with the field-shape error.
+- `name > 200` chars or `contact > 400` chars → 400.
+- Tampered `name` (signed payload's name ≠ submitted name) →
+  401 `signature does not verify against pubkey_hex`.
+- Two requests from the same IP within `--interval-secs`
+  (default 60) → 429 with `retry_after_secs`.
+
+## 28 Release pipeline + sign-file / verify-file (landed 2026-05-10)
+
+PQC-native release artifacts: ML-DSA-65 signs the
+`SHA256SUMS` file rather than the classical sigstore /
+minisign pipeline a typical Rust project would use. Per
+`CLAUDE.md` the project is post-quantum first; the signing
+primitive matches the chain's own identity scheme. Full
+runbook in [`docs/RELEASE.md`](docs/RELEASE.md).
+
+### 28.1 `seal sign-file` / `seal verify-file` round-trip
+
+```bash
+# Generate a release keypair (back this up — losing it means
+# future releases can't sign under the same identity, so
+# downstream consumers will start seeing pubkey-mismatch
+# errors).
+cargo run -p seal-cli -- keygen --output /tmp/release-key.json
+
+# Round-trip on a small file.
+echo "hello world" > /tmp/test.txt
+cargo run -p seal-cli -- sign-file /tmp/test.txt \
+    --key /tmp/release-key.json --out /tmp/test.txt.sig
+
+PUB=$(cat /tmp/test.txt.sig.pubkey)
+cargo run -p seal-cli -- verify-file /tmp/test.txt \
+    --pubkey-hex "$PUB" --sig-file /tmp/test.txt.sig
+echo "exit=$?"   # 0 → OK
+```
+
+**Expected:**
+- `sign-file` writes `/tmp/test.txt.sig` (~6 600 hex chars =
+  3 309-byte ML-DSA-65 signature) + sibling
+  `/tmp/test.txt.sig.pubkey` (verifying-key hex).
+- `verify-file` prints
+  `OK (/tmp/test.txt signature verifies)` and exits 0.
+
+**Negative tests:**
+```bash
+# Tamper with the file after signing.
+echo "tampered" > /tmp/test.txt
+cargo run -p seal-cli -- verify-file /tmp/test.txt \
+    --pubkey-hex "$PUB" --sig-file /tmp/test.txt.sig
+echo "exit=$?"   # 1 → tampered file detected
+```
+
+`verify-file` prints
+`FAIL (/tmp/test.txt signature does NOT verify)` and exits 1.
+Garbage hex / missing files → exit 2.
+
+### 28.2 `scripts/release.sh` dry-run
+
+The script is dry-run by default. The Docker push is gated
+behind `RELEASE_PUBLISH=1` so a stray invocation never leaks
+to ghcr.io.
+
+```bash
+# Generate or reuse a release key first (28.1).
+./scripts/release.sh --version v0.0.0-test --key /tmp/release-key.json
+ls -la dist/
+```
+
+**Expected:**
+- `dist/seal-node-v0.0.0-test-linux-x86_64`
+- `dist/seal-node-v0.0.0-test-linux-aarch64`
+- `dist/seal-node-v0.0.0-test-darwin-aarch64` (only on Apple
+  Silicon hosts)
+- `dist/SHA256SUMS` — sorted-filename `shasum -a 256` output;
+  two builds of the same source tree produce byte-identical
+  sums.
+- `dist/SHA256SUMS.sig` (~6 600 hex chars).
+- `dist/SHA256SUMS.sig.pubkey` (verifying-key hex matching
+  the `--key` argument).
+- `dist/seal-node-v0.0.0-test.tar.gz` containing all of the
+  above.
+- Local Docker image
+  `ghcr.io/seal-dao/seal-node:v0.0.0-test` (visible via
+  `docker images`).
+- `[ok] post-sign verify OK` — the script re-runs
+  `seal verify-file` against the just-produced signature
+  before tarballing, so a sig that doesn't verify against
+  its own pubkey aborts the release with exit 3.
+
+**Negative tests:**
+- Missing `--key` file → preflight exit 1.
+- Missing `docker` / `cargo` / `shasum` on PATH → preflight
+  exit 1.
+- `RELEASE_PUBLISH=1` without ghcr auth → Docker push fails
+  with exit 4; the `dist/` artifacts are still produced.
+
+### 28.3 Downloader-side verification
+
+A consumer pulling the release runs the same two checks the
+script's "Verify on a downloader's host" footer prints:
+
+```bash
+cd dist/
+shasum -a 256 -c SHA256SUMS
+cargo run -p seal-cli -- verify-file SHA256SUMS \
+    --pubkey-hex "$(cat SHA256SUMS.sig.pubkey)" \
+    --sig-file SHA256SUMS.sig
+```
+
+**Expected:** Both checks pass (exit 0). For production
+deployments, downstream consumers should pin the expected
+`pubkey_hex` once and verify all future releases against the
+pinned value rather than trusting `SHA256SUMS.sig.pubkey`
+out of the same archive — a malicious upstream could swap
+both. See `docs/RELEASE.md` "Pinning the release pubkey".
+
+### 28.4 What this section does NOT exercise
+
+The release pipeline is documented but **not** wired into
+`scripts/ci.sh` — releasing is an explicit operator action,
+not a CI loop. Things still owed (per `docs/RELEASE.md`):
+- `gh release create` automation under the
+  `RELEASE_PUBLISH=1` branch.
+- SLSA-style provenance attestation.
+- Threshold release signing via `seal-threshold` (N-of-M
+  operators rather than a single ML-DSA key).
+
 ## Summary Checklist
+
+Test counts are post-2026-05-10 batch (state-sync trio +
+late-joiner + registration + release). Workspace total grew
+from 1077 → 1116 (+39 tests across the batch).
 
 | Feature         | Command                           | Expected Tests |
 | --------------- | --------------------------------- | -------------- |
@@ -1755,15 +3068,15 @@ Key tests:
 | SQL             | `cargo test -p seal-sql`        | 97+            |
 | Merkle          | `cargo test -p seal-merkle`     | 35+            |
 | Consensus crate | `cargo test -p seal-consensus`  | 57+            |
-| Consensus + Node | `cargo test -p seal-node --lib` | 217+           |
+| Consensus + Node | `cargo test -p seal-node --lib` | 240+          |
 | P2P             | `cargo test -p seal-p2p`        | 32+            |
 | Bridge          | `cargo test -p seal-bridge`     | 48+            |
 | ZK (default)    | `cargo test -p seal-zk`         | 46+            |
 | ZK (real r0vm)  | `SEAL_RUN_REAL_RISC0=1 cargo test -p seal-zk --features risc0` | +8 |
 | MPC             | `cargo test -p seal-mpc`        | 26+            |
-| Private Tables  | `cargo test -p seal-node private_tables` | 8       |
-| Storage         | `cargo test -p seal-storage`    | 18+            |
-| Token           | `cargo test -p seal-token`      | 88+            |
+| Private Tables  | `cargo test -p seal-node private_tables` | 9       |
+| Storage         | `cargo test -p seal-storage`    | 37+            |
+| Token           | `cargo test -p seal-token`      | 94+            |
 | Wallet          | `cargo test -p seal-wallet`     | 34+            |
 | TEE             | `cargo test -p seal-tee`        | 6+             |
 | CLI             | `cargo test -p seal-cli`        | 10+            |
@@ -1775,4 +3088,5 @@ Key tests:
 | Copy-trading    | `cargo test -p seal-copy-trading --lib` | 7            |
 | KYC             | `cargo test -p seal-kyc --lib`        | 7              |
 | Kindle          | `cargo test -p seal-kindle --lib`     | 7              |
-| **Total** | `cargo test --workspace`        | **985+** |
+| Registration    | `cargo test -p seal-registration`     | 7              |
+| **Total** | `cargo test --workspace`        | **1116+** |

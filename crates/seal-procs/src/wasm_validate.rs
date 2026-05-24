@@ -21,7 +21,7 @@
 //! 4. No imports (host calls would defeat determinism).
 //! 5. No SIMD, threads, references, GC, or component-model features.
 
-use crate::{Procedure, ProcedureLanguage, ProcError};
+use crate::{ProcError, Procedure, ProcedureLanguage};
 use wasmparser::{Payload, Validator, WasmFeatures};
 
 /// Validate a WASM procedure body. The body is treated as a hex string
@@ -67,10 +67,7 @@ pub fn validate_wasm_bytes(bytes: &[u8], expected_arg_count: usize) -> Result<()
                     for sub in rg.types() {
                         if let wasmparser::CompositeInnerType::Func(ft) = &sub.composite_type.inner
                         {
-                            type_sigs.push((
-                                ft.params().to_vec(),
-                                ft.results().to_vec(),
-                            ));
+                            type_sigs.push((ft.params().to_vec(), ft.results().to_vec()));
                         } else {
                             type_sigs.push((Vec::new(), Vec::new()));
                         }
@@ -194,7 +191,10 @@ mod tests {
     const EMPTY_HEX: &str = "0061736d01000000";
 
     fn arg(name: &str, ty: &str) -> ProcedureArg {
-        ProcedureArg { name: name.into(), type_keyword: ty.into() }
+        ProcedureArg {
+            name: name.into(),
+            type_keyword: ty.into(),
+        }
     }
 
     #[test]
@@ -212,7 +212,11 @@ mod tests {
     #[test]
     fn rejects_non_wasm_proc() {
         let p = Procedure::new(
-            "f".into(), vec![], None, ProcedureLanguage::Sql, "SELECT 1".into(),
+            "f".into(),
+            vec![],
+            None,
+            ProcedureLanguage::Sql,
+            "SELECT 1".into(),
         );
         let err = validate_wasm_proc(&p).unwrap_err();
         assert!(matches!(err, ProcError::LanguageMismatch { .. }));
@@ -221,7 +225,11 @@ mod tests {
     #[test]
     fn rejects_invalid_hex() {
         let p = Procedure::new(
-            "f".into(), vec![], None, ProcedureLanguage::Wasm, "garbage".into(),
+            "f".into(),
+            vec![],
+            None,
+            ProcedureLanguage::Wasm,
+            "garbage".into(),
         );
         let err = validate_wasm_proc(&p).unwrap_err();
         assert!(matches!(err, ProcError::Execution(_)));
@@ -230,7 +238,11 @@ mod tests {
     #[test]
     fn rejects_missing_run_export() {
         let p = Procedure::new(
-            "f".into(), vec![], None, ProcedureLanguage::Wasm, EMPTY_HEX.into(),
+            "f".into(),
+            vec![],
+            None,
+            ProcedureLanguage::Wasm,
+            EMPTY_HEX.into(),
         );
         let err = validate_wasm_proc(&p).unwrap_err();
         assert!(matches!(err, ProcError::Execution(s) if s.contains("run")));
@@ -247,6 +259,12 @@ mod tests {
             ADD_ONE_HEX.into(),
         );
         let err = validate_wasm_proc(&p).unwrap_err();
-        assert!(matches!(err, ProcError::ArgCount { expected: 0, actual: 1 }));
+        assert!(matches!(
+            err,
+            ProcError::ArgCount {
+                expected: 0,
+                actual: 1
+            }
+        ));
     }
 }

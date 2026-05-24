@@ -9,8 +9,8 @@
 //! byte-for-byte — the cross-check test under `std-crosscheck` enforces
 //! that.
 
-use sha3::{Digest, Sha3_256};
 use crate::field::{RING_N, RING_Q};
+use sha3::{Digest, Sha3_256};
 
 /// Number of non-zero coefficients in the challenge polynomial.
 pub const TAU: usize = 60;
@@ -83,8 +83,11 @@ mod tests {
         let plus_one = RING_Q - (RING_Q - 1); // 1
         let minus_one = RING_Q - 1;
         for &c in &poly {
-            assert!(c == 0 || c == plus_one || c == minus_one,
-                    "coefficient {} is not 0, +1, or -1 mod q", c);
+            assert!(
+                c == 0 || c == plus_one || c == minus_one,
+                "coefficient {} is not 0, +1, or -1 mod q",
+                c
+            );
         }
     }
 

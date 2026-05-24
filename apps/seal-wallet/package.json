@@ -4,7 +4,9 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "electron": "electron electron.cjs"
+    "electron": "electron electron.cjs",
+    "icon": "bash scripts/build-icon.sh",
+    "postinstall": "bash scripts/setup-dev-icon.sh || true"
   },
   "devDependencies": {
     "electron": "^41.1.1"

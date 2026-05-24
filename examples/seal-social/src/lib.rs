@@ -61,7 +61,11 @@ mod tests {
     #[test]
     fn policies_cover_writes() {
         let policies = rls_policies();
-        assert!(policies.iter().any(|(t, a, _)| *t == "posts" && a.starts_with("INSERT")));
-        assert!(policies.iter().any(|(t, a, _)| *t == "follows" && a.starts_with("INSERT")));
+        assert!(policies
+            .iter()
+            .any(|(t, a, _)| *t == "posts" && a.starts_with("INSERT")));
+        assert!(policies
+            .iter()
+            .any(|(t, a, _)| *t == "follows" && a.starts_with("INSERT")));
     }
 }

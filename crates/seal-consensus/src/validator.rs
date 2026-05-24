@@ -1,5 +1,6 @@
 //! Validator set management.
 
+use seal_crypto::hash::sha3_256;
 use serde::{Deserialize, Serialize};
 
 /// Information about a single validator.
@@ -48,6 +49,21 @@ impl ValidatorSet {
     /// Find a validator by public key.
     pub fn find_by_pubkey(&self, pubkey: &[u8]) -> Option<&ValidatorInfo> {
         self.validators.iter().find(|v| v.public_key == pubkey)
+    }
+
+    /// Find a validator whose `SHA3-256(public_key)` matches the
+    /// supplied 32-byte address-hash. Backs the per-address validator-
+    /// status lookup (`seal_getValidatorByAddress`): an address
+    /// encodes `bech32m(SHA3-256(pubkey))` and is the only on-Seal
+    /// identifier a wallet/UI can hand to an RPC, so the lookup runs
+    /// in the address-hash space rather than the raw-pubkey space.
+    /// Linear scan — fine for the typical sub-thousand validator
+    /// set; if it ever grows large enough to matter, replace with a
+    /// hash-keyed index built once per epoch.
+    pub fn find_by_address_hash(&self, address_hash: &[u8; 32]) -> Option<&ValidatorInfo> {
+        self.validators
+            .iter()
+            .find(|v| sha3_256(&v.public_key).0 == *address_hash)
     }
 
     /// Compute the VRF threshold for a given validator.
@@ -104,6 +120,19 @@ mod tests {
         let vs = ValidatorSet::new(vec![make_validator(1, 100), make_validator(2, 200)]);
         assert!(vs.find_by_pubkey(&[1u8; 32]).is_some());
         assert!(vs.find_by_pubkey(&[99u8; 32]).is_none());
+    }
+
+    #[test]
+    fn test_find_by_address_hash() {
+        let vs = ValidatorSet::new(vec![make_validator(1, 100), make_validator(2, 200)]);
+        // Recompute the address-hash for validator 1's pubkey and look it up.
+        let v1_addr = sha3_256(&[1u8; 32]).0;
+        let found = vs.find_by_address_hash(&v1_addr).expect("v1 found");
+        assert_eq!(found.public_key, vec![1u8; 32]);
+        assert_eq!(found.stake, 100);
+        // An unrelated address-hash returns None.
+        let unrelated = sha3_256(b"not-a-validator-key").0;
+        assert!(vs.find_by_address_hash(&unrelated).is_none());
     }
 
     #[test]

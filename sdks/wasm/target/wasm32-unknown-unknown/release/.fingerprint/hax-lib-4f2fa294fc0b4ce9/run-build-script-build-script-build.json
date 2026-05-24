@@ -1,1 +1,0 @@
-{"rustc":9783247635632824192,"features":"","declared_features":"","target":0,"profile":0,"path":0,"deps":[[7041489013793691962,"build_script_build",false,15374641641827155054]],"local":[{"RerunIfChanged":{"output":"wasm32-unknown-unknown/release/build/hax-lib-4f2fa294fc0b4ce9/output","paths":["build.rs"]}}],"rustflags":[],"config":0,"compile_kind":0}

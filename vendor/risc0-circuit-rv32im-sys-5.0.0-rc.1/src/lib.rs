@@ -99,6 +99,14 @@ unsafe extern "C" {
     #[cfg(feature = "cuda")]
     pub fn risc0_circuit_rv32im_m3_prover_new_cuda(po2: usize) -> *mut ProverContext;
 
+    // Metal HAL — Apple Silicon segment-prover GPU path. The C++
+    // side calls `getGpuHal()` which resolves to either the CUDA or
+    // Metal `hal.cpp`, depending on which was compiled in by
+    // build.rs (only one platform per build). See
+    // `crates/seal-zk/METAL.md` Option A for the rationale.
+    #[cfg(feature = "metal")]
+    pub fn risc0_circuit_rv32im_m3_prover_new_metal(po2: usize) -> *mut ProverContext;
+
     pub fn risc0_circuit_rv32im_m3_prove(
         ctx: *const ProverContext,
         preflight: *const PreflightContext,

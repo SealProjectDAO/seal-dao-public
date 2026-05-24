@@ -34,6 +34,14 @@ cuda = [
     "risc0-sys/cuda",
     "risc0-zkp/cuda",
 ]
+# Metal segment-prover HAL (Apple Silicon). Mirrors the `cuda`
+# feature shape but pulls the Metal C++ HAL through the sys crate
+# and threads risc0-zkp's Metal kernels in for FRI/Poseidon/SHA.
+metal = [
+    "prove",
+    "risc0-circuit-rv32im-sys/metal",
+    "risc0-zkp/metal",
+]
 default = []
 execute = [
     "anyhow/backtrace",

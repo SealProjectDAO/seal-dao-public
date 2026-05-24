@@ -101,7 +101,11 @@ this SAC to do real `transfer` calls on `lock_xlm` / `unlock_xlm`.
 - [x] Integrate Stellar Asset Contract (SAC) for actual XLM transfers (B5).
 - [ ] Full algebraic Ringtail verify in Soroban (48-bit prime NTT
       polynomial ops; ~10M instructions estimated).
-- [ ] Add pause/unpause admin functionality
+- [x] Add pause/unpause admin functionality (`set_pause` ix, admin-only;
+      `paused` instance-storage flag; `lock_xlm` and `unlock_xlm`
+      reject with `Paused` while set; `is_paused` view; pause event
+      emitted). Defence-in-depth on top of the Seal-side per-chain
+      pause (`seal_bridgePauseChain`, 2/3 Technical Council).
 - [ ] Add fee collection mechanism
 - [ ] Add rate limiting / daily caps
 - [ ] Integration tests with Seal DAO testnet relayer

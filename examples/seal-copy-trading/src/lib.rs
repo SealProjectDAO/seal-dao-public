@@ -177,9 +177,15 @@ mod tests {
     #[test]
     fn policies_cover_inserts_and_deletes() {
         let p = rls_policies();
-        assert!(p.iter().any(|(t, a, _)| *t == "follows" && a.contains("INSERT")));
-        assert!(p.iter().any(|(t, a, _)| *t == "follows" && a.contains("DELETE")));
-        assert!(p.iter().any(|(t, a, _)| *t == "mirror_orders" && a.contains("INSERT")));
+        assert!(p
+            .iter()
+            .any(|(t, a, _)| *t == "follows" && a.contains("INSERT")));
+        assert!(p
+            .iter()
+            .any(|(t, a, _)| *t == "follows" && a.contains("DELETE")));
+        assert!(p
+            .iter()
+            .any(|(t, a, _)| *t == "mirror_orders" && a.contains("INSERT")));
     }
 
     #[test]

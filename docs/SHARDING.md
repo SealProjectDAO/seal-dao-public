@@ -119,8 +119,11 @@ seal-node --slots 0 --rpc-port 8545 \
   --serve blog.seal \
   --serve market.seal
 
-# Validators don't need --serve (they only store consensus)
-seal-node --slots 0 --validator-key key.json
+# Validators don't need --serve (they only store consensus state).
+# Pass --validator-key for a stable on-chain identity across restarts
+# (see TESTNET.md "Identity persistence" for the keyfile format).
+seal-node --slots 0 --data-dir /var/lib/seal \
+  --validator-key /etc/seal/validator-keys.json
 ```
 
 ### Query Routing

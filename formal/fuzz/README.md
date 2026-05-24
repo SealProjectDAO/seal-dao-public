@@ -23,12 +23,20 @@ Every external input boundary is a potential attack surface:
 
 | Target | What is fuzzed | Crate | Status |
 |--------|----------------|-------|--------|
-| `fuzz_sql_parser` | Arbitrary strings → `parse_sql()` | seal-sql | TODO |
-| `fuzz_tx_deserialize` | Arbitrary bytes → Transaction deserialization | seal-storage | TODO |
-| `fuzz_vrf_verify` | Arbitrary proofs → `HmacVrf::verify()` | seal-vrf | TODO |
-| `fuzz_block_deserialize` | Arbitrary bytes → Block deserialization | seal-storage | TODO |
-| `fuzz_merkle_ops` | Random insert/delete sequences → tree invariants | seal-merkle | TODO |
-| `fuzz_address_parse` | Arbitrary strings → `SealAddress::from_string_encoding()` | seal-crypto | TODO |
+| `fuzz_sql_parser` | Arbitrary strings → `parse_sql()` | seal-sql | Done |
+| `fuzz_tx_deserialize` | Arbitrary bytes → Transaction deserialization | seal-storage | Done |
+| `fuzz_vrf_verify` | Arbitrary proofs → `HmacVrf::verify()` | seal-vrf | Done |
+| `fuzz_pqvrf_verify` | Arbitrary proofs → `PqVrf::verify()` | seal-vrf | Done |
+| `fuzz_block_deserialize` | Arbitrary bytes → Block deserialization | seal-storage | Done |
+| `fuzz_merkle_ops` | Random insert/delete sequences → tree invariants | seal-merkle | Done |
+| `fuzz_address_parse` | Arbitrary strings → `SealAddress::from_string_encoding()` | seal-crypto | Done |
+| `fuzz_committee_vote` | Arbitrary bytes → committee-vote deserialization | seal-consensus | Done |
+| `fuzz_ringtail_verify` | Arbitrary signatures → `RingtailThreshold::verify()` | seal-threshold | Done |
+| `fuzz_ringtail_sign` | partial_sign / aggregate / verify under random keys | seal-threshold | Done |
+
+Total: **10 targets**. `scripts/fuzz-all.sh` runs them in sequence;
+`scripts/fuzz-extended.sh 3600` is the pre-release campaign (1 hour /
+target).
 
 ## How to run
 

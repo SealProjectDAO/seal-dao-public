@@ -9,6 +9,7 @@ assets
 bridges
 contracts
 crates
+docker
 docker-compose.yml
 docs
 examples

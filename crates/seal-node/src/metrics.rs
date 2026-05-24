@@ -16,6 +16,10 @@ pub struct NodeMetrics {
     pub peers_connected: AtomicU64,
     pub fees_collected: AtomicU64,
     pub fees_burned: AtomicU64,
+    /// In-flight bridge-Ringtail signing sessions (gauge — read live
+    /// from the orchestrator). 0 when no orchestrator is wired.
+    /// P1#5 layer 4 surface so dashboards alert on stuck rounds.
+    pub bridge_ringtail_sessions: AtomicU64,
 }
 
 impl NodeMetrics {
@@ -33,6 +37,7 @@ impl NodeMetrics {
             peers_connected: AtomicU64::new(0),
             fees_collected: AtomicU64::new(0),
             fees_burned: AtomicU64::new(0),
+            bridge_ringtail_sessions: AtomicU64::new(0),
         }
     }
 
@@ -48,22 +53,69 @@ impl NodeMetrics {
     pub fn to_prometheus(&self) -> String {
         let mut out = String::with_capacity(2048);
         let counters = [
-            ("seal_blocks_produced", "Total blocks produced", &self.blocks_produced),
-            ("seal_blocks_received", "Total blocks received from peers", &self.blocks_received),
-            ("seal_blocks_verified", "Total blocks verified", &self.blocks_verified),
-            ("seal_blocks_rejected", "Total blocks rejected", &self.blocks_rejected),
-            ("seal_txs_submitted", "Total transactions submitted", &self.txs_submitted),
-            ("seal_txs_accepted", "Total transactions accepted", &self.txs_accepted),
-            ("seal_txs_rejected", "Total transactions rejected", &self.txs_rejected),
-            ("seal_sql_queries", "Total SQL SELECT queries", &self.sql_queries),
-            ("seal_sql_writes", "Total SQL write operations", &self.sql_writes),
-            ("seal_fees_collected", "Total fees collected (micro-SEAL)", &self.fees_collected),
-            ("seal_fees_burned", "Total fees burned (micro-SEAL)", &self.fees_burned),
+            (
+                "seal_blocks_produced",
+                "Total blocks produced",
+                &self.blocks_produced,
+            ),
+            (
+                "seal_blocks_received",
+                "Total blocks received from peers",
+                &self.blocks_received,
+            ),
+            (
+                "seal_blocks_verified",
+                "Total blocks verified",
+                &self.blocks_verified,
+            ),
+            (
+                "seal_blocks_rejected",
+                "Total blocks rejected",
+                &self.blocks_rejected,
+            ),
+            (
+                "seal_txs_submitted",
+                "Total transactions submitted",
+                &self.txs_submitted,
+            ),
+            (
+                "seal_txs_accepted",
+                "Total transactions accepted",
+                &self.txs_accepted,
+            ),
+            (
+                "seal_txs_rejected",
+                "Total transactions rejected",
+                &self.txs_rejected,
+            ),
+            (
+                "seal_sql_queries",
+                "Total SQL SELECT queries",
+                &self.sql_queries,
+            ),
+            (
+                "seal_sql_writes",
+                "Total SQL write operations",
+                &self.sql_writes,
+            ),
+            (
+                "seal_fees_collected",
+                "Total fees collected (micro-SEAL)",
+                &self.fees_collected,
+            ),
+            (
+                "seal_fees_burned",
+                "Total fees burned (micro-SEAL)",
+                &self.fees_burned,
+            ),
         ];
         for (name, help, counter) in &counters {
             out.push_str(&format!(
                 "# HELP {} {}\n# TYPE {} counter\n{} {}\n",
-                name, help, name, name,
+                name,
+                help,
+                name,
+                name,
                 counter.load(Ordering::Relaxed)
             ));
         }
@@ -73,6 +125,12 @@ impl NodeMetrics {
              # TYPE seal_peers_connected gauge\n\
              seal_peers_connected {}\n",
             self.peers_connected.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "# HELP seal_bridge_ringtail_sessions In-flight bridge-Ringtail signing sessions\n\
+             # TYPE seal_bridge_ringtail_sessions gauge\n\
+             seal_bridge_ringtail_sessions {}\n",
+            self.bridge_ringtail_sessions.load(Ordering::Relaxed)
         ));
         out
     }

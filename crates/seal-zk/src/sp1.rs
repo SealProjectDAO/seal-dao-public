@@ -50,7 +50,7 @@ impl Sp1Prover {
 
 impl Sp1Prover {
     #[allow(dead_code)] // Wired once the SP1 guest ELF ships — kept here so
-    // the SP1 and RISC Zero paths stay structurally parallel.
+                        // the SP1 and RISC Zero paths stay structurally parallel.
     fn prepare_guest_input(&self, transition: &StateTransition) -> GuestInput {
         GuestInput {
             pre_state_root: transition.pre_state_root.0,
@@ -104,8 +104,7 @@ impl ZkProver for Sp1Prover {
             block_height: transition.block_height,
         };
 
-        let output = risc0_guest::simulate_guest(&input)
-            .map_err(|e| ZkError::ProvingFailed(e))?;
+        let output = risc0_guest::simulate_guest(&input).map_err(ZkError::ProvingFailed)?;
 
         let output_bytes = bincode::serialize(&output)
             .map_err(|e| ZkError::ProvingFailed(format!("serialization: {}", e)))?;

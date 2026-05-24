@@ -265,6 +265,18 @@ ProverContext* risc0_circuit_rv32im_m3_prover_new_cuda(size_t po2) {
   });
 }
 
+// Mirror of `new_cuda` for the Metal HAL. Both call `getGpuHal()`,
+// which resolves to whichever `cxx/hal/<cuda|metal>/hal.cpp` was
+// compiled in by build.rs (only one can be active per build). Kept
+// as a separate FFI symbol so prove.rs's `cfg_if!` can branch
+// CPU/CUDA/Metal explicitly.
+ProverContext* risc0_circuit_rv32im_m3_prover_new_metal(size_t po2) {
+  return tryRet([&] {
+    IHalPtr hal = getGpuHal();
+    return new ProverContext(hal, po2);
+  });
+}
+
 void risc0_circuit_rv32im_m3_prove(ProverContext* ctx, PreflightContext* preflight) {
   return tryVoid([&] {
     nvtx3::scoped_range range("prove");

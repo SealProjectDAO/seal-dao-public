@@ -122,6 +122,9 @@ pub trait RingOps {
     fn to_bytes(&self, p: &Self::Poly) -> Vec<u8>;
 
     /// Deserialize polynomial from bytes.
+    // Takes `&self` because deserialization is parameterized by the ring's
+    // modulus / NTT context — it's a dispatched method, not a static ctor.
+    #[allow(clippy::wrong_self_convention)]
     fn from_bytes(&self, data: &[u8]) -> Result<Self::Poly, String>;
 
     /// Zero polynomial.
@@ -215,6 +218,28 @@ impl<R: RingOps> RingtailParty<R> {
         }
     }
 
+    /// Export the current Round1 randomness polynomial to bytes, or
+    /// `None` if Round1 hasn't been computed yet. Used by the bridge
+    /// signing orchestrator (P1#5 layer 4) to persist in-flight
+    /// session state to disk so a node restart doesn't strand a
+    /// signing round.
+    pub fn export_round1_randomness(&self) -> Option<Vec<u8>> {
+        self.round1_randomness
+            .as_ref()
+            .map(|r| self.ring.to_bytes(r))
+    }
+
+    /// Restore Round1 randomness from bytes (the inverse of
+    /// `export_round1_randomness`). Used by the bridge signing
+    /// orchestrator on restart-resume — pairs with a persisted
+    /// `RingtailBridgeSession` whose round1/round2 messages still
+    /// reference the commitment derived from these randomness bytes.
+    pub fn import_round1_randomness(&mut self, bytes: &[u8]) -> Result<(), String> {
+        let r = self.ring.from_bytes(bytes)?;
+        self.round1_randomness = Some(r);
+        Ok(())
+    }
+
     /// Round 1: generate commitment (can be preprocessed).
     ///
     /// Returns Round1Message to broadcast to all parties.
@@ -233,11 +258,9 @@ impl<R: RingOps> RingtailParty<R> {
         let commitment = self.ring.to_bytes(&commitment_poly);
 
         // Authenticated MAC: H(mac_key || party_id || commitment)
-        let mac = crate::ntt::compute_mac(
-            mac_key,
-            &[&self.id.to_le_bytes()[..], &commitment].concat(),
-        )
-        .to_vec();
+        let mac =
+            crate::ntt::compute_mac(mac_key, &[&self.id.to_le_bytes()[..], &commitment].concat())
+                .to_vec();
 
         // Store randomness for Round 2
         self.round1_randomness = Some(r_i);
@@ -496,9 +519,14 @@ pub fn distribute_key_shares<R: RingOps>(
         .into_iter()
         .map(|(idx, coeffs)| {
             let share_bytes = ring.to_bytes(
-                &ring.from_bytes(
-                    &coeffs.iter().flat_map(|c| c.to_le_bytes()).collect::<Vec<_>>()
-                ).unwrap_or_else(|_| ring.zero()),
+                &ring
+                    .from_bytes(
+                        &coeffs
+                            .iter()
+                            .flat_map(|c| c.to_le_bytes())
+                            .collect::<Vec<_>>(),
+                    )
+                    .unwrap_or_else(|_| ring.zero()),
             );
             (idx, share_bytes)
         })
@@ -552,17 +580,12 @@ pub struct PublicParams {
 
 /// Multiply a K x L matrix of polynomials by an L-length vector of polynomials.
 /// Returns a K-length vector of polynomials.
-pub fn mat_vec_mul<R: RingOps>(
-    ring: &R,
-    matrix: &[Vec<R::Poly>],
-    vec: &[R::Poly],
-) -> Vec<R::Poly> {
-    let k = matrix.len();
-    let mut result = Vec::with_capacity(k);
-    for i in 0..k {
+pub fn mat_vec_mul<R: RingOps>(ring: &R, matrix: &[Vec<R::Poly>], vec: &[R::Poly]) -> Vec<R::Poly> {
+    let mut result = Vec::with_capacity(matrix.len());
+    for row in matrix {
         let mut acc = ring.zero();
         for (j, v_j) in vec.iter().enumerate() {
-            let product = ring.mul(&matrix[i][j], v_j);
+            let product = ring.mul(&row[j], v_j);
             acc = ring.add(&acc, &product);
         }
         result.push(acc);
@@ -574,9 +597,7 @@ pub fn mat_vec_mul<R: RingOps>(
 /// and public key t = A*s + e.
 ///
 /// Returns (PublicParams, secret_s as serialized polynomials).
-pub fn generate_public_params<R: RingOps>(
-    ring: &R,
-) -> (PublicParams, Vec<Vec<u8>>) {
+pub fn generate_public_params<R: RingOps>(ring: &R) -> (PublicParams, Vec<Vec<u8>>) {
     // Generate K x L random matrix A
     let mut matrix_a_polys: Vec<Vec<R::Poly>> = Vec::with_capacity(MODULE_K);
     let mut matrix_a_bytes: Vec<Vec<Vec<u8>>> = Vec::with_capacity(MODULE_K);
@@ -593,15 +614,11 @@ pub fn generate_public_params<R: RingOps>(
     }
 
     // Sample secret vector s (L polynomials with small coefficients)
-    let secret_s: Vec<R::Poly> = (0..MODULE_L)
-        .map(|_| ring.sample_gaussian(6.108))
-        .collect();
+    let secret_s: Vec<R::Poly> = (0..MODULE_L).map(|_| ring.sample_gaussian(6.108)).collect();
     let secret_s_bytes: Vec<Vec<u8>> = secret_s.iter().map(|p| ring.to_bytes(p)).collect();
 
     // Sample error vector e (K polynomials with small coefficients)
-    let error_e: Vec<R::Poly> = (0..MODULE_K)
-        .map(|_| ring.sample_gaussian(6.108))
-        .collect();
+    let error_e: Vec<R::Poly> = (0..MODULE_K).map(|_| ring.sample_gaussian(6.108)).collect();
 
     // Compute t = A*s + e
     let a_times_s = mat_vec_mul(ring, &matrix_a_polys, &secret_s);
@@ -662,7 +679,8 @@ pub fn expand_challenge<R: RingOps>(ring: &R, challenge_hash: &[u8; 32]) -> R::P
     }
 
     // Use from_bytes to construct the polynomial
-    ring.from_bytes(&coeffs_bytes).unwrap_or_else(|_| ring.zero())
+    ring.from_bytes(&coeffs_bytes)
+        .unwrap_or_else(|_| ring.zero())
 }
 
 /// Serialized round data combining round1 commitment and round2 response.
@@ -725,7 +743,7 @@ impl ThresholdScheme for RingtailThreshold {
         // all commitments would be collected first. Here, we create a
         // self-consistent partial that will be combined during aggregate.
         let round2_msg = party
-            .round2(&[round1_msg.clone()], message)
+            .round2(std::slice::from_ref(&round1_msg), message)
             .map_err(|_| ThresholdError::InvalidPartialSignature(signer_index))?;
 
         // Pack both rounds into the partial signature
@@ -823,10 +841,8 @@ impl ThresholdScheme for RingtailThreshold {
         let ring = HandRolledOps::new();
 
         // Deserialize the RingtailSignature
-        let ringtail_sig = deserialize_ringtail_signature(
-            &threshold_sig.signature,
-            &threshold_sig.participants,
-        )?;
+        let ringtail_sig =
+            deserialize_ringtail_signature(&threshold_sig.signature, &threshold_sig.participants)?;
 
         // Verify using the real verification function
         verify_signature(&ring, &ringtail_sig, &[], message, threshold)
@@ -1109,12 +1125,12 @@ pub fn aggregate_commitments<R: RingOps>(
         if msg.commitment.len() != expected_len {
             return Err(ThresholdError::InvalidPartialSignature(msg.party_id));
         }
-        for k in 0..MODULE_K {
+        for (k, slot) in accumulator.iter_mut().enumerate() {
             let off = k * RING_N * 8;
             let poly = ring
                 .from_bytes(&msg.commitment[off..off + RING_N * 8])
                 .map_err(|_| ThresholdError::InvalidPartialSignature(msg.party_id))?;
-            accumulator[k] = ring.add(&accumulator[k], &poly);
+            *slot = ring.add(slot, &poly);
         }
     }
     let mut bytes = Vec::with_capacity(expected_len);
@@ -1188,9 +1204,7 @@ pub fn aggregate_responses_full<R: RingOps>(
 /// Returned secret bytes are the single `s` polynomial. Pair with
 /// `round1_full(.., smudging = false)` for byte-exact compatibility
 /// with `verify_signature_full` and `seal-ringtail-verify`.
-pub fn generate_public_params_no_error<R: RingOps>(
-    ring: &R,
-) -> (PublicParams, Vec<u8>) {
+pub fn generate_public_params_no_error<R: RingOps>(ring: &R) -> (PublicParams, Vec<u8>) {
     // Random first column of A; remaining columns are filled with random
     // polynomials too (preserves wire format) but never participate in
     // the verify equation.
@@ -1310,21 +1324,18 @@ mod tests {
         let sk_bytes = ring.to_bytes(&sk_poly);
         let message = b"test block hash";
 
-        let partial =
-            RingtailThreshold::partial_sign(0, &sk_bytes, message).unwrap();
+        let partial = RingtailThreshold::partial_sign(0, &sk_bytes, message).unwrap();
 
         let threshold_sig = RingtailThreshold::aggregate(
             &[partial],
-            &[sk_bytes.clone()], // public_keys not used in Ringtail aggregate
+            std::slice::from_ref(&sk_bytes), // public_keys not used in Ringtail aggregate
             message,
             1,
             1,
         )
         .unwrap();
 
-        assert!(
-            RingtailThreshold::verify(&threshold_sig, &[sk_bytes], message, 1).is_ok()
-        );
+        assert!(RingtailThreshold::verify(&threshold_sig, &[sk_bytes], message, 1).is_ok());
     }
 
     #[test]
@@ -1453,29 +1464,19 @@ mod tests {
         let message = b"block hash for 3-of-5 test";
 
         // Generate 5 secret key shares (each a Gaussian polynomial)
-        let sk_polys: Vec<Vec<u64>> = (0..5)
-            .map(|_| ring.sample_gaussian(6.108))
-            .collect();
+        let sk_polys: Vec<Vec<u64>> = (0..5).map(|_| ring.sample_gaussian(6.108)).collect();
         let sk_bytes: Vec<Vec<u8>> = sk_polys.iter().map(|p| ring.to_bytes(p)).collect();
 
         // 3 parties sign
         let partial_sigs: Vec<_> = (0..3)
-            .map(|i| {
-                RingtailThreshold::partial_sign(i, &sk_bytes[i], message).unwrap()
-            })
+            .map(|i| RingtailThreshold::partial_sign(i, &sk_bytes[i], message).unwrap())
             .collect();
 
         assert_eq!(partial_sigs.len(), 3);
 
         // Aggregate with threshold 3
-        let threshold_sig = RingtailThreshold::aggregate(
-            &partial_sigs,
-            &sk_bytes,
-            message,
-            3,
-            5,
-        )
-        .unwrap();
+        let threshold_sig =
+            RingtailThreshold::aggregate(&partial_sigs, &sk_bytes, message, 3, 5).unwrap();
 
         assert_eq!(threshold_sig.participant_count(), 3);
         assert!(threshold_sig.participants.is_set(0));
@@ -1485,9 +1486,7 @@ mod tests {
         assert!(!threshold_sig.participants.is_set(4));
 
         // Verify
-        assert!(
-            RingtailThreshold::verify(&threshold_sig, &sk_bytes, message, 3).is_ok()
-        );
+        assert!(RingtailThreshold::verify(&threshold_sig, &sk_bytes, message, 3).is_ok());
     }
 
     #[test]
@@ -1495,25 +1494,15 @@ mod tests {
         let ring = HandRolledOps::new();
         let message = b"insufficient signers test";
 
-        let sk_polys: Vec<Vec<u64>> = (0..5)
-            .map(|_| ring.sample_gaussian(6.108))
-            .collect();
+        let sk_polys: Vec<Vec<u64>> = (0..5).map(|_| ring.sample_gaussian(6.108)).collect();
         let sk_bytes: Vec<Vec<u8>> = sk_polys.iter().map(|p| ring.to_bytes(p)).collect();
 
         // Only 2 parties sign, but threshold is 3
         let partial_sigs: Vec<_> = (0..2)
-            .map(|i| {
-                RingtailThreshold::partial_sign(i, &sk_bytes[i], message).unwrap()
-            })
+            .map(|i| RingtailThreshold::partial_sign(i, &sk_bytes[i], message).unwrap())
             .collect();
 
-        let result = RingtailThreshold::aggregate(
-            &partial_sigs,
-            &sk_bytes,
-            message,
-            3,
-            5,
-        );
+        let result = RingtailThreshold::aggregate(&partial_sigs, &sk_bytes, message, 3, 5);
 
         assert!(matches!(
             result,
@@ -1734,21 +1723,13 @@ mod tests {
 
         // 3 parties sign with their shares
         let partial_sigs: Vec<_> = (0..3)
-            .map(|i| {
-                RingtailThreshold::partial_sign(shares[i].0, &shares[i].1, message).unwrap()
-            })
+            .map(|i| RingtailThreshold::partial_sign(shares[i].0, &shares[i].1, message).unwrap())
             .collect();
 
         let pub_keys: Vec<Vec<u8>> = shares.iter().map(|(_, s)| s.clone()).collect();
 
-        let threshold_sig = RingtailThreshold::aggregate(
-            &partial_sigs,
-            &pub_keys,
-            message,
-            3,
-            5,
-        )
-        .unwrap();
+        let threshold_sig =
+            RingtailThreshold::aggregate(&partial_sigs, &pub_keys, message, 3, 5).unwrap();
 
         assert_eq!(threshold_sig.participant_count(), 3);
         assert!(RingtailThreshold::verify(&threshold_sig, &pub_keys, message, 3).is_ok());
@@ -1823,7 +1804,8 @@ mod tests {
         let c3 = make_challenge(&commits, b"seal-block-0002");
         assert_ne!(c1, c3);
         // Commitment reordering must also change the challenge.
-        let swapped: Vec<Vec<u8>> = vec![commits[2].clone(), commits[1].clone(), commits[0].clone()];
+        let swapped: Vec<Vec<u8>> =
+            vec![commits[2].clone(), commits[1].clone(), commits[0].clone()];
         let c4 = make_challenge(&swapped, message);
         assert_ne!(c1, c4);
     }
@@ -1839,9 +1821,7 @@ mod tests {
         let shares = distribute_key_shares(&ring, &master, 5, 3);
         let message = b"kat-sign-verify";
         let partials: Vec<_> = (0..3)
-            .map(|i| {
-                RingtailThreshold::partial_sign(shares[i].0, &shares[i].1, message).unwrap()
-            })
+            .map(|i| RingtailThreshold::partial_sign(shares[i].0, &shares[i].1, message).unwrap())
             .collect();
         let pub_keys: Vec<Vec<u8>> = shares.iter().map(|(_, s)| s.clone()).collect();
         let sig = RingtailThreshold::aggregate(&partials, &pub_keys, message, 3, 5).unwrap();
@@ -1963,7 +1943,8 @@ mod tests {
         // the aggregate response (which carries c · 2·sk) cancels.
         let sk = ring.sample_gaussian(6.108);
         let two_sk = ring.add(&sk, &sk);
-        let mut matrix_a_col0_polys: Vec<<HandRolledOps as RingOps>::Poly> = Vec::with_capacity(MODULE_K);
+        let mut matrix_a_col0_polys: Vec<<HandRolledOps as RingOps>::Poly> =
+            Vec::with_capacity(MODULE_K);
         let mut matrix_a_bytes: Vec<Vec<Vec<u8>>> = Vec::with_capacity(MODULE_K);
         for _ in 0..MODULE_K {
             let col0 = ring.sample_uniform();

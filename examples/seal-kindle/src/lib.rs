@@ -157,7 +157,10 @@ pub fn wrap_for_reader(reader_pk: &KemPublicKey, bck: &BookContentKey) -> GrantB
     for i in 0..32 {
         wrapped[i] = bck.0[i] ^ s[i % s.len()];
     }
-    GrantBundle { kem_ct, wrapped_bck: wrapped }
+    GrantBundle {
+        kem_ct,
+        wrapped_bck: wrapped,
+    }
 }
 
 /// Reverse of `wrap_for_reader`. Reader runs this with their ML-KEM
@@ -190,8 +193,9 @@ mod tests {
     #[test]
     fn policies_lock_publisher_writes() {
         let p = rls_policies();
-        assert!(p.iter().any(|(t, _, e)|
-            *t == "books" && e.contains("CURRENT_USER")));
+        assert!(p
+            .iter()
+            .any(|(t, _, e)| *t == "books" && e.contains("CURRENT_USER")));
     }
 
     #[test]

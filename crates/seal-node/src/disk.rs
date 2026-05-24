@@ -118,7 +118,10 @@ impl DiskStore {
     }
 
     /// Load a SQL table's rows.
-    pub fn get_table(&self, table_name: &str) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+    pub fn get_table(
+        &self,
+        table_name: &str,
+    ) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
         match self.tables.get(table_name.as_bytes())? {
             Some(bytes) => Ok(Some(bytes.to_vec())),
             None => Ok(None),
@@ -158,7 +161,10 @@ impl DiskStore {
     }
 
     /// Get a namespace by name.
-    pub fn get_namespace(&self, name: &str) -> Result<Option<NamespaceInfo>, Box<dyn std::error::Error>> {
+    pub fn get_namespace(
+        &self,
+        name: &str,
+    ) -> Result<Option<NamespaceInfo>, Box<dyn std::error::Error>> {
         match self.namespaces.get(name.as_bytes())? {
             Some(bytes) => Ok(Some(bincode::deserialize(&bytes)?)),
             None => Ok(None),

@@ -1,5 +1,5 @@
 #![allow(unexpected_cfgs)] // `cfg(kani)` is fed by the Kani verifier; cargo
-                            // doesn't know about it. Match seal-bridge.
+// doesn't know about it. Match seal-bridge.
 //! Threshold signature scheme for Seal DAO committee voting.
 //!
 //! # Architecture

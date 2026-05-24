@@ -28,8 +28,8 @@ pub struct FeeConfig {
 impl Default for FeeConfig {
     fn default() -> Self {
         FeeConfig {
-            base_fee_per_byte: 10, // 10 micro-SEAL per byte
-            burn_percent: 50,      // 50% burned, 50% to proposer
+            base_fee_per_byte: 10,        // 10 micro-SEAL per byte
+            burn_percent: 50,             // 50% burned, 50% to proposer
             target_block_utilization: 50, // 50% target
             max_fee_change_percent: 12,   // max ~12.5% change per block
             min_base_fee: 1,              // floor: 1 micro-SEAL/byte
@@ -92,7 +92,9 @@ impl FeeConfig {
         // utilization == target: no change
 
         // Clamp to [min, max]
-        self.base_fee_per_byte = self.base_fee_per_byte.clamp(self.min_base_fee, self.max_base_fee);
+        self.base_fee_per_byte = self
+            .base_fee_per_byte
+            .clamp(self.min_base_fee, self.max_base_fee);
     }
 }
 

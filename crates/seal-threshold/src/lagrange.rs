@@ -72,12 +72,11 @@ fn inv_mod(a: u64, q: u64) -> u64 {
 /// including `j_index` itself.
 ///
 /// Returns the scalar coefficient in [0, q). Panics on duplicate index.
-pub fn lagrange_coefficient_at_zero(
-    j_index: usize,
-    participant_indices: &[usize],
-    q: u64,
-) -> u64 {
-    assert!(participant_indices.contains(&j_index), "j_index must be in the participant set");
+pub fn lagrange_coefficient_at_zero(j_index: usize, participant_indices: &[usize], q: u64) -> u64 {
+    assert!(
+        participant_indices.contains(&j_index),
+        "j_index must be in the participant set"
+    );
     let xj = (j_index as u64) % q;
     let mut numerator = 1u64;
     let mut denominator = 1u64;
@@ -96,10 +95,7 @@ pub fn lagrange_coefficient_at_zero(
 
 /// Compute all Lagrange coefficients λ_j(0) for j ∈ participant_indices,
 /// in the same order as the input.
-pub fn lagrange_coefficients_at_zero(
-    participant_indices: &[usize],
-    q: u64,
-) -> Vec<u64> {
+pub fn lagrange_coefficients_at_zero(participant_indices: &[usize], q: u64) -> Vec<u64> {
     participant_indices
         .iter()
         .map(|&j| lagrange_coefficient_at_zero(j, participant_indices, q))
@@ -116,7 +112,10 @@ pub fn scale_poly(poly: &[u64], scalar: u64) -> Vec<u64> {
 /// Add two polynomials coefficient-wise mod RING_Q.
 pub fn add_poly(a: &[u64], b: &[u64]) -> Vec<u64> {
     assert_eq!(a.len(), b.len(), "polynomials must have equal length");
-    a.iter().zip(b.iter()).map(|(x, y)| add_mod(*x, *y, RING_Q)).collect()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| add_mod(*x, *y, RING_Q))
+        .collect()
 }
 
 /// Reconstruct f(0) from `(index, share_poly)` pairs using Lagrange
@@ -126,10 +125,7 @@ pub fn lagrange_combine_shares(shares: &[(usize, Vec<u64>)]) -> Vec<u64> {
     let indices: Vec<usize> = shares.iter().map(|(i, _)| *i).collect();
     let coeffs = lagrange_coefficients_at_zero(&indices, RING_Q);
 
-    let len = shares
-        .first()
-        .map(|(_, p)| p.len())
-        .unwrap_or(0);
+    let len = shares.first().map(|(_, p)| p.len()).unwrap_or(0);
     let mut acc = vec![0u64; len];
     for ((_, share_poly), lambda) in shares.iter().zip(coeffs.iter()) {
         let scaled = scale_poly(share_poly, *lambda);
@@ -180,9 +176,8 @@ mod tests {
         let a: u64 = 7;
         let b: u64 = 42;
         let eval = |x: u64| add_mod(mul_mod(a, x % RING_Q, RING_Q), b, RING_Q);
-        let shares: Vec<(usize, Vec<u64>)> = (1..=4)
-            .map(|i| (i, vec![eval(i as u64); 1]))
-            .collect();
+        let shares: Vec<(usize, Vec<u64>)> =
+            (1..=4).map(|i| (i, vec![eval(i as u64); 1])).collect();
 
         // Subset {1,2,3}
         let r1 = lagrange_combine_shares(&shares[..3]);

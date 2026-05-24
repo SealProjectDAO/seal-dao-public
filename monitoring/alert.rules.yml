@@ -1,0 +1,308 @@
+groups:
+  - name: seal-bridge
+    interval: 30s
+    rules:
+      - alert: BridgeCommitteeKeyUnset
+        expr: seal_bridge_committee_key_set == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: bridge
+        annotations:
+          summary: "seal-node {{ $labels.instance }} has no committee MAC key installed"
+          description: |
+            BridgeManager.committee_key is None. seal_bridgeWithdraw
+            calls will land with `committee_signature_hex = null`, so
+            the on-chain unlock claim cannot proceed. Operator action:
+            pass --bridge-committee-key on next restart, or call
+            seal_bridgeRotateCommitteeKey (council-gated) to install
+            the key without restart.
+
+      - alert: BridgeChainPaused
+        expr: seal_bridge_paused_chains > 0
+        for: 2m
+        labels:
+          severity: warning
+          component: bridge
+        annotations:
+          summary: "{{ $value }} bridge chain(s) paused on {{ $labels.instance }}"
+          description: |
+            One or more source chains are currently paused by 2/3
+            Technical Council vote (seal_bridgePauseChain).
+            All observe_deposit / process_deposit / initiate_withdrawal
+            on the paused chains will reject with ChainPaused. Check
+            seal_bridgeListPaused for the reason and resume via
+            seal_bridgeUnpauseChain once the underlying issue is
+            resolved.
+
+      - alert: BridgeDepositsBacklog
+        expr: seal_bridge_deposits_pending > 20
+        for: 5m
+        labels:
+          severity: warning
+          component: bridge
+        annotations:
+          summary: "{{ $value }} bridge deposits pending on {{ $labels.instance }}"
+          description: |
+            More than 20 deposits have been observed but not yet
+            processed for >5 minutes. Either the observer is wedged
+            (check seal_pollBridges output) or the destination chain
+            is paused so processing is blocked. Threshold is for the
+            committee-of-1 testnet; raise once multi-validator
+            confirmation lengthens normal queue depth.
+
+      - alert: BridgeCommitteeKeyFingerprintDrift
+        expr: count by (instance) (seal_bridge_committee_key_fingerprint) > 1
+        for: 1m
+        labels:
+          severity: critical
+          component: bridge
+        annotations:
+          summary: "seal-node {{ $labels.instance }} reports multiple committee-key fingerprints"
+          description: |
+            The fingerprint label is supposed to be a single value at
+            any moment; multiple distinct values within a scrape
+            window means the key rotated mid-scrape (benign once) or
+            scrape-target instability (suspicious if persistent).
+            Cross-check against on-chain committee_key_hash views and
+            the seal_bridgeGetCommitteeKeyStatus RPC.
+
+      - alert: BridgeCommitteeKeyRotationNotPersisted
+        expr: seal_bridge_committee_key_set == 1 and seal_bridge_committee_key_persisted == 0
+        for: 2m
+        labels:
+          severity: warning
+          component: bridge
+        annotations:
+          summary: "Committee key on {{ $labels.instance }} is in-memory only — restart will revert"
+          description: |
+            The committee MAC key is loaded in BridgeManager but the
+            on-disk persistence file
+            <data_dir>/bridge-committee-key.hex either doesn't exist
+            or doesn't match. This is normal at first startup before
+            the first rotation, but if it appears after
+            seal_bridgeRotateCommitteeKey returned `persisted: true`,
+            something is wrong (disk corruption, filesystem mount).
+            On the next restart seal-node will load whatever the
+            --bridge-committee-key CLI flag says, undoing the
+            rotation — re-run the rotation RPC and confirm
+            `persisted: true`.
+
+      - alert: BridgeInvariantViolated
+        expr: seal_bridge_invariant_violated == 1
+        for: 1m
+        labels:
+          severity: critical
+          component: bridge
+          page: true
+        annotations:
+          summary: "Bridge invariant total_minted <= total_locked is broken on {{ $labels.instance }}"
+          description: |
+            The bridge safety property — wrapped supply on Seal must
+            never exceed the locked balance on the source chain — is
+            violated for at least one wrapped token. This means the
+            ledger believes more wrapped tokens exist than are
+            collateralized. Halt the affected chain via
+            seal_bridgePauseChain (2/3 council) IMMEDIATELY and
+            investigate; do not let a single additional withdrawal
+            process until the cause is found. Compare per-token
+            seal_bridge_total_locked vs seal_bridge_total_minted to
+            identify the broken asset.
+
+      - alert: FaucetUpstreamFailures
+        expr: |
+          rate(seal_faucet_upstream_failures[5m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          component: faucet
+        annotations:
+          summary: "seal-faucet upstream errors on {{ $labels.instance }}"
+          description: |
+            More than 0.1 upstream-failure per second sustained over
+            5 m. Either the seal-node target is unhealthy (check its
+            own metrics + /health) or the faucet keypair has been
+            drained — confirm `seal_getBalance` on
+            seal_faucet's address.
+
+      - alert: FaucetCooldownRejectionSpike
+        expr: |
+          rate(seal_faucet_cooldown_rejections_ip[2m]) > 1
+        for: 2m
+        labels:
+          severity: warning
+          component: faucet
+        annotations:
+          summary: "seal-faucet seeing >1 IP cooldown reject/s on {{ $labels.instance }}"
+          description: |
+            Sustained per-IP cooldown rejections suggest scripted
+            abuse (or a stuck client retrying). If this is steady,
+            consider raising --interval-secs.
+
+      - alert: RegistrationSignatureFailures
+        expr: |
+          rate(seal_registration_signature_failures[10m]) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          component: registration
+        annotations:
+          summary: "seal-registration ML-DSA verify failures on {{ $labels.instance }}"
+          description: |
+            >0.05 signature-verify failure per second over 10 m.
+            Either operators are pasting the wrong key, the canonical-
+            message construction in seal-cli has drifted from the
+            portal's `registration_message`, or someone is fuzzing.
+            Check the JSONL store contents and the seal-cli
+            register-validator subcommand.
+
+      - alert: RegistrationPersistFailures
+        expr: seal_registration_persist_failures > 0
+        for: 1m
+        labels:
+          severity: critical
+          component: registration
+        annotations:
+          summary: "seal-registration JSONL append failures on {{ $labels.instance }}"
+          description: |
+            Persist failures indicate disk-full / permission issues
+            on the registration store path. New registrations are
+            being rejected with 500. Check the path's filesystem.
+
+      - alert: BridgeTokenSupplyMismatch
+        expr: |
+          (seal_bridge_total_minted
+            - on (instance, token) seal_bridge_total_locked) > 0
+        for: 30s
+        labels:
+          severity: critical
+          component: bridge
+        annotations:
+          summary: "Bridge wrapped-supply exceeds locked supply on {{ $labels.token }} (instance {{ $labels.instance }})"
+          description: |
+            seal_bridge_total_minted{token="{{ $labels.token }}"}
+            exceeds seal_bridge_total_locked for the same token by
+            {{ $value }} base units. Companion to
+            BridgeInvariantViolated; this rule names the broken asset
+            in the alert label so on-call routing can be per-asset.
+
+      - alert: RelayerSubmissionFailures
+        expr: |
+          rate(seal_relayer_submission_failures[10m]) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          component: relayer
+        annotations:
+          summary: "seal-relayer destination-chain submission failures on {{ $labels.instance }}"
+          description: |
+            >0.05 chain-submission-failure per second sustained over
+            10 m. Likely causes:
+              * destination-chain RPC is unreachable
+              * relayer's destination-chain key drained (out of gas)
+              * Anchor / Soroban CLI binary mismatch
+              * recipient ATA missing (Solana)
+            Check the relayer journal (`journalctl -u seal-relayer`)
+            for the CLI stderr text and the matching withdrawal_id.
+
+      - alert: RelayerMarkExecutedFailures
+        expr: |
+          rate(seal_relayer_mark_executed_failures[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+          component: relayer
+        annotations:
+          summary: "seal-relayer mark-executed RPC failures on {{ $labels.instance }}"
+          description: |
+            Claim landed on the destination chain but
+            seal_bridgeMarkExecuted didn't update the Seal-side
+            withdrawal record. Risk: relayer keeps retrying the
+            already-claimed unlock on every pass, burning gas (on-
+            chain replay protection makes this safe but wasteful).
+            Check the seal-node's /health + the auth state on the
+            relayer's validator key. Issue auto-resolves on the next
+            successful mark-executed pass.
+
+      - alert: RelayerDryRunInProduction
+        expr: seal_relayer_dry_run == 1
+        for: 30m
+        labels:
+          severity: warning
+          component: relayer
+        annotations:
+          summary: "seal-relayer running in --dry-run on {{ $labels.instance }}"
+          description: |
+            The relayer is in dry-run mode for >30 m. Useful during
+            initial bring-up to verify the polling loop sees the
+            right withdrawals, but in steady-state production this
+            means no destination-chain unlocks are being submitted
+            from this validator. Other validators' relayers may
+            still relay; this alert nudges the operator to confirm
+            dry-run is intentional, not a forgotten flag.
+
+      - alert: RelayerStalledNoPasses
+        expr: |
+          rate(seal_relayer_passes_total[5m]) == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: relayer
+        annotations:
+          summary: "seal-relayer not advancing on {{ $labels.instance }}"
+          description: |
+            The polling loop hasn't ticked in 5 m even though the
+            metrics endpoint is responding. Either the loop is
+            wedged on a hung HTTP call (seal-node, anchor, stellar
+            CLI) or tokio scheduler is unhealthy. Inspect
+            `journalctl -u seal-relayer -n 200`.
+
+  - name: seal_p8_config_drift
+    interval: 30s
+    rules:
+      - alert: AdminThresholdDrift
+        expr: count(count by (admin_threshold_value) (seal_admin_threshold)) > 1
+        for: 5m
+        labels:
+          severity: critical
+          component: governance
+        annotations:
+          summary: "Validators disagree on --admin-threshold"
+          description: |
+            More than one distinct seal_admin_threshold value is being
+            scraped across the validator fleet. Every validator in a
+            committee MUST agree on the admin M-of-N gate (P8/§4.3) or
+            admin-gated RPCs that pass on one node will silently fail
+            on another. Inspect each validator's systemd unit and
+            re-align --admin-threshold across the fleet.
+
+      - alert: BridgeWithdrawalFeeDrift
+        expr: count(count by (fee_base) (seal_bridge_withdrawal_fee_base_units)) > 1
+        for: 5m
+        labels:
+          severity: warning
+          component: bridge
+        annotations:
+          summary: "Validators disagree on --bridge-withdrawal-fee"
+          description: |
+            More than one distinct seal_bridge_withdrawal_fee_base_units
+            is being scraped across the validator fleet. Users
+            calling seal_bridgeWithdraw against different validators
+            will be charged different fees (P8/§4.2). Re-align via
+            the operator's deploy pipeline.
+
+      - alert: RpcRateLimitDrift
+        expr: count(count by (group, cap) (seal_rpc_rate_limit_per_minute)) > 3
+        for: 5m
+        labels:
+          severity: warning
+          component: rpc
+        annotations:
+          summary: "RPC rate limits diverge across validators"
+          description: |
+            More than 3 distinct (group, cap) tuples are being scraped
+            for seal_rpc_rate_limit_per_minute (we have 3 groups —
+            default, expensive, admin — so > 3 means at least one
+            validator has a non-matching cap). Wallet retry logic
+            tuned for one validator's caps will misbehave against
+            another (P8/§4.1).

@@ -308,8 +308,12 @@ mod tests {
     fn test_large_sets() {
         let salt = PsiSalt::from_shared_secret(b"secret");
 
-        let set_a: Vec<Vec<u8>> = (0..1000).map(|i| format!("elem-{}", i).into_bytes()).collect();
-        let set_b: Vec<Vec<u8>> = (500..1500).map(|i| format!("elem-{}", i).into_bytes()).collect();
+        let set_a: Vec<Vec<u8>> = (0..1000)
+            .map(|i| format!("elem-{}", i).into_bytes())
+            .collect();
+        let set_b: Vec<Vec<u8>> = (500..1500)
+            .map(|i| format!("elem-{}", i).into_bytes())
+            .collect();
 
         let initiator = PsiInitiator::new(salt.clone(), set_a);
         let responder = PsiResponder::new(salt, set_b);

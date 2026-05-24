@@ -50,10 +50,31 @@
       <section id="screen-account" hidden>
         <h2>Address</h2>
         <code id="addr"></code>
-        <button id="btn-copy">Copy</button>
-        <button class="secondary" id="btn-lock">Lock</button>
+        <div id="qr-host" class="qr-host"></div>
+        <div class="actions">
+          <button id="btn-copy">Copy</button>
+          <button class="secondary" id="btn-toggle-qr">Show QR</button>
+          <button class="secondary" id="btn-lock">Lock</button>
+        </div>
+        <h2>Balances</h2>
+        <ul id="balances">
+          <li class="bal-row">
+            <span class="bal-sym">SEAL</span>
+            <span class="bal-amt mono" id="bal-seal">—</span>
+            <span class="bal-unit muted">µSEAL</span>
+          </li>
+        </ul>
+        <p id="balances-err" class="muted" hidden></p>
         <h2>Pending requests</h2>
         <ul id="requests"></ul>
+        <h2>Markets</h2>
+        <div id="markets-controls">
+          <select id="market-pair">
+            <option value="">No pair selected</option>
+          </select>
+          <span id="market-summary" class="muted"></span>
+        </div>
+        <ul id="trade-tape"></ul>
         <h2>RPC endpoint</h2>
         <input id="rpc-url" type="url" />
         <button id="btn-save-rpc">Save</button>
@@ -102,5 +123,6 @@
     </main>
 
     <script type="module" src="popup.js"></script>
+    <script src="qrcode.js"></script>
   </body>
 </html>

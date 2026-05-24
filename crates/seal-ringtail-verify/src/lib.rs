@@ -31,10 +31,10 @@
 
 extern crate alloc;
 
+pub mod challenge;
 pub mod field;
 pub mod ntt;
-pub mod challenge;
 pub mod verify;
 
-pub use field::{RING_N, RING_Q, AGGREGATE_NORM_BOUND};
-pub use verify::{verify, VerifyError, Signature, PublicParams};
+pub use field::{AGGREGATE_NORM_BOUND, RING_N, RING_Q};
+pub use verify::{verify, PublicParams, Signature, VerifyError};

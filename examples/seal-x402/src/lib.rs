@@ -92,19 +92,23 @@ impl PaymentReceipt {
     /// Server-side verification. Returns `Ok(())` if the receipt is
     /// algebraically valid for the stated request + endpoint.
     /// Whether it has been *settled* on chain is a separate check.
-    pub fn verify(&self, method: &str, path: &str, body_hash: &[u8; 32], now_secs: u64)
-        -> Result<(), String>
-    {
+    pub fn verify(
+        &self,
+        method: &str,
+        path: &str,
+        body_hash: &[u8; 32],
+        now_secs: u64,
+    ) -> Result<(), String> {
         if now_secs > self.request.expires_at {
             return Err("receipt expired".into());
         }
         let vk_bytes = hex::decode(&self.payer_vk_hex).map_err(|e| format!("vk hex: {}", e))?;
-        let vk = VerifyingKey::from_bytes(&vk_bytes)
-            .map_err(|e| format!("vk decode: {}", e))?;
+        let vk = VerifyingKey::from_bytes(&vk_bytes).map_err(|e| format!("vk decode: {}", e))?;
         let sig_bytes = hex::decode(&self.signature_hex).map_err(|e| format!("sig hex: {}", e))?;
         let sig = Signature::from_bytes(sig_bytes);
         let challenge = self.request.challenge_bytes(method, path, body_hash);
-        vk.verify(&challenge, &sig).map_err(|e| format!("ml-dsa verify: {}", e))
+        vk.verify(&challenge, &sig)
+            .map_err(|e| format!("ml-dsa verify: {}", e))
     }
 }
 
@@ -132,8 +136,7 @@ mod tests {
         let (sk, vk) = SigningKey::generate();
         let body = b"GET /summary";
         let bh = body_hash(body);
-        let receipt =
-            PaymentReceipt::sign(make_req(), "GET", "/summary", &bh, &sk, &vk).unwrap();
+        let receipt = PaymentReceipt::sign(make_req(), "GET", "/summary", &bh, &sk, &vk).unwrap();
         receipt
             .verify("GET", "/summary", &bh, 1_000_000)
             .expect("valid receipt must verify");
@@ -144,10 +147,13 @@ mod tests {
         let (sk, vk) = SigningKey::generate();
         let body = b"";
         let bh = body_hash(body);
-        let receipt =
-            PaymentReceipt::sign(make_req(), "GET", "/a", &bh, &sk, &vk).unwrap();
+        let receipt = PaymentReceipt::sign(make_req(), "GET", "/a", &bh, &sk, &vk).unwrap();
         let err = receipt.verify("GET", "/b", &bh, 1_000_000).unwrap_err();
-        assert!(err.contains("ml-dsa verify"), "expected verify failure, got {}", err);
+        assert!(
+            err.contains("ml-dsa verify"),
+            "expected verify failure, got {}",
+            err
+        );
     }
 
     #[test]

@@ -98,12 +98,7 @@ impl Vrf for LatticeVrf {
         let mut proof_bytes = y_bytes;
         proof_bytes.extend_from_slice(&proof_hash.0);
 
-        Ok((
-            VrfOutput(output.0),
-            VrfProof {
-                bytes: proof_bytes,
-            },
-        ))
+        Ok((VrfOutput(output.0), VrfProof { bytes: proof_bytes }))
     }
 
     fn verify(
@@ -185,7 +180,10 @@ impl EvalCounter {
     /// Record an evaluation for a public key. Returns error if limit exceeded.
     pub fn record_eval(&self, public_key: &[u8]) -> Result<u64, VrfError> {
         let key_hash = sha3_256(public_key).0;
-        let mut counts = self.counts.lock().map_err(|_| VrfError::VerificationFailed)?;
+        let mut counts = self
+            .counts
+            .lock()
+            .map_err(|_| VrfError::VerificationFailed)?;
         let count = counts.entry(key_hash).or_insert(0);
         if *count >= self.max_evals {
             return Err(VrfError::VerificationFailed);

@@ -127,7 +127,9 @@ mod kani_proofs {
 
         let mut treasury = Treasury::with_allocation("kani", percent);
 
-        if let Ok((treasury_share, validator_share)) = treasury.allocate_from_emission(total_emission) {
+        if let Ok((treasury_share, validator_share)) =
+            treasury.allocate_from_emission(total_emission)
+        {
             // The two shares must never exceed the original emission.
             let sum = treasury_share + validator_share;
             assert!(sum <= total_emission, "shares exceed total_emission");
@@ -136,10 +138,7 @@ mod kani_proofs {
             // (allocation_percent - 1), which is strictly less than
             // allocation_percent. (When percent == 0, loss is 0.)
             let loss = total_emission - sum;
-            assert!(
-                loss < percent.max(1),
-                "rounding loss exceeds bound"
-            );
+            assert!(loss < percent.max(1), "rounding loss exceeds bound");
         }
         // If allocation returns Err (overflow), that is acceptable — the
         // harness only constrains the Ok path.

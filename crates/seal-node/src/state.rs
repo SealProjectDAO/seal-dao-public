@@ -63,14 +63,19 @@ impl NodeState {
             return Ok(result);
         }
 
-        let tx = self.create_transaction(TxType::SqlExec, sql.as_bytes().to_vec())
+        let tx = self
+            .create_transaction(TxType::SqlExec, sql.as_bytes().to_vec())
             .map_err(|e| SqlError::Execution(format!("signing failed: {}", e)))?;
         self.pending_txs.push(tx);
         Ok(result)
     }
 
     /// Create a signed transaction.
-    fn create_transaction(&self, tx_type: TxType, payload: Vec<u8>) -> Result<Transaction, seal_crypto::CryptoError> {
+    fn create_transaction(
+        &self,
+        tx_type: TxType,
+        payload: Vec<u8>,
+    ) -> Result<Transaction, seal_crypto::CryptoError> {
         let signature = self.signing_key.sign(&payload)?;
         Ok(Transaction {
             tx_type,

@@ -145,7 +145,7 @@ impl Row {
         hasher.update(b"row_salt");
         hasher.update(block_seed);
         hasher.update(table.as_bytes());
-        hasher.update(&row_index.to_le_bytes());
+        hasher.update(row_index.to_le_bytes());
         let result = hasher.finalize();
         self.salt.copy_from_slice(&result[..32]);
     }

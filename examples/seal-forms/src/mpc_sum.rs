@@ -116,7 +116,9 @@ pub fn reconstruct(shares: &[ShareBundle]) -> u64 {
 /// share contributions across the survey. The survey total in `Z_p`
 /// is just their sum.
 pub fn survey_total(per_party_totals: &[u64]) -> u64 {
-    per_party_totals.iter().fold(0u64, |acc, &t| add_mod(acc, t))
+    per_party_totals
+        .iter()
+        .fold(0u64, |acc, &t| add_mod(acc, t))
 }
 
 /// Per-party local aggregation: sum the party's share across many
@@ -173,8 +175,12 @@ mod tests {
         let r2 = split(20, 2, b"r2");
         let r3 = split(30, 2, b"r3");
 
-        let bundles: Vec<ShareBundle> =
-            r1.iter().chain(r2.iter()).chain(r3.iter()).cloned().collect();
+        let bundles: Vec<ShareBundle> = r1
+            .iter()
+            .chain(r2.iter())
+            .chain(r3.iter())
+            .cloned()
+            .collect();
 
         let p0 = aggregate_for_party(0, &bundles);
         let p1 = aggregate_for_party(1, &bundles);

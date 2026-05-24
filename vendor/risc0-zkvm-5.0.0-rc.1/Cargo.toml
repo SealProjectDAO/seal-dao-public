@@ -73,7 +73,15 @@ dual = [
 ]
 getrandom = ["risc0-zkvm-platform/getrandom"]
 heap-embedded-alloc = ["risc0-zkvm-platform/heap-embedded-alloc"]
-metal = ["prove"]
+# Metal segment-prover HAL. Was previously just `["prove"]`, which
+# only wired Metal into the recursion HAL (the segment prover ran
+# on CPU). Extended here to thread through the C++ Metal HAL via
+# `risc0-circuit-rv32im/metal`. See `crates/seal-zk/METAL.md`
+# Option A.
+metal = [
+    "prove",
+    "risc0-circuit-rv32im/metal",
+]
 prove = [
     "client",
     "dep:addr2line",

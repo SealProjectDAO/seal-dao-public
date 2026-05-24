@@ -44,13 +44,13 @@
 //! - **Session key**: Double KEM (both sides contribute randomness)
 
 use seal_crypto::hash::sha3_256;
-use seal_crypto::kem::{KemKeypair, KemPublicKey, KemCiphertext};
-use seal_crypto::signature::{SigningKey, VerifyingKey, Signature};
+use seal_crypto::kem::{KemCiphertext, KemKeypair, KemPublicKey};
+use seal_crypto::signature::{Signature, SigningKey, VerifyingKey};
 
 /// Size constants for the handshake messages.
-pub const KEM_PUBLIC_KEY_SIZE: usize = 1184;  // ML-KEM-768
-pub const KEM_CIPHERTEXT_SIZE: usize = 1088;  // ML-KEM-768
-pub const SIGNATURE_SIZE: usize = 3309;       // ML-DSA-65
+pub const KEM_PUBLIC_KEY_SIZE: usize = 1184; // ML-KEM-768
+pub const KEM_CIPHERTEXT_SIZE: usize = 1088; // ML-KEM-768
+pub const SIGNATURE_SIZE: usize = 3309; // ML-DSA-65
 pub const SESSION_KEY_SIZE: usize = 32;
 
 /// Handshake message 1: Initiator → Responder
@@ -154,8 +154,9 @@ impl Initiator {
         // Sign our contribution
         let sk = SigningKey::from_bytes(&self.identity_sk)
             .map_err(|e| format!("invalid identity sk: {}", e))?;
-        let sign_data = [HANDSHAKE_DOMAIN, &msg2.kem_pk, &ct2.to_bytes()].concat();
-        let our_sig = sk.sign(&sign_data)
+        let sign_data = [HANDSHAKE_DOMAIN, &msg2.kem_pk, ct2.to_bytes()].concat();
+        let our_sig = sk
+            .sign(&sign_data)
             .map_err(|e| format!("signing failed: {}", e))?;
 
         let msg3 = HandshakeMsg3 {
@@ -211,11 +212,12 @@ impl Responder {
         let sign_data = [
             HANDSHAKE_DOMAIN,
             &msg1.kem_pk,
-            &ct.to_bytes(),
+            ct.to_bytes(),
             &self.kem_keypair.public.to_bytes(),
         ]
         .concat();
-        let sig = sk.sign(&sign_data)
+        let sig = sk
+            .sign(&sign_data)
             .map_err(|e| format!("signing failed: {}", e))?;
 
         Ok(HandshakeMsg2 {

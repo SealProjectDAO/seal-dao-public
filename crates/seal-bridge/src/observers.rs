@@ -121,11 +121,7 @@ impl ChainObserver for SolanaObserver {
         "Solana"
     }
 
-    fn poll_events(
-        &self,
-        from_block: u64,
-        to_block: u64,
-    ) -> Result<Vec<BridgeEvent>, BridgeError> {
+    fn poll_events(&self, from_block: u64, to_block: u64) -> Result<Vec<BridgeEvent>, BridgeError> {
         if from_block > to_block {
             return Err(BridgeError::InvalidBlockRange {
                 from: from_block,
@@ -241,11 +237,7 @@ impl StellarObserver {
 
     /// Pre-configured for Stellar testnet with default 5-ledger confirmation.
     pub fn testnet(contract_id: &str) -> Self {
-        Self::new(
-            "https://horizon-testnet.stellar.org",
-            contract_id,
-            5,
-        )
+        Self::new("https://horizon-testnet.stellar.org", contract_id, 5)
     }
 }
 
@@ -254,11 +246,7 @@ impl ChainObserver for StellarObserver {
         "Stellar"
     }
 
-    fn poll_events(
-        &self,
-        from_block: u64,
-        to_block: u64,
-    ) -> Result<Vec<BridgeEvent>, BridgeError> {
+    fn poll_events(&self, from_block: u64, to_block: u64) -> Result<Vec<BridgeEvent>, BridgeError> {
         if from_block > to_block {
             return Err(BridgeError::InvalidBlockRange {
                 from: from_block,

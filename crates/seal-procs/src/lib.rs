@@ -452,9 +452,7 @@ mod tests {
             ProcedureLanguage::Sql,
             "SELECT $1 + $2".into(),
         );
-        let result = engine
-            .invoke(&proc, &["10".into(), "32".into()])
-            .unwrap();
+        let result = engine.invoke(&proc, &["10".into(), "32".into()]).unwrap();
         assert_eq!(result, b"SELECT 10 + 32");
     }
 
@@ -469,7 +467,13 @@ mod tests {
             "SELECT $1".into(),
         );
         let err = engine.invoke(&proc, &[]).unwrap_err();
-        assert!(matches!(err, ProcError::ArgCount { expected: 1, actual: 0 }));
+        assert!(matches!(
+            err,
+            ProcError::ArgCount {
+                expected: 1,
+                actual: 0
+            }
+        ));
     }
 
     #[test]

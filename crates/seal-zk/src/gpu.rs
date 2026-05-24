@@ -199,7 +199,7 @@ fn probe_opencl_clinfo() -> Option<Vec<GpuDevice>> {
         if trimmed.contains("Device") || trimmed.contains("GPU") {
             let name = trimmed
                 .split(':')
-                .last()
+                .next_back()
                 .unwrap_or(trimmed)
                 .trim()
                 .to_string();
@@ -312,9 +312,7 @@ fn probe_rocm_smi() -> Option<Vec<GpuDevice>> {
 
 /// Fallback AMD detection via rocminfo.
 fn probe_rocminfo() -> Option<Vec<GpuDevice>> {
-    let output = std::process::Command::new("rocminfo")
-        .output()
-        .ok()?;
+    let output = std::process::Command::new("rocminfo").output().ok()?;
 
     if !output.status.success() {
         return None;
@@ -340,7 +338,9 @@ fn probe_rocminfo() -> Option<Vec<GpuDevice>> {
                 index = index.saturating_add(1);
                 current_cus = 0;
             }
-            current_name = trimmed.strip_prefix("Marketing Name:").map(|s| s.trim().to_string());
+            current_name = trimmed
+                .strip_prefix("Marketing Name:")
+                .map(|s| s.trim().to_string());
         } else if trimmed.starts_with("Compute Unit:") {
             current_cus = trimmed
                 .strip_prefix("Compute Unit:")
@@ -457,7 +457,7 @@ fn extract_vram_bytes(region: &str) -> u64 {
                     .chars()
                     .filter(|c| c.is_ascii_digit() || c.is_ascii_whitespace())
                     .collect();
-                if let Some(num) = cleaned.trim().split_whitespace().next() {
+                if let Some(num) = cleaned.split_whitespace().next() {
                     if let Ok(val) = num.parse::<u64>() {
                         if value_area.contains("GB") {
                             return val.saturating_mul(1024 * 1024 * 1024);
@@ -549,7 +549,7 @@ fn detect_metal_devices() -> Vec<GpuDevice> {
 // ── GPU Configuration ───────────────────────────────────────
 
 /// Configuration for GPU-accelerated proving.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct GpuConfig {
     /// Preferred backend. If None, auto-detect best available.
     pub preferred_backend: Option<GpuBackend>,
@@ -561,18 +561,6 @@ pub struct GpuConfig {
     pub cpu_threads: Option<usize>,
     /// Whether to enable mixed-precision (FP16) acceleration where supported.
     pub mixed_precision: bool,
-}
-
-impl Default for GpuConfig {
-    fn default() -> Self {
-        GpuConfig {
-            preferred_backend: None,
-            device_index: None,
-            memory_limit_bytes: None,
-            cpu_threads: None,
-            mixed_precision: false,
-        }
-    }
 }
 
 impl GpuConfig {
@@ -638,10 +626,7 @@ impl GpuConfig {
 
         // Filter by device index
         let candidates: Vec<&GpuDevice> = if let Some(idx) = self.device_index {
-            candidates
-                .into_iter()
-                .filter(|d| d.index == idx)
-                .collect()
+            candidates.into_iter().filter(|d| d.index == idx).collect()
         } else {
             candidates
         };

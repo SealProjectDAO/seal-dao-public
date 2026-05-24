@@ -190,11 +190,7 @@ pub struct Mempool {
 
 impl Mempool {
     /// Create a new mempool with the given number of workers.
-    pub fn new(
-        num_workers: u32,
-        author: Vec<u8>,
-        quorum_threshold: usize,
-    ) -> Self {
+    pub fn new(num_workers: u32, author: Vec<u8>, quorum_threshold: usize) -> Self {
         let workers = (0..num_workers)
             .map(|i| Worker::new(i, author.clone()))
             .collect();
@@ -214,7 +210,7 @@ impl Mempool {
         if self.workers.is_empty() {
             return;
         }
-        let worker_idx = (self.pending_batches.len() % self.workers.len()) as usize;
+        let worker_idx = self.pending_batches.len() % self.workers.len();
         self.workers[worker_idx].add_transaction(tx);
     }
 
@@ -444,7 +440,7 @@ mod tests {
 
         // Seal all batches
         let batches = pool.seal_batches();
-        assert!(batches.len() >= 1);
+        assert!(!batches.is_empty());
 
         // Each batch should have transactions
         for batch in &batches {

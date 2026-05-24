@@ -13,8 +13,17 @@
 pub mod bridge;
 pub mod error;
 pub mod http;
+pub mod keysource;
 pub mod observer;
 pub mod observers;
+#[cfg(feature = "ringtail-singleton")]
+pub mod ringtail;
+#[cfg(feature = "ringtail-singleton")]
+pub mod ringtail_orchestrator;
+#[cfg(feature = "ringtail-singleton")]
+pub mod ringtail_session;
+#[cfg(feature = "ringtail-singleton")]
+pub mod ringtail_store;
 pub mod types;
 
 pub use bridge::BridgeManager;
@@ -24,4 +33,4 @@ pub use observers::{
     BridgeEvent, ChainObserver as BlockChainObserver, DepositConfirmation,
     SolanaObserver as SolanaBlockObserver, StellarObserver as StellarBlockObserver,
 };
-pub use types::{BridgeDeposit, BridgeWithdrawal, Chain, WrappedToken};
+pub use types::{BridgeDeposit, BridgeWithdrawal, Chain, WithdrawalReadyForSigning, WrappedToken};

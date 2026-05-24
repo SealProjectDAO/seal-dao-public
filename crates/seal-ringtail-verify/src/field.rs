@@ -26,13 +26,21 @@ pub const MODULE_K: usize = 8;
 pub const fn mod_add(a: u64, b: u64) -> u64 {
     // a, b < q < 2^48, so a + b < 2^49 — fits in u64 without overflow.
     let s = a + b;
-    if s >= RING_Q { s - RING_Q } else { s }
+    if s >= RING_Q {
+        s - RING_Q
+    } else {
+        s
+    }
 }
 
 /// `(a - b) mod q`. Both inputs assumed already reduced.
 #[inline]
 pub const fn mod_sub(a: u64, b: u64) -> u64 {
-    if a >= b { a - b } else { RING_Q - b + a }
+    if a >= b {
+        a - b
+    } else {
+        RING_Q - b + a
+    }
 }
 
 /// `(a * b) mod q`. Both inputs assumed already reduced (< q < 2^48).
@@ -70,7 +78,7 @@ pub fn mod_inv(a: u64) -> u64 {
 pub fn centered_abs(c: u64) -> u64 {
     let flipped = RING_Q - c; // safe for c in [0, q)
     let is_negative = ((c > RING_Q / 2) as u64).wrapping_neg(); // 0 or !0
-    // select flipped if is_negative, else c
+                                                                // select flipped if is_negative, else c
     (flipped & is_negative) | (c & !is_negative)
 }
 

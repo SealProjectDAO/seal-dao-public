@@ -215,6 +215,27 @@ impl PrivateTableManager {
         self.metadata.keys().map(|s| s.as_str()).collect()
     }
 
+    /// Snapshot of every private table whose `owner` field matches
+    /// `address`. Sorted lexicographically by table name for
+    /// diff-stable polling. Empty Vec for addresses that own no
+    /// private tables — not an error. Backs
+    /// `seal_listPrivateTablesByOwner`. Per-owner gap-closer
+    /// paralleling `tokens_by_creator`: until this accessor a
+    /// caller asking "which private tables do I own?" had to scan
+    /// the full `seal_listPrivateTables` set client-side. Note
+    /// `owner` is the address that called `register(...)` — there
+    /// is no rotation path on the manager today, so this view is
+    /// stable across the table's lifetime.
+    pub fn tables_by_owner(&self, address: &str) -> Vec<&PrivateTableMeta> {
+        let mut out: Vec<&PrivateTableMeta> = self
+            .metadata
+            .values()
+            .filter(|m| m.owner == address)
+            .collect();
+        out.sort_by(|a, b| a.name.cmp(&b.name));
+        out
+    }
+
     /// Verify that encrypted data matches its on-chain commitment.
     pub fn verify_commitment(&self, name: &str) -> Result<bool, String> {
         let meta = self
@@ -296,12 +317,7 @@ mod tests {
     #[test]
     fn test_decrypt_wrong_key_fails() {
         let mut mgr = PrivateTableManager::new();
-        mgr.register(
-            "t".into(),
-            "o".into(),
-            PrivateTableType::UserPrivate,
-            "",
-        );
+        mgr.register("t".into(), "o".into(), PrivateTableType::UserPrivate, "");
         let key = alice_key();
         mgr.store_encrypted("t", b"rows", &key).unwrap();
 
@@ -318,10 +334,7 @@ mod tests {
         mgr.store_encrypted("t", b"rows", &key).unwrap();
 
         // Flip one byte in the ciphertext — AES-GCM must reject it.
-        mgr.encrypted_data
-            .get_mut("t")
-            .unwrap()
-            .ciphertext[0] ^= 0x01;
+        mgr.encrypted_data.get_mut("t").unwrap().ciphertext[0] ^= 0x01;
         assert!(mgr.decrypt("t", "o", &key).is_err());
     }
 
@@ -369,10 +382,64 @@ mod tests {
         let mut mgr = PrivateTableManager::new();
         mgr.register("a".into(), "o".into(), PrivateTableType::AppPrivate, "");
         mgr.register("b".into(), "o".into(), PrivateTableType::UserPrivate, "");
-        mgr.register("c".into(), "o".into(), PrivateTableType::RegulatedPrivate, "");
+        mgr.register(
+            "c".into(),
+            "o".into(),
+            PrivateTableType::RegulatedPrivate,
+            "",
+        );
 
-        assert_eq!(mgr.get_meta("a").unwrap().table_type, PrivateTableType::AppPrivate);
-        assert_eq!(mgr.get_meta("b").unwrap().table_type, PrivateTableType::UserPrivate);
-        assert_eq!(mgr.get_meta("c").unwrap().table_type, PrivateTableType::RegulatedPrivate);
+        assert_eq!(
+            mgr.get_meta("a").unwrap().table_type,
+            PrivateTableType::AppPrivate
+        );
+        assert_eq!(
+            mgr.get_meta("b").unwrap().table_type,
+            PrivateTableType::UserPrivate
+        );
+        assert_eq!(
+            mgr.get_meta("c").unwrap().table_type,
+            PrivateTableType::RegulatedPrivate
+        );
+    }
+
+    #[test]
+    fn test_tables_by_owner() {
+        let mut mgr = PrivateTableManager::new();
+        // Alice owns two tables, bob owns one.
+        mgr.register(
+            "user_prefs".into(),
+            "seal1alice".into(),
+            PrivateTableType::UserPrivate,
+            "",
+        );
+        mgr.register(
+            "settings".into(),
+            "seal1alice".into(),
+            PrivateTableType::AppPrivate,
+            "",
+        );
+        mgr.register(
+            "stats".into(),
+            "seal1bob".into(),
+            PrivateTableType::AppPrivate,
+            "",
+        );
+        // Alice's view: ["settings", "user_prefs"], sorted lexicographically.
+        let alice: Vec<&str> = mgr
+            .tables_by_owner("seal1alice")
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(alice, vec!["settings", "user_prefs"]);
+        // Bob's view: ["stats"].
+        let bob: Vec<&str> = mgr
+            .tables_by_owner("seal1bob")
+            .iter()
+            .map(|m| m.name.as_str())
+            .collect();
+        assert_eq!(bob, vec!["stats"]);
+        // Unknown owner: empty Vec, not error.
+        assert!(mgr.tables_by_owner("seal1nobody").is_empty());
     }
 }

@@ -16,13 +16,17 @@
 #   Solana WebSocket     :8900
 #   Stellar Horizon      :8000
 #   Stellar Core peer    :11626
-#   Seal node 1 RPC      :8545
-#   Seal node 2 RPC      :8546
-#   Seal node 3 RPC      :8547
+#   Seal bridge node 1 P2P  :4101  (only bootstrap p2p is host-mapped)
+#   Seal bridge node 1 RPC  :8645
+#   Seal bridge node 2 RPC  :8646
+#   Seal bridge node 3 RPC  :8647
 #
-# This file is deliberately isolated from ../docker-compose.yml (the
-# 5-validator monitoring stack). Run only one at a time, or adjust
-# ports if you need both.
+# Ports are intentionally offset from ../docker-compose.yml (which
+# owns the canonical 4001-4005/8545 range for the 5/7-validator
+# monitoring stack and host-side scripts/testnet.sh). The two stacks
+# coexist on the same host by default — see MANUAL-TESTING.md §7.6
+# for the port-allocation map. Bridge scripts default SEAL_RPC to
+# http://localhost:8645; override with SEAL_RPC=... if needed.
 
 services:
   # ── Solana local validator ──────────────────────────────────
@@ -73,13 +77,25 @@ services:
   # ── Stellar local network (Horizon + Core + friendbot) ──────
   stellar:
     # stellar/quickstart tag scheme is `latest` / `testing` /
-    # `future` / `nightly` (Horizon+Core stream, not a semver pin).
-    # `:latest` is the stable mainline and matches the Soroban
-    # 22.x contract SDK we use in `bridges/stellar/`. Drift risk
-    # is real — if the CLI breaks again (as it did when
-    # `--enable-horizon` was removed), pin a dated nightly like
-    # `stellar/quickstart:v636-b1011.1-nightly`.
-    image: stellar/quickstart:latest
+    # `future` / `nightly`, plus dated `vNNN-bMMMM.M-nightly`
+    # snapshots. We pin a dated nightly so the image binary stops
+    # drifting from under us.
+    #
+    # Protocol 22 era (soroban-sdk 22): used `--protocol-version 22`
+    # + a v441-era nightly. Those images expired 2026-05 (6-month
+    # nightly window). The current stack runs protocol 25 natively
+    # (stellar-rpc 25.1.0 in v637-* images) and `soroban-sdk = "25"`.
+    #
+    # **Pin expiry risk:** Stellar nightlies stop building after ~6
+    # months. If `docker pull` 404s, bump the tag to the freshest
+    # multi-arch dated nightly at
+    # https://hub.docker.com/r/stellar/quickstart/tags
+    # and verify stellar-rpc version matches soroban-sdk in Cargo.toml.
+    #
+    # Tag selected 2026-05-13 from
+    # https://hub.docker.com/r/stellar/quickstart/tags (newest
+    # multi-arch dated nightly at the time).
+    image: stellar/quickstart:v637-b1054.1-nightly
     # stellar/quickstart publishes arm64 manifests, so Apple
     # Silicon runs this natively. If you see an `exec format
     # error` in `docker logs seal-bridge-stellar`, uncomment
@@ -87,47 +103,140 @@ services:
     # platform: linux/amd64
     container_name: seal-bridge-stellar
     # --local: isolated test network (distinct from testnet/pubnet).
+    # Protocol version: run at the image's native protocol (25 as of
+    # v637-* nightlies). Protocol-22-era images expired 2026-05 (6-month
+    # nightly window). The `--protocol-version 22` pin was dropped as part
+    # of the soroban-sdk 22→25 migration; stellar-rpc 25.x requires
+    # ContractLedgerCostExtV0 which only exists in a protocol-25 ledger.
+    # `bridges/stellar/Cargo.toml` pins `soroban-sdk = "25"` to match.
     # Horizon + Core + friendbot come up together by default on
     # recent quickstart images; the old `--enable-horizon` /
     # `--enable-core` flags were removed (`Unknown container arg
     # --enable-horizon` at boot if they're still present).
-    command: --local
+    #
+    # The quickstart image binds Soroban RPC to `localhost:8003`
+    # inside the container by default, which docker port-forwarding
+    # can't reach. The runtime config is copied from
+    # `/opt/stellar-default/local/stellar-rpc/etc/stellar-rpc.cfg`;
+    # patch THAT (the template) before the entrypoint so the copied
+    # file already has `0.0.0.0:8003`, then exec /start.
+    entrypoint:
+      - bash
+      - -lc
+      - >-
+        sed -i 's|ENDPOINT="localhost:8003"|ENDPOINT="0.0.0.0:8003"|'
+        /opt/stellar-default/local/stellar-rpc/etc/stellar-rpc.cfg &&
+        exec /start "$@"
+      - bash
+    command:
+      - --local
     ports:
-      - "8000:8000"
-      - "11626:11626"
+      - "8000:8000"   # Horizon REST API + friendbot (path /friendbot)
+      - "8003:8003"   # Soroban RPC — required by `stellar contract deploy`
+                       # (Horizon at :8000 returns 405 on Soroban methods,
+                       # :8002 is the standalone friendbot service).
+                       # `getNetwork` confirms friendbotUrl is at :8000/friendbot.
+      - "11626:11626" # Stellar Core HTTP admin
     volumes:
       - stellar-data:/opt/stellar/data
     networks:
       - seal-bridge-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://localhost:8000 >/dev/null 2>&1 || exit 1"]
+      # Wait for Horizon (:8000), Soroban RPC (:8003), AND friendbot
+      # (:8000/friendbot — same port as Horizon but different path)
+      # before marking healthy. Friendbot returns 400 on a bare
+      # /friendbot call (no addr) — that's expected and means the
+      # endpoint is up; only "Connection reset" or DNS failure means
+      # it's still starting. Without all three checks, downstream
+      # `stellar contract deploy` races startup and fails with
+      # HTTP 405 (Soroban not up) or "fund failed" (friendbot not up).
+      test:
+        - "CMD-SHELL"
+        - >-
+          curl -fsS http://localhost:8000 >/dev/null 2>&1 &&
+          curl -fsS -X POST http://localhost:8003
+          -H 'content-type: application/json'
+          -d '{"jsonrpc":"2.0","id":1,"method":"getHealth"}' >/dev/null 2>&1 &&
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/friendbot)" = "400" ]
+          || exit 1
       interval: 5s
       timeout: 5s
-      retries: 60 # Horizon takes ~30s to catch up on first boot
+      # Horizon takes ~30s to catch up on first boot; Soroban RPC
+      # adds another ~30-60s on top. Bumped from 60 to 120.
+      retries: 120
     # Quickstart is heavy; give it room.
     mem_limit: 4g
 
   # ── Seal validators ─────────────────────────────────────────
-  # Dockerfile at repo root builds seal-node; we pin validator
-  # index and bootstrap peers here.
+  # Dockerfile at repo root builds seal-node. The binary reads CLI
+  # flags only (no env-var parsing), so all config is in `command:`.
+  # `--slots 0` runs forever; default is 10 (demo mode → exits).
+  # `--rpc-port` opens the JSON-RPC server; default 0 = disabled.
+  # `--rpc-external` binds the RPC to 0.0.0.0 so Docker port-mapping
+  # works. The default (without the flag) is 127.0.0.1-only; use that
+  # in production. Here we need external access from the host so the
+  # bridge-e2e script can reach seal_pollBridges etc.
+  # `--allow-new-recipients` lets the bridge observer fund fresh
+  # Seal addresses minted by the lock→mint flow.
+  # SEAL_VALIDATOR_KEY tells the image's entrypoint to materialize a
+  # persistent validator keyfile in the data volume on first boot, then
+  # pass `--validator-key <path>` to seal-node. Same path on every
+  # restart → same on-chain ML-DSA identity, same VRF state. Erasing
+  # the named volume (`docker compose down -v`) regenerates the key.
   seal-1:
     build: ..
     container_name: seal-bridge-node-1
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      # 32-byte hex of [0x11; 32] — matches `committeeKey` in
+      # bridges/solana/tests/seal-bridge.ts so unlock MACs verify
+      # against the same on-chain committee key the test deploys.
+      # The companion --expect-committee-key-sha2 turns flag-vs-on-
+      # disk drift into a pre-flight warning at startup (SHA-256 over
+      # [0x11; 32], precomputed).
+      - "--bridge-committee-key"
+      - "1111111111111111111111111111111111111111111111111111111111111111"
+      - "--expect-committee-key-sha2"
+      - "02d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc"
+      # In-process bridge auto-poll. 10 s interval keeps Solana
+      # devnet observation responsive without driving the source-
+      # chain RPC into rate-limit territory. The seal_pollBridges
+      # RPC stays available for explicit-tick tests in bridge-e2e.sh.
+      - "--bridge-poll-interval-secs"
+      - "10"
+      # Bump admin rate limit from the 5 req/min default. The
+      # bridge-e2e flow bursts council seating + rotations +
+      # observer registration back-to-back; production tuning
+      # is for shared-network safety, not local smokes.
+      - "--rpm-admin"
+      - "60"
     environment:
-      SEAL_VALIDATOR_INDEX: "0"
-      SEAL_P2P_PORT: "4001"
-      SEAL_RPC_PORT: "8545"
-      SEAL_CHAIN_ID: "seal-bridge-local"
-      SEAL_SLOTS_PER_EPOCH: "32"
-      SEAL_COMMITTEE_SIZE: "3"
-      SEAL_VALIDATOR_COUNT: "3"
       RUST_LOG: "seal_node=info,seal_bridge=debug"
-      # Point the observers at the sibling containers (Docker DNS).
-      SEAL_SOLANA_RPC: "http://solana:8899"
-      SEAL_STELLAR_HORIZON: "http://stellar:8000"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
+    # Committee MAC key — must match the value bridges/solana/tests/
+    # seal-bridge.ts passes to `initialize` (the e2e fixture uses
+    # [0x11; 32]). On a real testnet this is set per epoch and
+    # rotated via the on-chain `rotate_committee_key` ix.
+    # Host port mapping is offset from the validator stack
+    # (../docker-compose.yml) so both stacks coexist on the same
+    # host. Bridge bootstrap p2p is mapped to host 4101 (validator
+    # stack owns 4001-4005); RPC is mapped to host 8645 (validator
+    # stack owns 8545). Container-internal ports stay at 4001/8545
+    # so the --port/--rpc-port command args and intra-network
+    # /dns4/seal-1/tcp/4001 dials are unchanged. See MANUAL-TESTING.md
+    # §7.6 for the full port-allocation map.
     ports:
-      - "8545:8545"
-      - "4001:4001"
+      - "8645:8545"
+      - "4101:4001"
     volumes:
       - seal-1-data:/data
     depends_on:
@@ -139,20 +248,50 @@ services:
   seal-2:
     build: ..
     container_name: seal-bridge-node-2
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--bootstrap-peers"
+      - "/dns4/seal-1/tcp/4001"
+      - "--allow-new-recipients"
+      # 32-byte hex of [0x11; 32] — matches `committeeKey` in
+      # bridges/solana/tests/seal-bridge.ts so unlock MACs verify
+      # against the same on-chain committee key the test deploys.
+      # The companion --expect-committee-key-sha2 turns flag-vs-on-
+      # disk drift into a pre-flight warning at startup (SHA-256 over
+      # [0x11; 32], precomputed).
+      - "--bridge-committee-key"
+      - "1111111111111111111111111111111111111111111111111111111111111111"
+      - "--expect-committee-key-sha2"
+      - "02d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc"
+      # In-process bridge auto-poll. 10 s interval keeps Solana
+      # devnet observation responsive without driving the source-
+      # chain RPC into rate-limit territory. The seal_pollBridges
+      # RPC stays available for explicit-tick tests in bridge-e2e.sh.
+      - "--bridge-poll-interval-secs"
+      - "10"
+      # Bump admin rate limit from the 5 req/min default. The
+      # bridge-e2e flow bursts council seating + rotations +
+      # observer registration back-to-back; production tuning
+      # is for shared-network safety, not local smokes.
+      - "--rpm-admin"
+      - "60"
     environment:
-      SEAL_VALIDATOR_INDEX: "1"
-      SEAL_P2P_PORT: "4001"
-      SEAL_RPC_PORT: "8545"
-      SEAL_CHAIN_ID: "seal-bridge-local"
-      SEAL_SLOTS_PER_EPOCH: "32"
-      SEAL_COMMITTEE_SIZE: "3"
-      SEAL_VALIDATOR_COUNT: "3"
-      SEAL_BOOTSTRAP_PEERS: "/dns4/seal-1/tcp/4001"
       RUST_LOG: "seal_node=info,seal_bridge=debug"
-      SEAL_SOLANA_RPC: "http://solana:8899"
-      SEAL_STELLAR_HORIZON: "http://stellar:8000"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
+    # Committee MAC key — must match the value bridges/solana/tests/
+    # seal-bridge.ts passes to `initialize` (the e2e fixture uses
+    # [0x11; 32]). On a real testnet this is set per epoch and
+    # rotated via the on-chain `rotate_committee_key` ix.
     ports:
-      - "8546:8545"
+      - "8646:8545"
     volumes:
       - seal-2-data:/data
     depends_on:
@@ -163,20 +302,50 @@ services:
   seal-3:
     build: ..
     container_name: seal-bridge-node-3
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--bootstrap-peers"
+      - "/dns4/seal-1/tcp/4001"
+      - "--allow-new-recipients"
+      # 32-byte hex of [0x11; 32] — matches `committeeKey` in
+      # bridges/solana/tests/seal-bridge.ts so unlock MACs verify
+      # against the same on-chain committee key the test deploys.
+      # The companion --expect-committee-key-sha2 turns flag-vs-on-
+      # disk drift into a pre-flight warning at startup (SHA-256 over
+      # [0x11; 32], precomputed).
+      - "--bridge-committee-key"
+      - "1111111111111111111111111111111111111111111111111111111111111111"
+      - "--expect-committee-key-sha2"
+      - "02d449a31fbb267c8f352e9968a79e3e5fc95c1bbeaa502fd6454ebde5a4bedc"
+      # In-process bridge auto-poll. 10 s interval keeps Solana
+      # devnet observation responsive without driving the source-
+      # chain RPC into rate-limit territory. The seal_pollBridges
+      # RPC stays available for explicit-tick tests in bridge-e2e.sh.
+      - "--bridge-poll-interval-secs"
+      - "10"
+      # Bump admin rate limit from the 5 req/min default. The
+      # bridge-e2e flow bursts council seating + rotations +
+      # observer registration back-to-back; production tuning
+      # is for shared-network safety, not local smokes.
+      - "--rpm-admin"
+      - "60"
     environment:
-      SEAL_VALIDATOR_INDEX: "2"
-      SEAL_P2P_PORT: "4001"
-      SEAL_RPC_PORT: "8545"
-      SEAL_CHAIN_ID: "seal-bridge-local"
-      SEAL_SLOTS_PER_EPOCH: "32"
-      SEAL_COMMITTEE_SIZE: "3"
-      SEAL_VALIDATOR_COUNT: "3"
-      SEAL_BOOTSTRAP_PEERS: "/dns4/seal-1/tcp/4001"
       RUST_LOG: "seal_node=info,seal_bridge=debug"
-      SEAL_SOLANA_RPC: "http://solana:8899"
-      SEAL_STELLAR_HORIZON: "http://stellar:8000"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
+    # Committee MAC key — must match the value bridges/solana/tests/
+    # seal-bridge.ts passes to `initialize` (the e2e fixture uses
+    # [0x11; 32]). On a real testnet this is set per epoch and
+    # rotated via the on-chain `rotate_committee_key` ix.
     ports:
-      - "8547:8545"
+      - "8647:8545"
     volumes:
       - seal-3-data:/data
     depends_on:

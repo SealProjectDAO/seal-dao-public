@@ -508,9 +508,12 @@ cargo run -p seal-app
 | `seal_zkProve` | Optional | ZK proof |
 | `seal_pqHandshake` | No | ML-KEM key exchange |
 | `seal_getNodeInfo` | No | Node version, epoch, peers, validators, uptime |
-| `seal_setVisibility` | ML-DSA | Set table visibility (private/shared/public) |
-| `seal_enableRls` | ML-DSA | Enable row-level security on table |
-| `seal_addPolicy` | ML-DSA | Add RLS policy to table |
+
+(Table visibility / RLS toggles / RLS policies are SQL DDL via
+`seal_submitSql` — `ALTER TABLE … ENABLE ROW LEVEL SECURITY` and
+`CREATE POLICY …`. The dedicated `seal_setVisibility` / `seal_enableRls` /
+`seal_addPolicy` methods listed in earlier revisions of this table were
+never wired; they have been removed from `requires_auth`.)
 
 **HTTP endpoints** (GET, no JSON-RPC):
 
@@ -710,7 +713,13 @@ cargo run -p seal-node -- --slots 0 --rpc-port 8545 &
 curl -s http://localhost:8545/health | jq .
 ```
 
-Expected: `{"status":"ok","height":N,"peers":0,"uptime_secs":N}`
+Expected: JSON with `status` (`starting` / `ok` / `stalled` based
+on uptime + height growth), `height`, `peers`, `uptime_secs`,
+`validator_pubkey_hex`, `validator_address`, `is_validator` (active
+in the validator set), `blocks_produced`, `blocks_pending`. The
+last three answer "am I producing?" without a /metrics scrape;
+`blocks_pending` is the P2P apply-queue depth (sustained non-zero
+= applier lagging).
 
 ### Prometheus metrics
 
@@ -719,7 +728,10 @@ curl -s http://localhost:8545/metrics | head -20
 ```
 
 Expected: Prometheus exposition format with `seal_blocks_produced`, `seal_peers_connected`,
-`seal_chain_height`, `seal_uptime_seconds`, etc.
+`seal_chain_height`, `seal_uptime_seconds`, and bridge gauges
+(`seal_bridge_committee_key_set`, `seal_bridge_paused_chains`,
+`seal_bridge_{deposits,withdrawals}_total`, label-info
+`seal_bridge_committee_key_fingerprint{sha2_hex="…"}`).
 
 ### Rich status
 
@@ -728,7 +740,11 @@ curl -s http://localhost:8545/status | jq .
 ```
 
 Expected: JSON with version, chain_id, height, state_root, epoch, slot, peers, validators,
-leases_active, and full metrics breakdown.
+leases_active, full metrics breakdown, plus a `bridge` object
+(`committee_key_set`, `committee_key_fingerprint_sha2_hex`,
+`paused_chains`, `deposits_total`, `deposits_pending`,
+`withdrawals_total`, `invariant_holds`) that mirrors the
+`seal_bridge_*` Prometheus gauges in a structured form.
 
 ### Node info RPC
 

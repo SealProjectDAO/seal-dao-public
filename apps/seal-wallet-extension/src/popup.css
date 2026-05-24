@@ -134,3 +134,111 @@ ul#requests li .actions { margin-top: 6px; display: flex; gap: 6px; }
 #chpass-ok {
   color: #8af18a;
 }
+
+#screen-account .actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.qr-host {
+  display: none;
+  padding: 8px;
+  margin-top: 8px;
+  background: #fff;
+  border-radius: 6px;
+  text-align: center;
+}
+
+.qr-host.shown { display: block; }
+
+.qr-host canvas {
+  image-rendering: pixelated;
+  display: block;
+  margin: 0 auto;
+}
+
+ul#balances {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+ul#balances li.bal-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  background: #181b29;
+  padding: 6px 10px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+
+ul#balances .bal-sym {
+  font-weight: 600;
+  color: var(--accent);
+  min-width: 50px;
+}
+
+ul#balances .bal-amt {
+  flex: 1;
+  text-align: right;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+}
+
+ul#balances .bal-unit {
+  font-size: 10px;
+  color: var(--muted);
+  min-width: 36px;
+}
+
+.mono { font-family: ui-monospace, "JetBrains Mono", monospace; }
+.muted { color: var(--muted); font-size: 11px; }
+
+#markets-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+#market-pair {
+  background: #181b29;
+  color: var(--fg);
+  border: 1px solid #2a2e44;
+  border-radius: 6px;
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
+  flex: 1;
+  width: auto;
+}
+
+ul#trade-tape {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  max-height: 160px;
+  overflow-y: auto;
+  border: 1px solid #181b29;
+  border-radius: 6px;
+}
+
+ul#trade-tape li {
+  display: flex;
+  gap: 6px;
+  padding: 3px 8px;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 11px;
+  border-bottom: 1px solid #14172331;
+}
+
+ul#trade-tape li:last-child { border-bottom: 0; }
+
+ul#trade-tape .tape-id { color: var(--muted); min-width: 36px; }
+ul#trade-tape .tape-price { flex: 1; text-align: right; font-weight: 600; }
+ul#trade-tape .tape-qty { min-width: 50px; text-align: right; }
+ul#trade-tape .tape-side { min-width: 30px; text-align: right; }
+ul#trade-tape .side-bid { color: #4ade80; font-weight: 600; }
+ul#trade-tape .side-ask { color: #f87171; font-weight: 600; }

@@ -50,6 +50,7 @@ pub struct Policy {
 pub type TokenBalanceChecker = Box<dyn Fn(&str, &str) -> u64 + Send + Sync>;
 
 /// Manages RLS policies for tables.
+#[derive(Default)]
 pub struct RlsManager {
     /// Tables with RLS enabled.
     rls_enabled: HashMap<String, bool>,
@@ -57,16 +58,6 @@ pub struct RlsManager {
     policies: HashMap<String, Vec<Policy>>,
     /// Optional token balance checker for HAS_TOKEN() predicates.
     token_checker: Option<TokenBalanceChecker>,
-}
-
-impl Default for RlsManager {
-    fn default() -> Self {
-        RlsManager {
-            rls_enabled: HashMap::new(),
-            policies: HashMap::new(),
-            token_checker: None,
-        }
-    }
 }
 
 impl Clone for RlsManager {

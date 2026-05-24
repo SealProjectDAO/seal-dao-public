@@ -385,9 +385,7 @@ fn collect_sorted<K: Clone + Ord, V: Clone>(node: &Arc<RBNode<K, V>>, result: &m
     }
 }
 
-fn min_recursive<'a, K: Clone + Ord, V: Clone>(
-    node: &'a Arc<RBNode<K, V>>,
-) -> Option<(&'a K, &'a V)> {
+fn min_recursive<K: Clone + Ord, V: Clone>(node: &Arc<RBNode<K, V>>) -> Option<(&K, &V)> {
     match node.as_ref() {
         RBNode::Leaf => None,
         RBNode::Node {
@@ -396,9 +394,7 @@ fn min_recursive<'a, K: Clone + Ord, V: Clone>(
     }
 }
 
-fn max_recursive<'a, K: Clone + Ord, V: Clone>(
-    node: &'a Arc<RBNode<K, V>>,
-) -> Option<(&'a K, &'a V)> {
+fn max_recursive<K: Clone + Ord, V: Clone>(node: &Arc<RBNode<K, V>>) -> Option<(&K, &V)> {
     match node.as_ref() {
         RBNode::Leaf => None,
         RBNode::Node {

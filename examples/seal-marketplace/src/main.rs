@@ -143,7 +143,9 @@ fn main() {
 
     // --- Buyer browses listings ---
     println!("--- Buyer browses listings ---");
-    let result = app.execute_as("SELECT * FROM listings", &buyer_addr).unwrap();
+    let result = app
+        .execute_as("SELECT * FROM listings", &buyer_addr)
+        .unwrap();
     println!("  {} listings available", result.rows.len());
     for row in &result.rows {
         println!("    {:?}", row.values);
@@ -162,7 +164,10 @@ fn main() {
             &buyer_addr,
         )
         .unwrap();
-    println!("  Buyer balance before: {:?}", result.rows.first().map(|r| &r.values));
+    println!(
+        "  Buyer balance before: {:?}",
+        result.rows.first().map(|r| &r.values)
+    );
 
     // Create order
     let sql = format!(
@@ -176,21 +181,32 @@ fn main() {
     let buyer_bal = read_balance(app, &buyer_addr, &seller_addr);
     let seller_bal = read_balance(app, &seller_addr, &seller_addr);
 
-    let new_buyer_bal = buyer_bal.checked_sub(price).unwrap_or(0);
+    let new_buyer_bal = buyer_bal.saturating_sub(price);
     let new_seller_bal = seller_bal.checked_add(price).unwrap_or(seller_bal);
 
     app.execute_as(
-        &format!("UPDATE balances SET amount = {} WHERE address = '{}'", new_buyer_bal, buyer_addr),
+        &format!(
+            "UPDATE balances SET amount = {} WHERE address = '{}'",
+            new_buyer_bal, buyer_addr
+        ),
         &seller_addr,
-    ).unwrap();
+    )
+    .unwrap();
     app.execute_as(
-        &format!("UPDATE balances SET amount = {} WHERE address = '{}'", new_seller_bal, seller_addr),
+        &format!(
+            "UPDATE balances SET amount = {} WHERE address = '{}'",
+            new_seller_bal, seller_addr
+        ),
         &seller_addr,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Mark listing as sold
     app.execute_as(
-        &format!("UPDATE listings SET status = 'sold' WHERE id = {}", listing_id),
+        &format!(
+            "UPDATE listings SET status = 'sold' WHERE id = {}",
+            listing_id
+        ),
         &seller_addr,
     )
     .unwrap();
@@ -207,7 +223,10 @@ fn main() {
             &buyer_addr,
         )
         .unwrap();
-    println!("  Buyer balance:  {:?}", result.rows.first().map(|r| &r.values));
+    println!(
+        "  Buyer balance:  {:?}",
+        result.rows.first().map(|r| &r.values)
+    );
 
     let result = app
         .execute_as(
@@ -215,15 +234,19 @@ fn main() {
             &seller_addr,
         )
         .unwrap();
-    println!("  Seller balance: {:?}", result.rows.first().map(|r| &r.values));
+    println!(
+        "  Seller balance: {:?}",
+        result.rows.first().map(|r| &r.values)
+    );
 
-    let result = app
-        .execute_as("SELECT * FROM orders", &buyer_addr)
-        .unwrap();
+    let result = app.execute_as("SELECT * FROM orders", &buyer_addr).unwrap();
     println!("  Orders: {} total", result.rows.len());
 
     let result = app
-        .execute_as("SELECT * FROM listings WHERE status = 'active'", &buyer_addr)
+        .execute_as(
+            "SELECT * FROM listings WHERE status = 'active'",
+            &buyer_addr,
+        )
         .unwrap();
     println!("  Active listings: {}", result.rows.len());
 
@@ -295,7 +318,10 @@ fn main() {
                 );
                 match app.execute_as(&sql, &seller_addr) {
                     Ok(_) => {
-                        println!("Listed: {} (id={}) for {} SEAL", title, next_listing_id, price);
+                        println!(
+                            "Listed: {} (id={}) for {} SEAL",
+                            title, next_listing_id, price
+                        );
                         next_listing_id += 1;
                     }
                     Err(e) => println!("Error: {}", e),
@@ -373,8 +399,10 @@ fn main() {
             }
 
             ".browse" => {
-                let result =
-                    app.execute_as("SELECT * FROM listings WHERE status = 'active'", &buyer_addr);
+                let result = app.execute_as(
+                    "SELECT * FROM listings WHERE status = 'active'",
+                    &buyer_addr,
+                );
                 match result {
                     Ok(r) => {
                         println!("Active listings ({}):", r.rows.len());

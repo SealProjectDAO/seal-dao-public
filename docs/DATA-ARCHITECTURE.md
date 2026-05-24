@@ -50,11 +50,15 @@ The storage crate (`seal-storage`) has building blocks not yet wired:
 | Component | File | Status |
 |-----------|------|--------|
 | Block store | `crates/seal-storage/src/block_store.rs` | Built, in-memory |
-| Persistent RB-tree | `crates/seal-storage/src/persistent.rs` | Built, in-memory |
-| State pruning | `crates/seal-storage/src/pruning.rs` | Built, in-memory |
+| Persistent disk store | `crates/seal-storage/src/disk_store.rs` | Built, on-disk via `--data-dir` |
+| State pruning | `crates/seal-storage/src/pruning.rs` | Built |
+| State snapshots | `crates/seal-storage/src/snapshot_index.rs` + `snapshot_chunks.rs` | Built (epoch-boundary capture) |
 | HAMT (account trie) | `crates/seal-token/src/hamt.rs` | Built, in-memory |
 
-To add disk persistence: swap `HashMap` backends with `sled` (already in deps).
+The `DiskStore` persists chain state across restarts when
+`seal-node --data-dir <path>` is set; the validator identity is
+persisted separately via `seal-node --validator-key <keyfile>`
+(see TESTNET.md "Identity persistence").
 
 ---
 

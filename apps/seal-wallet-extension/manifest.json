@@ -18,14 +18,19 @@
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["src/content.js"],
+      "js": ["src/browser-polyfill.js", "src/content.js"],
       "run_at": "document_start",
       "all_frames": false
     }
   ],
   "web_accessible_resources": [
     {
-      "resources": ["src/inject.js", "pkg/seal_dao_wasm.js", "pkg/seal_dao_wasm_bg.wasm"],
+      "resources": [
+        "src/browser-polyfill.js",
+        "src/inject.js",
+        "pkg/seal_dao_wasm.js",
+        "pkg/seal_dao_wasm_bg.wasm"
+      ],
       "matches": ["<all_urls>"]
     }
   ],

@@ -358,12 +358,15 @@ curl -s localhost:8545 \
   -d '{"jsonrpc":"2.0","method":"seal_querySql","params":{"sql":"SELECT * FROM users"},"id":1}'
 ```
 
-**Get SEAL balance:**
+**Get SEAL balance:** the address must be a full bech32m string (the
+form `seal keygen` prints). The `seal1abc…` placeholder below will
+return `-32602 invalid 'address'` if pasted verbatim — generate one
+with `seal keygen --output key.json` and substitute its `address` field.
 
 ```bash
 curl -s localhost:8545 \
   -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","method":"seal_getBalance","params":{"address":"seal1abc..."},"id":1}'
+  -d '{"jsonrpc":"2.0","method":"seal_getBalance","params":{"address":"sealt1<full-bech32m-of-your-key>"},"id":1}'
 ```
 
 **List all tokens:**

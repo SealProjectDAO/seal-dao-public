@@ -45,10 +45,7 @@ impl PqChannel {
             .map_err(|e| format!("invalid peer ML-KEM public key: {}", e))?;
         let (shared_secret, ciphertext) = peer_pk.encapsulate();
         let symmetric_key = sha3_256(shared_secret.as_bytes()).0;
-        Ok((
-            PqChannel { symmetric_key },
-            ciphertext.to_bytes().to_vec(),
-        ))
+        Ok((PqChannel { symmetric_key }, ciphertext.to_bytes().to_vec()))
     }
 
     /// Responder side: decapsulate the ciphertext to get the shared secret.
@@ -191,15 +188,17 @@ mod tests {
         let responder_kp = generate_transport_keypair();
         let (initiator_channel, ciphertext) =
             PqChannel::initiate(&responder_kp.public.to_bytes()).unwrap();
-        let responder_channel =
-            PqChannel::respond(&responder_kp.secret, &ciphertext).unwrap();
+        let responder_channel = PqChannel::respond(&responder_kp.secret, &ciphertext).unwrap();
 
         let message = b"Hello from initiator! This is a PQ-encrypted block.";
         let encrypted = initiator_channel.encrypt(message);
 
         // Encrypted includes nonce + mac overhead
         assert!(encrypted.len() > message.len());
-        assert_ne!(&encrypted[NONCE_SIZE..NONCE_SIZE + message.len()], &message[..]);
+        assert_ne!(
+            &encrypted[NONCE_SIZE..NONCE_SIZE + message.len()],
+            &message[..]
+        );
 
         let decrypted = responder_channel.decrypt(&encrypted);
         assert_eq!(&decrypted[..], &message[..]);

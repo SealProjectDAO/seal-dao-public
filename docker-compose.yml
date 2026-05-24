@@ -1,57 +1,80 @@
 # Multi-node Seal testnet via Docker Compose
 #
 # Usage:
-#   docker-compose up          # Start 5-validator testnet
-#   docker-compose up -d       # Start in background
-#   docker-compose logs -f     # Watch logs
-#   docker-compose down        # Stop all
-#   docker-compose down -v     # Stop and remove volumes
+#   docker compose up          # Start 5-validator testnet
+#   docker compose up -d       # Start in background
+#   docker compose logs -f     # Watch logs
+#   docker compose down        # Stop all
+#   docker compose down -v     # Stop and remove volumes
 #
-# Each node gets:
-# - Unique validator index and P2P port
-# - Shared genesis config via environment
-# - Persistent data volume
-# - mDNS peer discovery within sealnet
-# - Health check on 10-second interval
+# Each node:
+# - Listens on internal port 4001, mapped to a unique host port.
+# - Persists chain state in its own named volume (--data-dir /data).
+# - node1 is the bootstrap peer; node2-5 dial /dns4/seal-validator-1/tcp/4001.
+# - Health is exposed via the JSON-RPC port mapped to 8545 (node1).
+#
+# seal-node parses CLI flags only — env vars (SEAL_*) are not read by
+# the binary. All node configuration lives under `command:`. See
+# `bridges/docker-compose.testnet.yml` for the bridge-e2e variant.
 
 services:
   node1:
     build: .
     container_name: seal-validator-1
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
     environment:
-      SEAL_VALIDATOR_INDEX: "0"
-      SEAL_P2P_PORT: "4001"
-      SEAL_CHAIN_ID: "seal-testnet-docker"
-      SEAL_SLOTS_PER_EPOCH: "32"
-      SEAL_COMMITTEE_SIZE: "5"
-      SEAL_VALIDATOR_COUNT: "5"
-      SEAL_LOG_LEVEL: "info"
       RUST_LOG: "seal_node=info,seal_p2p=debug"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
     ports:
       - "4001:4001"
+      - "8545:8545"
     volumes:
       - node1-data:/data
     networks:
       - sealnet
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/seal-healthy || exit 1"]
+      # `seal health` exit-code semantics: 0 = ok, 1 = starting/stalled
+      # or RPC unreachable, 2 = --require-validator failed. The old
+      # `test -f /tmp/seal-healthy` probe never passed because nothing
+      # in seal-node writes that file. start_period gives the node the
+      # 30s grace it needs before status flips from "starting" to "ok".
+      test: ["CMD-SHELL", "seal health --node http://localhost:8545 >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 6
+      start_period: 30s
 
   node2:
     build: .
     container_name: seal-validator-2
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      # --rpc-port binds JSON-RPC on 127.0.0.1:8545 inside this
+      # container so the in-container healthcheck (`seal health`) can
+      # probe it. Without --rpc-external the port is NOT reachable
+      # from the host or other containers, matching the original
+      # design (only node1 publishes RPC externally).
+      - "--rpc-port"
+      - "8545"
+      - "--data-dir"
+      - "/data"
+      - "--bootstrap-peers"
+      - "/dns4/seal-validator-1/tcp/4001"
     environment:
-      SEAL_VALIDATOR_INDEX: "1"
-      SEAL_P2P_PORT: "4001"
-      SEAL_CHAIN_ID: "seal-testnet-docker"
-      SEAL_SLOTS_PER_EPOCH: "32"
-      SEAL_COMMITTEE_SIZE: "5"
-      SEAL_VALIDATOR_COUNT: "5"
-      SEAL_BOOTSTRAP_PEERS: "/dns4/seal-validator-1/tcp/4001"
-      SEAL_LOG_LEVEL: "info"
       RUST_LOG: "seal_node=info,seal_p2p=debug"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
     ports:
       - "4002:4001"
     volumes:
@@ -61,24 +84,34 @@ services:
     depends_on:
       - node1
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/seal-healthy || exit 1"]
+      # `seal health` exit-code semantics: 0 = ok, 1 = starting/stalled
+      # or RPC unreachable, 2 = --require-validator failed. The old
+      # `test -f /tmp/seal-healthy` probe never passed because nothing
+      # in seal-node writes that file. start_period gives the node the
+      # 30s grace it needs before status flips from "starting" to "ok".
+      test: ["CMD-SHELL", "seal health --node http://localhost:8545 >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 6
+      start_period: 30s
 
   node3:
     build: .
     container_name: seal-validator-3
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--data-dir"
+      - "/data"
+      - "--bootstrap-peers"
+      - "/dns4/seal-validator-1/tcp/4001"
     environment:
-      SEAL_VALIDATOR_INDEX: "2"
-      SEAL_P2P_PORT: "4001"
-      SEAL_CHAIN_ID: "seal-testnet-docker"
-      SEAL_SLOTS_PER_EPOCH: "32"
-      SEAL_COMMITTEE_SIZE: "5"
-      SEAL_VALIDATOR_COUNT: "5"
-      SEAL_BOOTSTRAP_PEERS: "/dns4/seal-validator-1/tcp/4001"
-      SEAL_LOG_LEVEL: "info"
       RUST_LOG: "seal_node=info,seal_p2p=debug"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
     ports:
       - "4003:4001"
     volumes:
@@ -88,24 +121,34 @@ services:
     depends_on:
       - node1
     healthcheck:
-      test: ["CMD-SHELL", "test -f /tmp/seal-healthy || exit 1"]
+      # `seal health` exit-code semantics: 0 = ok, 1 = starting/stalled
+      # or RPC unreachable, 2 = --require-validator failed. The old
+      # `test -f /tmp/seal-healthy` probe never passed because nothing
+      # in seal-node writes that file. start_period gives the node the
+      # 30s grace it needs before status flips from "starting" to "ok".
+      test: ["CMD-SHELL", "seal health --node http://localhost:8545 >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 6
+      start_period: 30s
 
   node4:
     build: .
     container_name: seal-validator-4
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--data-dir"
+      - "/data"
+      - "--bootstrap-peers"
+      - "/dns4/seal-validator-1/tcp/4001"
     environment:
-      SEAL_VALIDATOR_INDEX: "3"
-      SEAL_P2P_PORT: "4001"
-      SEAL_CHAIN_ID: "seal-testnet-docker"
-      SEAL_SLOTS_PER_EPOCH: "32"
-      SEAL_COMMITTEE_SIZE: "5"
-      SEAL_VALIDATOR_COUNT: "5"
-      SEAL_BOOTSTRAP_PEERS: "/dns4/seal-validator-1/tcp/4001"
-      SEAL_LOG_LEVEL: "info"
       RUST_LOG: "seal_node=info,seal_p2p=debug"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
     ports:
       - "4004:4001"
     volumes:
@@ -114,20 +157,30 @@ services:
       - sealnet
     depends_on:
       - node1
+    healthcheck:
+      test: ["CMD-SHELL", "seal health --node http://localhost:8545 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
 
   node5:
     build: .
     container_name: seal-validator-5
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--data-dir"
+      - "/data"
+      - "--bootstrap-peers"
+      - "/dns4/seal-validator-1/tcp/4001"
     environment:
-      SEAL_VALIDATOR_INDEX: "4"
-      SEAL_P2P_PORT: "4001"
-      SEAL_CHAIN_ID: "seal-testnet-docker"
-      SEAL_SLOTS_PER_EPOCH: "32"
-      SEAL_COMMITTEE_SIZE: "5"
-      SEAL_VALIDATOR_COUNT: "5"
-      SEAL_BOOTSTRAP_PEERS: "/dns4/seal-validator-1/tcp/4001"
-      SEAL_LOG_LEVEL: "info"
       RUST_LOG: "seal_node=info,seal_p2p=debug"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
     ports:
       - "4005:4001"
     volumes:
@@ -136,6 +189,40 @@ services:
       - sealnet
     depends_on:
       - node1
+    healthcheck:
+      test: ["CMD-SHELL", "seal health --node http://localhost:8545 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+
+  # Validator-onboarding portal. Exposes POST /register and
+  # GET /registrations. Persists the JSONL store to a docker
+  # volume so registrations survive `docker compose down` (but
+  # not `docker compose down -v`). No upstream-node dependency —
+  # registrations are collected before genesis and imported into
+  # the validator set out-of-band.
+  registration:
+    build: .
+    container_name: seal-registration
+    entrypoint: /usr/local/bin/seal-registration
+    command:
+      - "--bind"
+      - "0.0.0.0"
+      - "--port"
+      - "8547"
+      - "--store"
+      - "/data/registrations.jsonl"
+      - "--interval-secs"
+      - "60"
+    environment:
+      RUST_LOG: "seal_registration=info"
+    ports:
+      - "8547:8547"
+    volumes:
+      - registration-data:/data
+    networks:
+      - sealnet
 
 volumes:
   node1-data:
@@ -143,6 +230,7 @@ volumes:
   node3-data:
   node4-data:
   node5-data:
+  registration-data:
 
 networks:
   sealnet:

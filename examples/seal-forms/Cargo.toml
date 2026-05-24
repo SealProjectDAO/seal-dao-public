@@ -18,3 +18,10 @@ seal-wallet = { path = "../../crates/seal-wallet" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
+# Real AEAD (replaces the old XOR-stream + bespoke HMAC wrapper).
+# AES-256-GCM provides confidentiality + authenticity in one
+# primitive; HKDF-SHA3-256 derives the symmetric key from the
+# ML-KEM shared secret with a domain-separator info string.
+aes-gcm = "0.10"
+hkdf = "0.12"
+sha3 = "0.10"

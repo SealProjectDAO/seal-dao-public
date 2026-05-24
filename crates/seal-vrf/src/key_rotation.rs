@@ -109,11 +109,20 @@ impl VrfKeyManager {
     }
 
     /// Evaluate the VRF for the current epoch using the active backend.
-    pub fn eval(&self, input: &[u8]) -> Result<(crate::traits::VrfOutput, crate::traits::VrfProof), crate::VrfError> {
+    pub fn eval(
+        &self,
+        input: &[u8],
+    ) -> Result<(crate::traits::VrfOutput, crate::traits::VrfProof), crate::VrfError> {
         match self.backend {
-            VrfBackend::PqVrf => crate::pq_vrf::PqVrf::eval(&self.current_keypair.secret_key, input),
-            VrfBackend::LavVrf => crate::lav_vrf::LavVrf::eval(&self.current_keypair.secret_key, input),
-            VrfBackend::HmacVrf => crate::hmac_vrf::HmacVrf::eval(&self.current_keypair.secret_key, input),
+            VrfBackend::PqVrf => {
+                crate::pq_vrf::PqVrf::eval(&self.current_keypair.secret_key, input)
+            }
+            VrfBackend::LavVrf => {
+                crate::lav_vrf::LavVrf::eval(&self.current_keypair.secret_key, input)
+            }
+            VrfBackend::HmacVrf => {
+                crate::hmac_vrf::HmacVrf::eval(&self.current_keypair.secret_key, input)
+            }
         }
     }
 }

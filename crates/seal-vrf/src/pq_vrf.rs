@@ -46,19 +46,15 @@ impl Vrf for PqVrf {
         let sk = SigningKey::from_bytes(secret_key).map_err(|_| VrfError::InvalidSecretKey)?;
 
         // Sign with deterministic randomness so same (sk, input) → same output
-        let sig = sk.sign_deterministic(input)
+        let sig = sk
+            .sign_deterministic(input)
             .map_err(|_| VrfError::InvalidSecretKey)?;
         let proof_bytes = sig.to_bytes().to_vec();
 
         // Output = SHA3-256(proof) — deterministic from the signature
         let output = sha3_256(&proof_bytes);
 
-        Ok((
-            VrfOutput(output.0),
-            VrfProof {
-                bytes: proof_bytes,
-            },
-        ))
+        Ok((VrfOutput(output.0), VrfProof { bytes: proof_bytes }))
     }
 
     fn verify(
@@ -68,8 +64,7 @@ impl Vrf for PqVrf {
         proof: &VrfProof,
     ) -> Result<(), VrfError> {
         // Reconstruct the verifying key
-        let vk =
-            VerifyingKey::from_bytes(public_key).map_err(|_| VrfError::InvalidPublicKey)?;
+        let vk = VerifyingKey::from_bytes(public_key).map_err(|_| VrfError::InvalidPublicKey)?;
 
         // Verify the ML-DSA signature
         let sig = seal_crypto::signature::Signature::from_bytes(proof.bytes.clone());
@@ -115,7 +110,10 @@ mod tests {
         let (output1, proof1) = PqVrf::eval(&kp.secret_key, b"test").unwrap();
         let (output2, proof2) = PqVrf::eval(&kp.secret_key, b"test").unwrap();
         assert_eq!(output1, output2, "same (sk, input) must give same output");
-        assert_eq!(proof1.bytes, proof2.bytes, "same (sk, input) must give same proof");
+        assert_eq!(
+            proof1.bytes, proof2.bytes,
+            "same (sk, input) must give same proof"
+        );
 
         // Different input → different output
         let (output3, _) = PqVrf::eval(&kp.secret_key, b"other").unwrap();

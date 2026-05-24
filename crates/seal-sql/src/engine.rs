@@ -153,10 +153,7 @@ impl Engine {
     ///   3. SQL body: substitute `$N` placeholders and run the result
     ///      through `self.execute(...)`. WASM body: refuse with a clear
     ///      LanguageNotImplemented (validated already at registration).
-    fn execute_call(
-        &mut self,
-        func: &sqlparser::ast::Function,
-    ) -> Result<QueryResult, SqlError> {
+    fn execute_call(&mut self, func: &sqlparser::ast::Function) -> Result<QueryResult, SqlError> {
         use sqlparser::ast::{FunctionArg, FunctionArgExpr, FunctionArguments};
 
         let proc_name = func.name.to_string();
@@ -164,27 +161,27 @@ impl Engine {
             .procedures
             .get(&proc_name)
             .cloned()
-            .ok_or_else(|| {
-                SqlError::Execution(format!("procedure '{proc_name}' not found"))
-            })?;
+            .ok_or_else(|| SqlError::Execution(format!("procedure '{proc_name}' not found")))?;
 
         // Collect call-site arguments as their textual rendering.
         let mut arg_strings: Vec<String> = Vec::new();
         match &func.args {
             FunctionArguments::None => {}
             FunctionArguments::Subquery(_) => {
-                return Err(SqlError::Unsupported(
-                    "CALL with subquery argument".into(),
-                ));
+                return Err(SqlError::Unsupported("CALL with subquery argument".into()));
             }
             FunctionArguments::List(list) => {
                 for arg in &list.args {
                     let rendered = match arg {
                         FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) => e.to_string(),
-                        FunctionArg::Named { arg: FunctionArgExpr::Expr(e), .. }
-                        | FunctionArg::ExprNamed { arg: FunctionArgExpr::Expr(e), .. } => {
-                            e.to_string()
+                        FunctionArg::Named {
+                            arg: FunctionArgExpr::Expr(e),
+                            ..
                         }
+                        | FunctionArg::ExprNamed {
+                            arg: FunctionArgExpr::Expr(e),
+                            ..
+                        } => e.to_string(),
                         _ => {
                             return Err(SqlError::Unsupported(
                                 "CALL with wildcard / qualified-wildcard argument".into(),
@@ -216,7 +213,11 @@ impl Engine {
                 // The Postgres `RETURN <expr>` form in the stored body
                 // is rewritten into `SELECT <expr>` so the engine has
                 // something queryable.
-                let body_to_run = if body.trim_start().to_ascii_uppercase().starts_with("RETURN ") {
+                let body_to_run = if body
+                    .trim_start()
+                    .to_ascii_uppercase()
+                    .starts_with("RETURN ")
+                {
                     let after = &body.trim_start()[7..];
                     format!("SELECT {}", after)
                 } else {
@@ -262,13 +263,14 @@ impl Engine {
         // or `wasm` — silently defaulting masks typos.
         let language = match &cf.language {
             None => seal_procs::ProcedureLanguage::Sql, // default: SQL
-            Some(ident) => seal_procs::ProcedureLanguage::from_keyword(&ident.value)
-                .ok_or_else(|| {
+            Some(ident) => {
+                seal_procs::ProcedureLanguage::from_keyword(&ident.value).ok_or_else(|| {
                     SqlError::Unsupported(format!(
                         "LANGUAGE '{}' (only 'sql' and 'wasm' are supported)",
                         ident.value
                     ))
-                })?,
+                })?
+            }
         };
 
         // Argument list. Each arg's type stringification matches what
@@ -279,11 +281,7 @@ impl Engine {
             .map(|args| {
                 args.iter()
                     .map(|a| seal_procs::ProcedureArg {
-                        name: a
-                            .name
-                            .as_ref()
-                            .map(|n| n.value.clone())
-                            .unwrap_or_default(),
+                        name: a.name.as_ref().map(|n| n.value.clone()).unwrap_or_default(),
                         type_keyword: a.data_type.to_string(),
                     })
                     .collect()
@@ -397,7 +395,9 @@ impl Engine {
                     }
                 }
 
-                let rows = self.tables.get_mut(&table_name)
+                let rows = self
+                    .tables
+                    .get_mut(&table_name)
                     .ok_or_else(|| SqlError::TableNotFound(table_name.clone()))?;
                 let row_idx = rows.len();
                 let mut row = Row {
@@ -681,7 +681,9 @@ impl Engine {
                     SealValue::Boolean(_) => 1,
                     SealValue::Text(s) => 8 + s.len() as u64,
                     SealValue::Numeric(s) | SealValue::Jsonb(s) => 8 + s.len() as u64,
-                    SealValue::Bytea(b) | SealValue::SealAddress(b) | SealValue::Uuid(b) => 8 + b.len() as u64,
+                    SealValue::Bytea(b) | SealValue::SealAddress(b) | SealValue::Uuid(b) => {
+                        8 + b.len() as u64
+                    }
                 };
             }
         }
@@ -751,12 +753,14 @@ fn try_index_lookup(
 
         // Check if left is a column name and right is a literal (or vice versa)
         let (col_name, value) = match (left.as_ref(), right.as_ref()) {
-            (Expr::Identifier(ident), Expr::Value(v)) => {
-                (ident.value.clone(), format!("{:?}", eval_expr_to_value(&Expr::Value(v.clone())).ok()?))
-            }
-            (Expr::Value(v), Expr::Identifier(ident)) => {
-                (ident.value.clone(), format!("{:?}", eval_expr_to_value(&Expr::Value(v.clone())).ok()?))
-            }
+            (Expr::Identifier(ident), Expr::Value(v)) => (
+                ident.value.clone(),
+                format!("{:?}", eval_expr_to_value(&Expr::Value(v.clone())).ok()?),
+            ),
+            (Expr::Value(v), Expr::Identifier(ident)) => (
+                ident.value.clone(),
+                format!("{:?}", eval_expr_to_value(&Expr::Value(v.clone())).ok()?),
+            ),
             _ => return None,
         };
 
@@ -1272,9 +1276,7 @@ mod tests {
     fn create_function_language_wasm_stores_body() {
         let mut engine = Engine::new();
         engine
-            .execute(
-                "CREATE FUNCTION foo() RETURNS INTEGER LANGUAGE wasm AS $$00deadbeef$$;",
-            )
+            .execute("CREATE FUNCTION foo() RETURNS INTEGER LANGUAGE wasm AS $$00deadbeef$$;")
             .unwrap();
         let proc = engine.procedures.get("foo").unwrap();
         assert_eq!(proc.language, seal_procs::ProcedureLanguage::Wasm);
@@ -1315,10 +1317,7 @@ mod tests {
         engine
             .execute("CREATE OR REPLACE FUNCTION f() RETURNS INT AS $$SELECT 3$$;")
             .unwrap();
-        assert_eq!(
-            engine.procedures.get("f").unwrap().body.trim(),
-            "SELECT 3"
-        );
+        assert_eq!(engine.procedures.get("f").unwrap().body.trim(), "SELECT 3");
     }
 
     /// Multiple distinct functions coexist; the engine's procedure
@@ -1424,7 +1423,11 @@ mod tests {
         let result = engine
             .execute("CALL bump(99)")
             .expect("plpgsql CALL must succeed");
-        assert_eq!(result.rows.len(), 1, "SELECT after INSERT should see the new row");
+        assert_eq!(
+            result.rows.len(),
+            1,
+            "SELECT after INSERT should see the new row"
+        );
         let value = format!("{:?}", result.rows[0].values[0]);
         assert!(value.contains("99"), "expected 99 in {value}");
     }
@@ -1439,17 +1442,17 @@ mod tests {
             )
             .unwrap();
         let err = engine.execute("CALL declares()").unwrap_err();
-        assert!(matches!(&err, SqlError::Execution(s) if s.contains("language not yet implemented")),
-                "expected LanguageNotImplemented surface, got {err:?}");
+        assert!(
+            matches!(&err, SqlError::Execution(s) if s.contains("language not yet implemented")),
+            "expected LanguageNotImplemented surface, got {err:?}"
+        );
     }
 
     #[test]
     fn call_wasm_proc_returns_unsupported() {
         let mut engine = Engine::new();
         engine
-            .execute(
-                "CREATE FUNCTION w() RETURNS INT LANGUAGE wasm AS $$00$$;",
-            )
+            .execute("CREATE FUNCTION w() RETURNS INT LANGUAGE wasm AS $$00$$;")
             .unwrap();
         let err = engine.execute("CALL w()").unwrap_err();
         assert!(matches!(err, SqlError::Unsupported(s) if s.contains("wasm")));

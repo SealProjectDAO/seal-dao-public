@@ -81,11 +81,13 @@ impl BatchTransition {
 
     /// Range of block heights in this batch.
     pub fn height_range(&self) -> Result<(u64, u64), ZkError> {
-        let first = self.transitions
+        let first = self
+            .transitions
             .first()
             .ok_or_else(|| ZkError::InvalidTransition("batch is empty".into()))?
             .block_height;
-        let last = self.transitions
+        let last = self
+            .transitions
             .last()
             .ok_or_else(|| ZkError::InvalidTransition("batch is empty".into()))?
             .block_height;

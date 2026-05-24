@@ -1,0 +1,11 @@
+build.log
+# Persistent on-Seal recipient used by scripts/bridge-e2e.sh
+# (forward leg credits the wrapped balance; reverse leg signs the
+# burn). Survives across runs so repeated `bridge-e2e.sh` calls
+# don't burn a fresh address each time. Contains an ML-DSA secret
+# key — must never enter version control.
+.seal-e2e-key.json
+# Captured anchor-test stdout from the Solana leg of bridge-e2e.sh —
+# tee'd so the inline diag can grep the actual Lock tx hash on
+# failure. Rewritten on every run; never useful in history.
+.bridge-e2e-anchor-solana.log

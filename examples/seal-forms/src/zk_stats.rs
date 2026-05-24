@@ -141,7 +141,7 @@ mod tests {
         let salts = StatementSum::sample_salts(seed, values.len());
         values
             .iter()
-            .zip(salts.into_iter())
+            .zip(salts)
             .map(|(&value, salt)| AnswerWitness { value, salt })
             .collect()
     }
@@ -165,7 +165,10 @@ mod tests {
     fn flipped_witness_value_fails() {
         let mut stmt = StatementSum::commit(mk(&[10, 20], b"seed-C"));
         stmt.witness[0].value = 999; // attacker rewrite
-        assert!(!stmt.verify(), "modified witness must break either sum or commitment");
+        assert!(
+            !stmt.verify(),
+            "modified witness must break either sum or commitment"
+        );
     }
 
     #[test]
@@ -179,7 +182,10 @@ mod tests {
     fn deterministic_commitment_for_fixed_seed() {
         let s1 = StatementSum::commit(mk(&[5, 6, 7], b"seed-E"));
         let s2 = StatementSum::commit(mk(&[5, 6, 7], b"seed-E"));
-        assert_eq!(s1.commitment, s2.commitment, "same seed must commit identically");
+        assert_eq!(
+            s1.commitment, s2.commitment,
+            "same seed must commit identically"
+        );
     }
 
     #[test]

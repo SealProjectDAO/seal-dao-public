@@ -122,6 +122,29 @@ impl Hamt {
         Self::hash_node(&self.root)
     }
 
+    /// Whether `key` has an entry. O(log32 n) — cheaper than `get`
+    /// because we don't construct an `Option<&[u8]>` borrow chain;
+    /// callers that just need presence (e.g. `BalanceStore::has_account`)
+    /// avoid the deserialization round-trip on the value side.
+    pub fn contains_key(&self, key: &[u8]) -> bool {
+        self.get(key).is_some()
+    }
+
+    /// Iterate over all `(key, value)` pairs. Order is depth-first
+    /// over the trie, which is deterministic given the same insertions
+    /// but is NOT lexicographic on keys (it's lexicographic on the
+    /// 5-bit hash chunks, which is unrelated to key bytes).
+    ///
+    /// Callers that need a deterministic key order should sort the
+    /// collected output explicitly. The intended use is whole-trie
+    /// scans (snapshot, RPC `all_accounts`) where the order doesn't
+    /// matter.
+    pub fn iter(&self) -> HamtIter<'_> {
+        HamtIter {
+            stack: vec![&self.root],
+        }
+    }
+
     // ── Internal helpers ──────────────────────────────────
 
     /// Extract 5 bits from hash at the given depth level.
@@ -370,6 +393,36 @@ impl Hamt {
     }
 }
 
+/// Depth-first iterator over `(key, value)` pairs in a HAMT.
+pub struct HamtIter<'a> {
+    /// Stack of nodes still to visit. Branch children are pushed in
+    /// reverse order so the leftmost child comes off the stack first
+    /// (giving a stable left-to-right DFS).
+    stack: Vec<&'a Node>,
+}
+
+impl<'a> Iterator for HamtIter<'a> {
+    type Item = (&'a [u8], &'a [u8]);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(node) = self.stack.pop() {
+            match node {
+                Node::Empty => {}
+                Node::Leaf { key, value, .. } => {
+                    return Some((key.as_slice(), value.as_slice()));
+                }
+                Node::Branch { children, .. } => {
+                    // Push right-to-left so leftmost is popped first.
+                    for child in children.iter().rev() {
+                        self.stack.push(child);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,5 +588,55 @@ mod tests {
             let idx = Hamt::index_at_depth(&hash, depth);
             assert!(idx < _BRANCH_FACTOR, "index must be < 32");
         }
+    }
+
+    #[test]
+    fn test_iter_empty_yields_nothing() {
+        let hamt = Hamt::new();
+        assert_eq!(hamt.iter().count(), 0);
+    }
+
+    #[test]
+    fn test_iter_visits_each_entry_once() {
+        let mut hamt = Hamt::new();
+        for i in 0..200u32 {
+            hamt.insert(format!("k{:04}", i).into_bytes(), vec![i as u8]);
+        }
+        let mut seen: Vec<Vec<u8>> = hamt.iter().map(|(k, _)| k.to_vec()).collect();
+        seen.sort();
+        assert_eq!(seen.len(), 200);
+        for i in 0..200u32 {
+            let want = format!("k{:04}", i).into_bytes();
+            assert!(seen.binary_search(&want).is_ok(), "missing {:?}", want);
+        }
+    }
+
+    #[test]
+    fn test_iter_value_matches_get() {
+        let mut hamt = Hamt::new();
+        let pairs: Vec<(Vec<u8>, Vec<u8>)> = (0..50u32)
+            .map(|i| {
+                (
+                    format!("user{}", i).into_bytes(),
+                    format!("{}", i * 7).into_bytes(),
+                )
+            })
+            .collect();
+        for (k, v) in &pairs {
+            hamt.insert(k.clone(), v.clone());
+        }
+        for (k, v) in hamt.iter() {
+            assert_eq!(hamt.get(k), Some(v));
+        }
+    }
+
+    #[test]
+    fn test_contains_key() {
+        let mut hamt = Hamt::new();
+        hamt.insert(b"alice".to_vec(), b"100".to_vec());
+        assert!(hamt.contains_key(b"alice"));
+        assert!(!hamt.contains_key(b"bob"));
+        hamt.remove(b"alice");
+        assert!(!hamt.contains_key(b"alice"));
     }
 }

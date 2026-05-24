@@ -32,6 +32,13 @@ cuda = [
     "risc0-sppark/cuda",
     "risc0-sys/cuda",
 ]
+# Metal segment-prover HAL (Apple Silicon). Activates the C++ Metal
+# HAL at `cxx/hal/metal/hal.cpp` (was commented out upstream, see
+# `crates/seal-zk/METAL.md` Option A) and links the Metal +
+# Foundation frameworks. The .metal kernels are compiled by the
+# Xcode MetalToolchain into a .metallib that the HAL loads at
+# runtime; build.rs's `is_metal()` only gates the C++ side.
+metal = []
 default = []
 
 [lib]

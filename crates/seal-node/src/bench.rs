@@ -306,8 +306,7 @@ mod tests {
                 .collect();
 
             // Aggregate
-            let sig =
-                RingtailThreshold::aggregate(&partials, &keys, &message, 67, 100).unwrap();
+            let sig = RingtailThreshold::aggregate(&partials, &keys, &message, 67, 100).unwrap();
 
             // Verify
             RingtailThreshold::verify(&sig, &keys, &message, 67).unwrap();
@@ -320,8 +319,15 @@ mod tests {
             elapsed.as_secs_f64()
         );
         let ms_per_op = elapsed.as_millis() as f64 / iterations as f64;
-        let status = if ms_per_op < 2000.0 { "PASS" } else { "NEEDS OPTIMIZATION" };
-        println!("  → Target: <2000ms WAN. Result: {:.0}ms ({})", ms_per_op, status);
+        let status = if ms_per_op < 2000.0 {
+            "PASS"
+        } else {
+            "NEEDS OPTIMIZATION"
+        };
+        println!(
+            "  → Target: <2000ms WAN. Result: {:.0}ms ({})",
+            ms_per_op, status
+        );
     }
 
     // ========================================================================

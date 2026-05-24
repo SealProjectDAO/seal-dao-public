@@ -261,12 +261,8 @@ fn min_node<K: Ord + Clone, V: Clone>(node: &Rc<Node<K, V>>) -> &Rc<Node<K, V>> 
 }
 
 /// Delete the minimum key from a subtree.
-fn delete_min_rec<K: Ord + Clone, V: Clone>(
-    h: Rc<Node<K, V>>,
-) -> Option<Rc<Node<K, V>>> {
-    if h.left.is_none() {
-        return None; // h is the minimum; remove it
-    }
+fn delete_min_rec<K: Ord + Clone, V: Clone>(h: Rc<Node<K, V>>) -> Option<Rc<Node<K, V>>> {
+    h.left.as_ref()?;
 
     let mut h = h;
 
@@ -411,16 +407,12 @@ fn range_rec<'a, K: Ord + Clone, V: Clone>(
 // Min / Max
 // ---------------------------------------------------------------------------
 
-fn min_ref<'a, K: Ord + Clone, V: Clone>(
-    link: &'a Option<Rc<Node<K, V>>>,
-) -> Option<(&'a K, &'a V)> {
+fn min_ref<K: Ord + Clone, V: Clone>(link: &Option<Rc<Node<K, V>>>) -> Option<(&K, &V)> {
     let node = link.as_ref()?;
     min_ref(&node.left).or(Some((&node.key, &node.value)))
 }
 
-fn max_ref<'a, K: Ord + Clone, V: Clone>(
-    link: &'a Option<Rc<Node<K, V>>>,
-) -> Option<(&'a K, &'a V)> {
+fn max_ref<K: Ord + Clone, V: Clone>(link: &Option<Rc<Node<K, V>>>) -> Option<(&K, &V)> {
     let node = link.as_ref()?;
     max_ref(&node.right).or(Some((&node.key, &node.value)))
 }
@@ -478,10 +470,7 @@ pub struct RBTree<K: Ord + Clone, V: Clone> {
 impl<K: Ord + Clone, V: Clone> RBTree<K, V> {
     /// Create an empty tree.
     pub fn new() -> Self {
-        RBTree {
-            root: None,
-            len: 0,
-        }
+        RBTree { root: None, len: 0 }
     }
 
     /// Insert a key-value pair, returning a new tree.
@@ -605,10 +594,7 @@ mod tests {
 
     #[test]
     fn test_insert_get() {
-        let tree = RBTree::new()
-            .insert(3, "c")
-            .insert(1, "a")
-            .insert(2, "b");
+        let tree = RBTree::new().insert(3, "c").insert(1, "a").insert(2, "b");
 
         assert_eq!(tree.len(), 3);
         assert!(!tree.is_empty());
@@ -765,7 +751,10 @@ mod tests {
         assert_eq!(keys, vec![10, 20, 30, 40, 50]);
 
         let values: Vec<&&str> = tree.iter().map(|(_, v)| v).collect();
-        assert_eq!(values, vec![&"ten", &"twenty", &"thirty", &"forty", &"fifty"]);
+        assert_eq!(
+            values,
+            vec![&"ten", &"twenty", &"thirty", &"forty", &"fifty"]
+        );
     }
 
     #[test]
