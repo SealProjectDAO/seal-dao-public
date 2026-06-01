@@ -246,7 +246,7 @@ footer {
   <div style="margin-bottom:24px">
     <img src="assets/seal-logo.png" alt="Seal DAO" width="120" height="120" style="image-rendering:high-quality">
   </div>
-  <div style="margin-bottom:24px"><span class="badge badge-testnet">WORK IN PROGRESS &mdash; pre-mainnet, private testnet only</span></div>
+  <div style="margin-bottom:24px"><span class="badge badge-testnet">PRE-MAINNET &mdash; public testnet coming, not yet live</span></div>
   <h1>SQL on a <span>post-quantum</span> blockchain</h1>
   <p>The web3 backend for SQL-based applications. 99% of websites that matter run on SQL. Seal gives them decentralization, privacy, and post-quantum security &mdash; without changing how they work.</p>
   <p style="margin-top:16px;color:var(--text-muted);font-size:14px;max-width:640px;margin-left:auto;margin-right:auto">
@@ -266,8 +266,9 @@ CREATE TABLE users (
   balance BIGINT DEFAULT 0
 );</pre>
   </div>
-  <div style="margin-top:32px;display:flex;gap:12px;justify-content:center">
+  <div style="margin-top:32px;display:flex;gap:12px;justify-content:center;flex-wrap:wrap">
     <a href="#developers" class="btn">Get Started</a>
+    <a href="#community" class="btn">Help build the testnet</a>
     <a href="https://github.com/SealProjectDAO/seal-dao-public" class="btn btn-outline">GitHub</a>
   </div>
 </div>
@@ -357,7 +358,7 @@ CREATE TABLE users (
   <h2>Network status</h2>
   <div class="features" style="grid-template-columns:repeat(4,1fr)">
     <div class="card" style="text-align:center">
-      <div style="font-family:'JetBrains Mono';font-size:32px;font-weight:700;color:var(--accent-blue)">887</div>
+      <div style="font-family:'JetBrains Mono';font-size:32px;font-weight:700;color:var(--accent-blue)">996</div>
       <p>Tests passing</p>
     </div>
     <div class="card" style="text-align:center">
@@ -373,6 +374,37 @@ CREATE TABLE users (
       <p>Crates</p>
     </div>
   </div>
+</section>
+
+<section>
+  <h2>Close to testnet &mdash; build it with us</h2>
+  <p style="color:var(--text-secondary);margin-bottom:8px">
+    The architectural blockers are in and tested &mdash; post-quantum networking, decentralized key management, the bridge round-trip, row-level security, governance. The public testnet is the next milestone, and the protocol isn't frozen yet: what early participants do on the testnet shapes what mainnet commits to. This is the window where more hands genuinely move things faster.
+  </p>
+  <p style="color:var(--text-muted);font-size:14px;margin-bottom:24px">
+    We'd like to talk to you if you're a&hellip;
+  </p>
+  <div class="features" style="grid-template-columns:repeat(2,1fr)">
+    <div class="card">
+      <h3>Validator / Node operator</h3>
+      <p>Algorand-style consensus (VRF + committee voting), no mining. The operator runbooks &mdash; node-failure recovery, backup/restore, multi-region &mdash; are written. Help us shake them out on real, geographically-spread hardware.</p>
+    </div>
+    <div class="card">
+      <h3>Bridge partner</h3>
+      <p>The Solana + Stellar round-trip works locally and against public devnets (Solana devnet / Stellar testnet). We want partners to harden it against real-world conditions.</p>
+    </div>
+    <div class="card">
+      <h3>Dapp builder</h3>
+      <p>If you've ever shipped a PHP+MySQL app, the SQL-native model should feel familiar. Deploy a schema, query it in PostgreSQL syntax &mdash; and tell us where the abstraction leaks.</p>
+    </div>
+    <div class="card">
+      <h3>Cryptography / security reviewer</h3>
+      <p>The ML-DSA / ML-KEM integration and the Ringtail threshold-signature path are the highest-stakes surface. Independent eyes are welcome before mainnet, not after.</p>
+    </div>
+  </div>
+  <p style="color:var(--text-secondary);margin-top:24px">
+    No token has been issued and nothing here is an offer of one &mdash; this is an invitation to build, review, and shape, not a sale. Get in touch: <a href="mailto:build@seal-dao.network?subject=Seal%20DAO">build@seal-dao.network</a>.
+  </p>
 </section>
 
 </div>
@@ -617,6 +649,14 @@ cargo build --release -p seal-node
 <section>
   <article style="margin-bottom:48px">
     <h3 style="font-family:'JetBrains Mono',monospace;margin-bottom:8px">
+      <a href="https://zeta1999.github.io/renoir42//SealDAOTestnetSoon/">Seal DAO is close to testnet — help build it before mainnet locks in</a>
+    </h3>
+    <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">2026-05-31 &middot; testnet &middot; pqc-networking &middot; kms &middot; bridge &middot; zk</p>
+    <p style="color:var(--text-secondary);margin-bottom:12px">The CRITICAL and HIGH testnet-blocking items in <code>PROBLEMS.md</code> are checked off: hybrid ML-KEM + X25519 node transport, a decentralized <code>seal-kms-sidecar</code> (local authority + ephemeral workers, Shamir-split key), single-call bridge withdraw-and-claim with a real Solana/Stellar relayer binary (cursor persistence + Prometheus metrics), <code>seal_submitProof</code> + a consensus-wired ZK verifier, conviction-voting balance checks, RLS <code>CREATE POLICY</code> DDL, and operator runbooks (node-failure recovery, backup/restore, QUICKSTART, drain-before-migrate bridge lifecycle). The biggest remaining piece is the proof backend &mdash; the ZK path still defaults to a <code>StubVerifier</code>, so proofs aren't verified end-to-end yet, and a security pass is ongoing. "Close to testnet," not "testnet is live." If you'd run a validator, partner on the bridge, build a SQL dapp, or review the crypto, now's the time to get in touch.</p>
+  </article>
+
+  <article style="margin-bottom:48px">
+    <h3 style="font-family:'JetBrains Mono',monospace;margin-bottom:8px">
       <a href="https://zeta1999.github.io/renoir42//SealDAOWeeklyUpdate/">Seal DAO: what landed in the private tree this week (not yet pushed public)</a>
     </h3>
     <p style="color:var(--text-muted);font-size:13px;margin-bottom:12px">2026-04-21 &middot; ringtail &middot; bridges &middot; demo-apps &middot; adr-001</p>
@@ -670,11 +710,21 @@ cargo build --release -p seal-node
 <div class="container">
 
 <section>
+  <h2>Get in touch</h2>
+  <p style="color:var(--text-secondary);margin-bottom:16px">
+    Seal DAO is close to a public testnet and openly recruiting people to help build it &mdash; validators and node operators, bridge partners, SQL-native dapp builders, and cryptography / security reviewers. The protocol isn't frozen yet, so early input shapes what testnet, and then mainnet, commit to.
+  </p>
+  <p style="color:var(--text-secondary);margin-bottom:24px">
+    Email <a href="mailto:build@seal-dao.network?subject=Seal%20DAO">build@seal-dao.network</a> &mdash; tell us which of those you are and what you'd want to work on. (If you're a fund or angel backing deep-tech / crypto infrastructure at the protocol stage, that conversation is open too. No token has been issued and nothing here is an offer of one.)
+  </p>
+</section>
+
+<section>
   <h2>Community</h2>
   <div class="features" style="grid-template-columns:repeat(3,1fr)">
     <a href="https://github.com/SealProjectDAO/seal-dao-public" class="card">
       <h3>GitHub</h3>
-      <p>Source code, issues, pull requests. 19 crates, 887 tests, formal verification.</p>
+      <p>Source code, issues, pull requests. 19 crates, 996 tests, formal verification.</p>
     </a>
     <div class="card">
       <h3>Discord</h3>
@@ -695,7 +745,7 @@ cd seal-dao-public
 cargo build && cargo test
 
 <span style="color:var(--text-muted)"># Run the full verification suite</span>
-./scripts/ci.sh quick    <span style="color:var(--text-muted)"># build + 887 tests + clippy</span>
+./scripts/ci.sh quick    <span style="color:var(--text-muted)"># build + 996 tests + clippy</span>
 ./scripts/ci.sh          <span style="color:var(--text-muted)"># + Kani + Miri + fuzz + audit</span></pre>
   <p style="color:var(--text-secondary);margin-top:16px">Seal DAO is pre-mainnet and under active development. Report security issues via a private GitHub security advisory on the repository. No bounty program is in place and none is promised.</p>
 </section>
