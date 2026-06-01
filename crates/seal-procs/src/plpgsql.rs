@@ -73,7 +73,11 @@ pub fn lower_to_sql(body: &str) -> Result<Vec<String>, ProcError> {
         .trim_end()
         .strip_suffix("END")
         .or_else(|| {
-            inner.trim_end().trim_end_matches(';').trim_end().strip_suffix("end")
+            inner
+                .trim_end()
+                .trim_end_matches(';')
+                .trim_end()
+                .strip_suffix("end")
         })
         .ok_or_else(|| ProcError::Execution("expected END".into()))?;
 
@@ -94,8 +98,8 @@ pub fn lower_to_sql(body: &str) -> Result<Vec<String>, ProcError> {
             .unwrap_or("")
             .to_ascii_uppercase();
         match head.as_str() {
-            "IF" | "ELSIF" | "ELSE" | "WHILE" | "LOOP" | "FOR" | "DECLARE"
-            | "RAISE" | "EXCEPTION" | "PERFORM" => {
+            "IF" | "ELSIF" | "ELSE" | "WHILE" | "LOOP" | "FOR" | "DECLARE" | "RAISE"
+            | "EXCEPTION" | "PERFORM" => {
                 return Err(ProcError::LanguageNotImplemented(
                     crate::ProcedureLanguage::PlPgSql,
                 ));

@@ -38,10 +38,7 @@ pub trait ChainObserver: Send + Sync {
     ///
     /// The cursor is opaque — for Solana it's a transaction signature,
     /// for Stellar it's a Horizon paging token.
-    fn poll_events(
-        &self,
-        last_cursor: &str,
-    ) -> Result<(Vec<BridgeDeposit>, String), BridgeError>;
+    fn poll_events(&self, last_cursor: &str) -> Result<(Vec<BridgeDeposit>, String), BridgeError>;
 
     /// Check whether a specific source transaction is confirmed and
     /// finalized on the source chain.
@@ -72,6 +69,14 @@ pub struct SolanaObserver {
     pub rpc_url: String,
     /// The seal-bridge program ID on Solana (base-58).
     pub program_id: String,
+    /// Optional USDC mint (base-58 Pubkey). When the on-chain
+    /// `LockEvent.mint` matches, the observer routes the deposit to
+    /// `WrappedToken::WUSDC`. Anything else routes to `WSOL`.
+    /// Configured via `seal_addBridgeObserver` `usdc_mint` param so
+    /// operators can flip the canonical devnet USDC mint
+    /// (`Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr`) without a
+    /// node rebuild.
+    pub usdc_mint: Option<String>,
     /// Required confirmations for finality (Solana's "finalized"
     /// commitment is ~32 slots).
     pub required_confirmations: u32,
@@ -84,7 +89,7 @@ pub struct SolanaObserver {
 /// at runtime on the host (the bridges/solana/… program's Anchor build
 /// bakes in the same value).
 pub(crate) const LOCK_EVENT_DISCRIMINATOR: [u8; 8] =
-    [0x21, 0x19, 0x86, 0xc2, 0xd9, 0x8f, 0x67, 0x15];
+    [0x4c, 0x25, 0x06, 0xba, 0x0e, 0x2a, 0xfd, 0x0f];
 
 impl SolanaObserver {
     /// Create with an explicit HTTP transport. Main use is to inject
@@ -97,6 +102,7 @@ impl SolanaObserver {
         Self {
             rpc_url: rpc_url.to_string(),
             program_id: program_id.to_string(),
+            usdc_mint: None,
             required_confirmations: 32,
             transport,
         }
@@ -105,6 +111,13 @@ impl SolanaObserver {
     /// Create with the default reqwest-backed transport.
     pub fn new(rpc_url: &str, program_id: &str) -> Self {
         Self::with_transport(rpc_url, program_id, Arc::new(ReqwestTransport::new()))
+    }
+
+    /// Builder: attach a USDC mint pubkey. Locks of this mint route to
+    /// `WrappedToken::WUSDC`; everything else routes to `WSOL`.
+    pub fn with_usdc_mint(mut self, mint: impl Into<String>) -> Self {
+        self.usdc_mint = Some(mint.into());
+        self
     }
 
     /// Devnet configuration.
@@ -169,31 +182,47 @@ impl SolanaObserver {
             let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(b64.trim()) else {
                 continue;
             };
-            if bytes.len() < 8 + 32 + 8 + 32 + 8 + 8 {
+            // LockEvent layouts:
+            //   v1 (legacy): disc(8) + sender(32) + amount(8) +
+            //                seal_address(32) + nonce(8) + timestamp(8)
+            //              = 96 bytes total.
+            //   v2 (current): disc(8) + sender(32) + amount(8) +
+            //                 seal_address(32) + mint(32) + nonce(8) +
+            //                 timestamp(8) = 128 bytes total.
+            // Accept both so operators who haven't redeployed the
+            // Anchor program (v1) still see locks observed. A v1 lock
+            // always routes to WSOL because the on-chain event
+            // doesn't carry the mint pubkey.
+            const V1_LEN: usize = 8 + 32 + 8 + 32 + 8 + 8;
+            const V2_LEN: usize = 8 + 32 + 8 + 32 + 32 + 8 + 8;
+            if bytes.len() != V1_LEN && bytes.len() != V2_LEN {
                 continue;
             }
             if bytes[..8] != LOCK_EVENT_DISCRIMINATOR {
                 continue;
             }
-            // Borsh layout of LockEvent (same module-order as the program):
-            //   sender: Pubkey     (32 bytes, raw)
-            //   amount: u64         (8 bytes, little-endian)
-            //   seal_address: [u8; 32]
-            //   nonce: u64          (8 bytes)
-            //   timestamp: i64      (8 bytes)
             let body = &bytes[8..];
-            let sender_bytes: [u8; 32] = body[0..32]
-                .try_into()
-                .expect("32 bytes of sender pubkey");
+            let sender_bytes: [u8; 32] = body[0..32].try_into().expect("32 bytes of sender pubkey");
             let amount = u64::from_le_bytes(body[32..40].try_into().expect("8 bytes amount"));
-            let seal_address: [u8; 32] = body[40..72]
-                .try_into()
-                .expect("32 bytes of seal address");
-            // nonce and timestamp are not stored on BridgeDeposit today,
-            // but we decode them so a malformed tail still fails loud.
-            let _nonce = u64::from_le_bytes(
-                body[72..80].try_into().expect("8 bytes nonce"),
-            );
+            let seal_address: [u8; 32] = body[40..72].try_into().expect("32 bytes of seal address");
+
+            // Branch on layout: in v2, mint sits between
+            // seal_address and nonce; in v1 there's no mint at all.
+            let (mint_bytes, _nonce) = if bytes.len() == V2_LEN {
+                let m: [u8; 32] = body[72..104].try_into().expect("32 bytes of mint pubkey");
+                let n = u64::from_le_bytes(body[104..112].try_into().expect("8 bytes nonce"));
+                (Some(m), n)
+            } else {
+                let n = u64::from_le_bytes(body[72..80].try_into().expect("8 bytes nonce"));
+                (None, n)
+            };
+
+            // Route to WUSDC iff v2 carried a mint AND it matches the
+            // operator-configured USDC pubkey; otherwise WSOL.
+            let token = match (&self.usdc_mint, mint_bytes.and_then(|m| bs58_encode(&m))) {
+                (Some(want), Some(got)) if &got == want => WrappedToken::WUSDC,
+                _ => WrappedToken::WSOL,
+            };
 
             out.push(BridgeDeposit {
                 id: format!("sol_{}_{}", tx_signature, _nonce),
@@ -203,7 +232,7 @@ impl SolanaObserver {
                     .unwrap_or_else(|| sender_fallback.to_string()),
                 seal_address: hex_encode(&seal_address),
                 amount,
-                token: WrappedToken::WSOL,
+                token,
                 processed: false,
                 confirmations: 0,
             });
@@ -217,20 +246,21 @@ impl ChainObserver for SolanaObserver {
         Chain::Solana
     }
 
-    fn poll_events(
-        &self,
-        last_cursor: &str,
-    ) -> Result<(Vec<BridgeDeposit>, String), BridgeError> {
+    fn poll_events(&self, last_cursor: &str) -> Result<(Vec<BridgeDeposit>, String), BridgeError> {
         // Step 1: get recent signatures for the program.
-        let mut params = json!([self.program_id, {"limit": 100, "commitment": "finalized"}]);
+        // "confirmed" (not "finalized") so the observer catches txs within
+        // seconds on a local test-validator where finalization lags ~32 slots
+        // (~13s). For mainnet, bump to "finalized" for full reorg safety.
+        let mut params = json!([self.program_id, {"limit": 100, "commitment": "confirmed"}]);
         if !last_cursor.is_empty() {
             // `until` scopes the response to signatures newer than the
             // cursor (exclusive). Solana returns newest first.
             params[1]["until"] = json!(last_cursor);
         }
-        let sig_resp = self
-            .transport
-            .post_json(&self.rpc_url, &Self::rpc_envelope("getSignaturesForAddress", params))?;
+        let sig_resp = self.transport.post_json(
+            &self.rpc_url,
+            &Self::rpc_envelope("getSignaturesForAddress", params),
+        )?;
         let sigs = sig_resp
             .get("result")
             .and_then(|r| r.as_array())
@@ -272,7 +302,7 @@ impl ChainObserver for SolanaObserver {
                         signature,
                         {
                             "encoding": "json",
-                            "commitment": "finalized",
+                            "commitment": "confirmed",
                             "maxSupportedTransactionVersion": 0u64,
                         }
                     ]),
@@ -315,7 +345,7 @@ impl ChainObserver for SolanaObserver {
         // (we asked for commitment=finalized).
         let finalized = resp
             .get("result")
-            .is_some_and(|r| !r.is_null() && r.pointer("/meta/err").is_none_or(|e| e.is_null()));
+            .is_some_and(|r| !r.is_null() && r.pointer("/meta/err").map_or(true, |e| e.is_null()));
         Ok(finalized)
     }
 }
@@ -325,15 +355,26 @@ impl ChainObserver for SolanaObserver {
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Stellar observer — watches the seal-bridge Soroban contract for
-/// `lock()` invocations via Horizon's operations endpoint.
+/// `lock` events via Soroban RPC `getEvents`.
 ///
-/// Horizon's `/accounts/{id}/operations` returns a JSON:API shaped
-/// stream. For each `invoke_host_function` operation that targets our
-/// contract we read the `function_args` array (XDR-decoded by Horizon
-/// into JSON) to extract (sender, amount, seal_address, asset).
+/// Uses the Soroban RPC endpoint (typically port 8003) rather than
+/// Horizon (port 8000). Horizon's `/accounts/{contract}/operations`
+/// endpoint indexes operations by the transaction SOURCE account, not
+/// the called contract — so it returns zero results for
+/// `invoke_host_function` calls that target our bridge contract.
+/// The Soroban RPC `getEvents` method provides a contract-scoped event
+/// stream that is correct for this purpose.
+///
+/// Event format emitted by `lock_xlm` in the Soroban contract:
+///   topic: `(symbol_short!("lock"),)` — one XDR ScVal::Symbol
+///   value: XDR ScVal::Map of the `LockInfo` contracttype struct with
+///          fields: amount (i128), nonce (u64), seal_address (BytesN<32>),
+///          sender (Address), timestamp (u64).
 pub struct StellarObserver {
-    /// Horizon API endpoint.
+    /// Horizon API endpoint (used only for `is_finalized`).
     pub horizon_url: String,
+    /// Soroban RPC endpoint (used for `getEvents`).
+    pub soroban_rpc_url: String,
     /// The seal-bridge contract ID on Stellar (strkey CXXX…).
     pub contract_id: String,
     /// Required ledger confirmations.
@@ -347,8 +388,11 @@ impl StellarObserver {
         contract_id: &str,
         transport: Arc<dyn HttpTransport>,
     ) -> Self {
+        let horizon = horizon_url.trim_end_matches('/').to_string();
+        let soroban_rpc = derive_soroban_rpc_url(&horizon);
         Self {
-            horizon_url: horizon_url.trim_end_matches('/').to_string(),
+            horizon_url: horizon,
+            soroban_rpc_url: soroban_rpc,
             contract_id: contract_id.to_string(),
             required_confirmations: 5,
             transport,
@@ -359,14 +403,21 @@ impl StellarObserver {
         Self::with_transport(horizon_url, contract_id, Arc::new(ReqwestTransport::new()))
     }
 
+    /// Override the Soroban RPC URL (builder method).
+    pub fn with_soroban_rpc(mut self, soroban_rpc_url: &str) -> Self {
+        self.soroban_rpc_url = soroban_rpc_url.trim_end_matches('/').to_string();
+        self
+    }
+
     /// Public testnet configuration.
     pub fn testnet(contract_id: &str) -> Self {
         Self::new("https://horizon-testnet.stellar.org", contract_id)
+            .with_soroban_rpc("https://soroban-testnet.stellar.org")
     }
 
     /// Local `stellar/quickstart` docker container.
     pub fn localnet(contract_id: &str) -> Self {
-        Self::new("http://localhost:8000", contract_id)
+        Self::new("http://localhost:8000", contract_id).with_soroban_rpc("http://localhost:8003")
     }
 
     fn parse_lock_event_raw(
@@ -394,45 +445,44 @@ impl StellarObserver {
         }
     }
 
-    /// Decode one Horizon operation record into a deposit, if it's a
-    /// lock() invocation of our contract.
-    fn deposit_from_op(&self, op: &Value) -> Option<BridgeDeposit> {
-        if op.get("type").and_then(|t| t.as_str()) != Some("invoke_host_function") {
-            return None;
-        }
-        // Horizon renders function args as a JSON array with decoded
-        // scvals. We look for a function named exactly "lock" and the
-        // expected positional args (sender, amount, seal_address,
-        // asset_symbol).
-        let args = op.get("parameters")?.as_array()?;
-        let function_name = op.get("function").and_then(|f| f.as_str()).unwrap_or("");
-        if function_name != "lock" && function_name != "lock_xlm" {
-            return None;
-        }
-        // Expected ordering — matches bridges/stellar/src/lib.rs:
-        //   0: sender (Address → strkey)
-        //   1: amount (i128/u64)
-        //   2: seal_address (BytesN<32> or Bytes)
-        //   3: asset_symbol (Symbol) — optional
-        let sender = args.first().and_then(scval_string).unwrap_or_default();
-        let amount = args.get(1).and_then(scval_u64)?;
-        let seal_address = args.get(2).and_then(scval_hex).unwrap_or_default();
-        let asset = args.get(3).and_then(scval_string).unwrap_or_else(|| "native".into());
-
-        let contract = op
-            .get("contract")
+    /// Decode one Soroban RPC event into a deposit, if it's one of
+    /// our recognized lock events (`lock` for XLM, `lockusdc` for USDC).
+    fn deposit_from_event(&self, event: &Value) -> Option<BridgeDeposit> {
+        // Skip events that are not from our contract.
+        let contract = event
+            .get("contractId")
             .and_then(|c| c.as_str())
             .unwrap_or("");
         if !contract.is_empty() && contract != self.contract_id {
             return None;
         }
-        let tx_hash = op
-            .get("transaction_hash")
+        // Skip events that were not part of a successful contract call.
+        if !event
+            .get("inSuccessfulContractCall")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true)
+        {
+            return None;
+        }
+        // Detect which lock variant: Symbol("lock") → XLM, Symbol("lockusdc") → USDC.
+        let topics = event.get("topic").and_then(|t| t.as_array())?;
+        let first_topic = topics.first().and_then(|t| t.as_str())?;
+        let asset_tag = if is_lock_symbol(first_topic) {
+            "native"
+        } else if is_lockusdc_symbol(first_topic) {
+            "USDC"
+        } else {
+            return None;
+        };
+        let tx_hash = event
+            .get("txHash")
             .and_then(|t| t.as_str())
-            .unwrap_or_default()
-            .to_string();
-
-        Some(self.parse_lock_event_raw(&tx_hash, &sender, amount, &asset, &seal_address))
+            .unwrap_or_default();
+        // Parse the XDR-encoded LockInfo value.
+        let value_b64 = event.get("value").and_then(|v| v.as_str()).unwrap_or("");
+        let (amount, seal_address, sender) =
+            parse_lock_info_xdr(value_b64).unwrap_or((0, String::new(), String::new()));
+        Some(self.parse_lock_event_raw(tx_hash, &sender, amount, asset_tag, &seal_address))
     }
 }
 
@@ -441,40 +491,168 @@ impl ChainObserver for StellarObserver {
         Chain::Stellar
     }
 
-    fn poll_events(
-        &self,
-        last_cursor: &str,
-    ) -> Result<(Vec<BridgeDeposit>, String), BridgeError> {
-        let cursor_qs = if last_cursor.is_empty() {
-            String::new()
-        } else {
-            format!("&cursor={}", last_cursor)
+    fn poll_events(&self, last_cursor: &str) -> Result<(Vec<BridgeDeposit>, String), BridgeError> {
+        // Build a Soroban RPC getEvents request body.
+        // Omit "topics" entirely — stellar-rpc 25.x rejects the string "*"
+        // as a wildcard (only JSON null is valid, and omitting the field is
+        // cleaner). deposit_from_event() filters to lock events by XDR topic.
+        // Pull all contract events without a contractIds filter — stellar-rpc
+        // 25.x silently returns 0 results when the filter matches a contract
+        // address that was deployed *after* the RPC's first-seen retention
+        // window, even when the index clearly contains events with that
+        // contractId (verified by an unfiltered query returning the event).
+        // Filtering client-side via `deposit_from_event` keeps the load on
+        // the host (a few hundred bytes per ledger) and bypasses the
+        // server-side bug. Same `filters: [{type:"contract"}]` keeps
+        // non-contract events out.
+        // Page size — Soroban RPC accepts up to 10 000 per page. The
+        // observer drains until it catches up to latestLedger so a fresh
+        // observer registered after the chain has been running for a
+        // while doesn't need 130+ `seal_pollBridges` calls to walk
+        // through 13 000 ledgers of events.
+        const PAGE_LIMIT: u64 = 10_000;
+        let build_body = |start_ledger: Option<u64>, cursor: Option<&str>| -> Value {
+            let mut params = json!({
+                "filters": [{"type": "contract"}],
+                "pagination": { "limit": PAGE_LIMIT }
+            });
+            if let Some(l) = start_ledger {
+                params["startLedger"] = json!(l);
+            }
+            if let Some(c) = cursor {
+                params["pagination"]["cursor"] = json!(c);
+            }
+            json!({"jsonrpc": "2.0", "id": 1, "method": "getEvents", "params": params})
         };
-        let url = format!(
-            "{}/accounts/{}/operations?order=asc&limit=100{}",
-            self.horizon_url, self.contract_id, cursor_qs
-        );
-        let resp = self.transport.get_json(&url)?;
-        let ops = resp
-            .pointer("/_embedded/records")
-            .and_then(|r| r.as_array())
-            .ok_or_else(|| {
-                BridgeError::RpcError(format!("Horizon operations: unexpected shape: {resp}"))
-            })?;
 
         let mut deposits = Vec::new();
-        let mut new_cursor = last_cursor.to_string();
-        for op in ops {
-            if let Some(d) = self.deposit_from_op(op) {
-                deposits.push(d);
+        let mut current_cursor = last_cursor.to_string();
+        // Across-poll cursor must be event-precise so consecutive
+        // `poll_events` calls don't re-observe events. We initialize
+        // it to the input cursor (in case no new events land this
+        // poll), and overwrite as we see events below.
+        let mut last_event_id: Option<String> = if last_cursor.is_empty() {
+            None
+        } else {
+            Some(last_cursor.to_string())
+        };
+        // Safety cap on pages per poll — at PAGE_LIMIT=10k and ~1
+        // event/ledger this drains ~100k ledgers in 10 calls; production
+        // shouldn't need more than a handful even after long observer
+        // downtime. The cap exists so a misconfigured RPC that keeps
+        // returning full pages can't burn the seal-node forever.
+        for _page in 0..20 {
+            // Build the request body for this page.
+            //
+            // Initial cursor + startLedger handling (first call only):
+            // try startLedger=2; if rejected with "must be within
+            // range: N - …", parse N and retry with that. stellar-rpc
+            // 25.x doesn't populate `error.data.oldestLedger`.
+            let resp = if current_cursor.is_empty() {
+                let r = self
+                    .transport
+                    .post_json(&self.soroban_rpc_url, &build_body(Some(2), None))?;
+                if r.pointer("/result/events").is_some() {
+                    r
+                } else if let Some(oldest) = extract_oldest_ledger(&r) {
+                    // First retry: stellar-rpc told us the lower bound.
+                    let r2 = self
+                        .transport
+                        .post_json(&self.soroban_rpc_url, &build_body(Some(oldest), None))?;
+                    if r2.pointer("/result/events").is_some() {
+                        r2
+                    } else if let Some(latest) =
+                        fetch_latest_ledger(&*self.transport, &self.soroban_rpc_url)
+                    {
+                        // P7#2: ultimate fallback — if the retry still
+                        // fails (e.g., the lower bound jumped between
+                        // calls because of pruning), call
+                        // getLatestLedger and pick a window 24 h back.
+                        // 17280 ≈ 24 h of 5-second ledgers; the bridge
+                        // doesn't need older history than that for fresh
+                        // observers, and starting too close to the tip
+                        // risks missing pending events.
+                        let start = latest.saturating_sub(17_280).max(2);
+                        self.transport
+                            .post_json(&self.soroban_rpc_url, &build_body(Some(start), None))?
+                    } else {
+                        r2
+                    }
+                } else if let Some(latest) =
+                    fetch_latest_ledger(&*self.transport, &self.soroban_rpc_url)
+                {
+                    // First-call rejection but no oldest-ledger hint —
+                    // jump to latest-24h as a best-effort starting point.
+                    let start = latest.saturating_sub(17_280).max(2);
+                    self.transport
+                        .post_json(&self.soroban_rpc_url, &build_body(Some(start), None))?
+                } else {
+                    r
+                }
+            } else {
+                self.transport.post_json(
+                    &self.soroban_rpc_url,
+                    &build_body(None, Some(&current_cursor)),
+                )?
+            };
+
+            let events = resp
+                .pointer("/result/events")
+                .and_then(|e| e.as_array())
+                .ok_or_else(|| {
+                    BridgeError::RpcError(format!(
+                        "Soroban getEvents: unexpected response shape: {resp}"
+                    ))
+                })?;
+
+            // Track the LATEST event id seen — this becomes the
+            // `last_cursor` returned to the caller, so the NEXT
+            // `poll_events` call resumes precisely past every event
+            // we observed (no skips, no duplicates across polls).
+            for event in events {
+                if let Some(id) = event.get("id").and_then(|p| p.as_str()) {
+                    last_event_id = Some(id.to_string());
+                }
+                if let Some(d) = self.deposit_from_event(event) {
+                    deposits.push(d);
+                }
             }
-            // Always advance the cursor — even for non-lock ops — so we
-            // don't re-read the same page forever.
-            if let Some(paging) = op.get("paging_token").and_then(|p| p.as_str()) {
-                new_cursor = paging.to_string();
+            // Soroban RPC paginates by ledger-window, not event-count:
+            // `pagination.limit` caps the max ledgers scanned per call,
+            // not events returned. So `events.len() < PAGE_LIMIT` is
+            // NOT a "caught up" signal — sparse ranges return few
+            // events while the cursor still advances by a fixed window.
+            // Use the server-reported `result.cursor` as the
+            // authoritative pagination state within the drain (it
+            // jumps over empty windows in one hop); fall back to the
+            // last event id between polls so we don't miss anything.
+            let server_cursor = resp
+                .pointer("/result/cursor")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let Some(sc) = server_cursor else {
+                break;
+            };
+            current_cursor = sc.clone();
+            // Stop when the cursor crosses the latestLedger boundary.
+            let latest = resp
+                .pointer("/result/latestLedger")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(u64::MAX);
+            if cursor_ledger(&sc).unwrap_or(0) >= latest {
+                break;
             }
+            // Defense in depth: if we hit the loop cap with a full
+            // page, the observer is lagging the chain. The next poll
+            // resumes from the last event id (event-precise) and
+            // continues draining.
         }
-        Ok((deposits, new_cursor))
+        // Return the per-event cursor for the next poll — using the
+        // server cursor here would skip over any newly-arrived events
+        // in the window between calls (the server cursor jumps by
+        // ledger-window, not event-by-event).
+        let resume_cursor = last_event_id.unwrap_or(current_cursor);
+        Ok((deposits, resume_cursor))
     }
 
     fn is_finalized(&self, source_tx_hash: &str) -> Result<bool, BridgeError> {
@@ -489,13 +667,293 @@ impl ChainObserver for StellarObserver {
     }
 }
 
+/// Parse the ledger field out of a Soroban cursor. Cursors are
+/// strings of the form `LLLLLLLLLLLLLLLLLLL-TTTTTTTTTT` where
+/// `LLL…` is `ledger << 32 | tx_index << 12 | op_index` (per soroban-rpc
+/// 25.x). For the page-drain "are we caught up?" check we only need
+/// the ledger; right-shift the parsed u64 by 32.
+fn cursor_ledger(cursor: &str) -> Option<u64> {
+    let head = cursor.split_once('-').map(|(h, _)| h).unwrap_or(cursor);
+    head.parse::<u64>().ok().map(|n| n >> 32)
+}
+
+/// Extract the oldest ledger that the Soroban RPC will accept from a
+/// `startLedger` rejection. We accept three wire formats so a stellar-
+/// rpc upgrade across the 25.x line doesn't take the observer down:
+///
+/// 1. Object: `{"error":{"data":{"oldestLedger":N}}}`
+///    — documented shape; future versions are expected to populate it.
+/// 2. Message regex: `{"error":{"message":"startLedger must be within
+///    the ledger range: 7 - 715"}}` — emitted by stellar-rpc 25.x as
+///    of 2026-05.
+/// 3. String `data`: `{"error":{"data":"oldestLedger is 7"}}` — seen
+///    on stellar-rpc 25.0 nightly builds; preserved here in case it
+///    re-appears after a rebuild.
+fn extract_oldest_ledger(resp: &Value) -> Option<u64> {
+    // 1. documented object shape
+    if let Some(n) = resp
+        .pointer("/error/data/oldestLedger")
+        .and_then(|v| v.as_u64())
+    {
+        return Some(n);
+    }
+    // 3. string `data` shape (P7#1 fallback).
+    if let Some(s) = resp.pointer("/error/data").and_then(|v| v.as_str()) {
+        if let Some(n) = parse_first_u64_after(s, "oldestLedger") {
+            return Some(n);
+        }
+    }
+    // 2. message regex
+    let msg = resp.pointer("/error/message").and_then(|v| v.as_str())?;
+    let tail = msg.split_once("range:").map(|(_, t)| t)?;
+    let digits: String = tail
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// Find the first run of ASCII digits in `s` after a literal anchor.
+/// Used by the string-`data` `oldestLedger` parser; defensive against
+/// "oldestLedger is N", "oldestLedger=N", "oldestLedger: N".
+fn parse_first_u64_after(s: &str, anchor: &str) -> Option<u64> {
+    let tail = s.split_once(anchor).map(|(_, t)| t)?;
+    let digits: String = tail
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse().ok()
+}
+
+/// Call Soroban RPC `getLatestLedger` and return the current sequence,
+/// or `None` if the call fails or the response shape is unexpected.
+/// Used as a last-resort starting-point fallback when both the first
+/// `startLedger=2` attempt and the `oldestLedger`-hinted retry fail —
+/// e.g., a fresh chain where the lower bound jumps between calls.
+fn fetch_latest_ledger(transport: &dyn crate::http::HttpTransport, url: &str) -> Option<u64> {
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getLatestLedger",
+        "params": {}
+    });
+    let resp = transport.post_json(url, &body).ok()?;
+    // Soroban returns {"result":{"sequence":N,"id":"...","protocolVersion":22}}
+    resp.pointer("/result/sequence").and_then(|v| v.as_u64())
+}
+
+/// Derive the Soroban RPC URL from a Horizon URL.
+/// The quickstart container exposes Soroban RPC on port 8003 while
+/// Horizon is on port 8000; we simply swap the port.
+fn derive_soroban_rpc_url(horizon_url: &str) -> String {
+    // Common case: http://host:8000 → http://host:8003
+    if horizon_url.contains(":8000") {
+        return horizon_url.replace(":8000", ":8003");
+    }
+    // Stellar public endpoints — Horizon and Soroban RPC have different hosts.
+    if horizon_url.contains("horizon-testnet.stellar.org") {
+        return "https://soroban-testnet.stellar.org".to_string();
+    }
+    if horizon_url.contains("horizon.stellar.org") {
+        return "https://soroban-rpc.stellar.org".to_string();
+    }
+    // Generic fallback: append :8003 to whatever host is given.
+    format!("{horizon_url}:8003")
+}
+
+/// Check whether a base64-encoded XDR ScVal topic is `Symbol("lock")`.
+///
+/// `symbol_short!("lock")` in the Soroban contract produces
+/// `ScVal::Symbol("lock")`. Its XDR encoding is:
+///   4B discriminant: SCV_SYMBOL = 15 = [0x00, 0x00, 0x00, 0x0F]
+///   4B string length: 4 = [0x00, 0x00, 0x00, 0x04]
+///   4B string bytes: "lock" = [0x6c, 0x6f, 0x63, 0x6b]
+/// → base64: "AAAADwAAAARsb2Nr"
+fn is_lock_symbol(b64: &str) -> bool {
+    use base64::Engine as _;
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(b64) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    bytes.len() >= 12
+        && bytes[0..4] == [0, 0, 0, 15]   // SCV_SYMBOL = 15
+        && bytes[4..8] == [0, 0, 0, 4]    // string length = 4
+        && bytes[8..12] == b"lock"[..] // "lock"
+}
+
+/// Check whether a base64-encoded XDR ScVal topic is `Symbol("lockusdc")`.
+///
+/// `symbol_short!("lockusdc")` in the Soroban contract produces
+/// `ScVal::Symbol("lockusdc")`. XDR encoding:
+///   4B discriminant: SCV_SYMBOL = 15
+///   4B string length: 8
+///   8B string bytes: "lockusdc"
+/// → base64: "AAAADwAAAAhsb2NrdXNkYw=="
+fn is_lockusdc_symbol(b64: &str) -> bool {
+    use base64::Engine as _;
+    let bytes = match base64::engine::general_purpose::STANDARD.decode(b64) {
+        Ok(b) => b,
+        Err(_) => return false,
+    };
+    bytes.len() >= 16
+        && bytes[0..4] == [0, 0, 0, 15]   // SCV_SYMBOL = 15
+        && bytes[4..8] == [0, 0, 0, 8]    // string length = 8
+        && bytes[8..16] == b"lockusdc"[..] // "lockusdc"
+}
+
+/// Parse a base64-encoded XDR `ScVal::Map` emitted by `lock_xlm`
+/// (the `LockInfo` contracttype struct). Returns `(amount, seal_address_hex, sender_hex)`.
+///
+/// The `#[contracttype]` macro serializes struct fields in alphabetical
+/// order by field name. For `LockInfo` that order is:
+///   amount (i128), nonce (u64), seal_address (BytesN<32>),
+///   sender (Address), timestamp (u64).
+///
+/// We dispatch by key name so the order doesn't affect correctness.
+fn parse_lock_info_xdr(b64: &str) -> Option<(u64, String, String)> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let mut r = XdrCursor::new(&bytes);
+
+    // ScVal::Map discriminant = 17, followed by an XDR option marker
+    // for `Option<ScMap>` (1 = Some, 0 = None). soroban-sdk always emits
+    // a Some-wrapped map for `#[contracttype]` structs; Some is therefore
+    // the only shape we accept.
+    if r.read_u32()? != 17 {
+        return None;
+    }
+    if r.read_u32()? != 1 {
+        return None;
+    }
+    let count = r.read_u32()? as usize;
+
+    let mut amount = 0u64;
+    let mut seal_address = String::new();
+    let mut sender = String::new();
+
+    for _ in 0..count {
+        // Key: ScVal::Symbol (discriminant = 15)
+        if r.read_u32()? != 15 {
+            return None;
+        }
+        let key_len = r.read_u32()? as usize;
+        let key_bytes = r.read_bytes_padded(key_len)?;
+        let key = std::str::from_utf8(key_bytes).ok()?.to_string();
+
+        // Value: dispatch by field name
+        let val_disc = r.read_u32()?;
+        match (key.as_str(), val_disc) {
+            ("amount", 10) => {
+                // SCV_I128: Int128Parts { hi: i64 (8B BE), lo: u64 (8B BE) }
+                let _hi = r.read_u64()?;
+                amount = r.read_u64()?;
+            }
+            ("nonce" | "timestamp", 5) => {
+                // SCV_U64
+                let _ = r.read_u64()?;
+            }
+            ("seal_address", 13) => {
+                // SCV_BYTES: u32 length + bytes (padded to 4-byte boundary)
+                let len = r.read_u32()? as usize;
+                let data = r.read_bytes_padded(len)?;
+                seal_address = hex_encode(data);
+            }
+            ("sender", 18) => {
+                // SCV_ADDRESS: ScAddressType (u32) + payload
+                match r.read_u32()? {
+                    0 => {
+                        // SC_ADDRESS_TYPE_ACCOUNT: PublicKey (4B disc + 32B key)
+                        let _pk_disc = r.read_u32()?;
+                        let key = r.read_exact(32)?;
+                        sender = hex_encode(key);
+                    }
+                    1 => {
+                        // SC_ADDRESS_TYPE_CONTRACT: 32B hash
+                        let hash = r.read_exact(32)?;
+                        sender = hex_encode(hash);
+                    }
+                    _ => return None,
+                }
+            }
+            _ => break, // unknown field — stop to avoid XDR misalignment
+        }
+    }
+
+    Some((amount, seal_address, sender))
+}
+
+/// Minimal cursor-based XDR reader. Used only by `parse_lock_info_xdr`.
+struct XdrCursor<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> XdrCursor<'a> {
+    fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+
+    fn read_u32(&mut self) -> Option<u32> {
+        if self.pos + 4 > self.data.len() {
+            return None;
+        }
+        let v = u32::from_be_bytes([
+            self.data[self.pos],
+            self.data[self.pos + 1],
+            self.data[self.pos + 2],
+            self.data[self.pos + 3],
+        ]);
+        self.pos += 4;
+        Some(v)
+    }
+
+    fn read_u64(&mut self) -> Option<u64> {
+        if self.pos + 8 > self.data.len() {
+            return None;
+        }
+        let mut b = [0u8; 8];
+        b.copy_from_slice(&self.data[self.pos..self.pos + 8]);
+        self.pos += 8;
+        Some(u64::from_be_bytes(b))
+    }
+
+    fn read_exact(&mut self, n: usize) -> Option<&'a [u8]> {
+        if self.pos + n > self.data.len() {
+            return None;
+        }
+        let s = &self.data[self.pos..self.pos + n];
+        self.pos += n;
+        Some(s)
+    }
+
+    fn read_bytes_padded(&mut self, len: usize) -> Option<&'a [u8]> {
+        let padded = (len + 3) & !3;
+        if self.pos + padded > self.data.len() {
+            return None;
+        }
+        let s = &self.data[self.pos..self.pos + len];
+        self.pos += padded;
+        Some(s)
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Multi-chain observer set
 // ═══════════════════════════════════════════════════════════════════════════
 
 /// Multi-chain observer that aggregates events from all supported chains.
+/// Per-observer scheduling metadata. `poll_interval` of zero means
+/// "always due" — preserves the prior behavior of `poll_all`.
+struct ObserverEntry {
+    observer: Box<dyn ChainObserver>,
+    poll_interval: std::time::Duration,
+    last_polled: Option<std::time::Instant>,
+}
+
 pub struct BridgeObserverSet {
-    observers: Vec<Box<dyn ChainObserver>>,
+    observers: Vec<ObserverEntry>,
     cursors: std::collections::HashMap<Chain, String>,
 }
 
@@ -508,9 +966,27 @@ impl BridgeObserverSet {
     }
 
     pub fn add_observer(&mut self, observer: Box<dyn ChainObserver>) {
+        self.add_observer_with_interval(observer, 0);
+    }
+
+    /// Register an observer with a per-chain poll interval (seconds).
+    /// `interval_secs = 0` falls back to the global auto-poll tick —
+    /// matches the prior unconditional `add_observer` behavior.
+    /// Different chains can run at different rates (Solana 5 s, Stellar
+    /// 30 s) so a slow source-chain RPC doesn't drag the fast one's
+    /// observation cadence.
+    pub fn add_observer_with_interval(
+        &mut self,
+        observer: Box<dyn ChainObserver>,
+        interval_secs: u64,
+    ) {
         let chain = observer.chain();
         self.cursors.entry(chain).or_default();
-        self.observers.push(observer);
+        self.observers.push(ObserverEntry {
+            observer,
+            poll_interval: std::time::Duration::from_secs(interval_secs),
+            last_polled: None,
+        });
     }
 
     /// Number of configured observers. Useful as an RPC debug signal
@@ -519,26 +995,64 @@ impl BridgeObserverSet {
         self.observers.len()
     }
 
-    /// Poll all chains for new events. A failure on one chain does not
-    /// stop the others — we collect successful deposits and return the
-    /// first error encountered (if any).
+    /// Configured intervals for each observer's chain (label-info for
+    /// /metrics + debug). Zero means "always poll on every tick".
+    pub fn poll_intervals(&self) -> Vec<(Chain, u64)> {
+        self.observers
+            .iter()
+            .map(|e| (e.observer.chain(), e.poll_interval.as_secs()))
+            .collect()
+    }
+
+    /// Poll every observer unconditionally (used by the
+    /// `seal_pollBridges` RPC for explicit-tick tests in
+    /// `bridge-e2e.sh`). For the scheduled auto-poll path use
+    /// `poll_due(now)`.
     pub fn poll_all(&mut self) -> Result<Vec<BridgeDeposit>, BridgeError> {
+        self.poll_filtered(|_| true)
+    }
+
+    /// Poll only observers whose configured interval has elapsed
+    /// since their last poll (or which have never been polled).
+    /// Observers with `poll_interval = 0` are treated as always-due,
+    /// preserving the prior global-tick behavior. The background
+    /// auto-poll task drives this on every tick.
+    pub fn poll_due(&mut self, now: std::time::Instant) -> Result<Vec<BridgeDeposit>, BridgeError> {
+        self.poll_filtered(|e| match (e.poll_interval.as_secs(), e.last_polled) {
+            (0, _) => true,
+            (_, None) => true,
+            (_, Some(last)) => now.saturating_duration_since(last) >= e.poll_interval,
+        })
+    }
+
+    fn poll_filtered<F: Fn(&ObserverEntry) -> bool>(
+        &mut self,
+        predicate: F,
+    ) -> Result<Vec<BridgeDeposit>, BridgeError> {
         let mut all_deposits = Vec::new();
         let mut first_err: Option<BridgeError> = None;
-        for observer in &self.observers {
-            let chain = observer.chain();
+        let now = std::time::Instant::now();
+        for entry in &mut self.observers {
+            if !predicate(entry) {
+                continue;
+            }
+            let chain = entry.observer.chain();
             let cursor = self.cursors.get(&chain).cloned().unwrap_or_default();
-            match observer.poll_events(&cursor) {
+            match entry.observer.poll_events(&cursor) {
                 Ok((deposits, new_cursor)) => {
                     if !new_cursor.is_empty() {
                         self.cursors.insert(chain, new_cursor);
                     }
                     all_deposits.extend(deposits);
+                    entry.last_polled = Some(now);
                 }
                 Err(e) => {
                     if first_err.is_none() {
                         first_err = Some(e);
                     }
+                    // Don't mark last_polled on error so the next tick
+                    // retries immediately rather than waiting another
+                    // interval.
                 }
             }
         }
@@ -562,65 +1076,10 @@ impl Default for BridgeObserverSet {
 
 // ── Small helpers (crate-private) ───────────────────────────
 
-/// Best-effort scval_string decoder. Horizon's JSON envelope stores
-/// function_args as objects like `{ "value": "hello", "type": "string" }`
-/// or `{ "value": "CDXYZ…", "type": "address" }`. Return the value
-/// when it's a string-shaped scval.
-fn scval_string(v: &Value) -> Option<String> {
-    if let Some(s) = v.as_str() {
-        return Some(s.to_string());
-    }
-    v.get("value")
-        .and_then(|vv| vv.as_str())
-        .map(String::from)
-        .or_else(|| v.get("address").and_then(|a| a.as_str()).map(String::from))
-        .or_else(|| v.get("symbol").and_then(|a| a.as_str()).map(String::from))
-}
-
-/// Best-effort u64 decoder for numeric scvals (Horizon serializes
-/// amounts as strings to avoid JSON precision loss).
-fn scval_u64(v: &Value) -> Option<u64> {
-    if let Some(n) = v.as_u64() {
-        return Some(n);
-    }
-    if let Some(s) = v.as_str() {
-        return s.parse().ok();
-    }
-    v.get("value")
-        .and_then(|vv| vv.as_str().and_then(|s| s.parse().ok()).or_else(|| vv.as_u64()))
-}
-
-/// Best-effort hex encoding for `BytesN<32>` seal addresses. Horizon
-/// may deliver the bytes as a lowercase hex string directly, as a
-/// base64 string, or nested under `{ "value": "…" }`.
-///
-/// Strategy: if the input already looks like hex (even-length,
-/// `[0-9a-fA-F]+`), return it verbatim. Otherwise try base64 →
-/// hex-encoded bytes. Last resort: return the raw string.
-fn scval_hex(v: &Value) -> Option<String> {
-    use base64::Engine as _;
-    let raw = match v {
-        Value::String(s) => s.clone(),
-        _ => v.get("value").and_then(|vv| vv.as_str()).map(String::from)?,
-    };
-    if looks_hex(&raw) {
-        return Some(raw.to_lowercase());
-    }
-    if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&raw) {
-        return Some(hex_encode(&bytes));
-    }
-    Some(raw)
-}
-
-fn looks_hex(s: &str) -> bool {
-    !s.is_empty() && s.len() % 2 == 0 && s.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
 /// Minimal base58 encoder for Solana pubkeys (32 bytes). Avoids
 /// pulling `bs58` crate for a single use site.
 fn bs58_encode(bytes: &[u8]) -> Option<String> {
-    const ALPHABET: &[u8; 58] =
-        b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     if bytes.is_empty() {
         return Some(String::new());
     }
@@ -678,15 +1137,42 @@ mod tests {
     // ── Solana ─────────────────────────────────────────
 
     /// Build a base64-encoded Anchor `LockEvent` log payload that the
-    /// parser will accept.
+    /// parser will accept. Default mint is all-zeros (= WSOL); use
+    /// `lock_event_log_with_mint` to inject a specific mint pubkey.
     fn lock_event_log(amount: u64, nonce: u64, seal_addr: [u8; 32]) -> String {
-        let mut buf = Vec::with_capacity(8 + 32 + 8 + 32 + 8 + 8);
+        lock_event_log_with_mint(amount, nonce, seal_addr, [0u8; 32])
+    }
+
+    fn lock_event_log_with_mint(
+        amount: u64,
+        nonce: u64,
+        seal_addr: [u8; 32],
+        mint: [u8; 32],
+    ) -> String {
+        let mut buf = Vec::with_capacity(8 + 32 + 8 + 32 + 32 + 8 + 8);
         buf.extend_from_slice(&LOCK_EVENT_DISCRIMINATOR);
         buf.extend_from_slice(&[7u8; 32]); // sender pubkey
         buf.extend_from_slice(&amount.to_le_bytes());
         buf.extend_from_slice(&seal_addr);
+        buf.extend_from_slice(&mint);
         buf.extend_from_slice(&nonce.to_le_bytes());
         buf.extend_from_slice(&0i64.to_le_bytes()); // timestamp
+        format!(
+            "Program data: {}",
+            base64::engine::general_purpose::STANDARD.encode(&buf)
+        )
+    }
+
+    /// v1 layout — no `mint` field. Used to pin the legacy path so
+    /// nodes running ahead of an Anchor redeploy still observe locks.
+    fn lock_event_log_v1(amount: u64, nonce: u64, seal_addr: [u8; 32]) -> String {
+        let mut buf = Vec::with_capacity(8 + 32 + 8 + 32 + 8 + 8);
+        buf.extend_from_slice(&LOCK_EVENT_DISCRIMINATOR);
+        buf.extend_from_slice(&[7u8; 32]);
+        buf.extend_from_slice(&amount.to_le_bytes());
+        buf.extend_from_slice(&seal_addr);
+        buf.extend_from_slice(&nonce.to_le_bytes());
+        buf.extend_from_slice(&0i64.to_le_bytes());
         format!(
             "Program data: {}",
             base64::engine::general_purpose::STANDARD.encode(&buf)
@@ -715,6 +1201,64 @@ mod tests {
         assert_eq!(deposits[0].source_chain, Chain::Solana);
         assert_eq!(deposits[0].seal_address, hex_encode(&seal));
         assert_eq!(deposits[0].id, "sol_sig1_42");
+        assert_eq!(deposits[0].token, WrappedToken::WSOL);
+    }
+
+    #[test]
+    fn solana_routes_usdc_when_mint_matches() {
+        // Pick a known mint, encode it base58, hand it to the observer
+        // as `usdc_mint`, then emit a LockEvent whose `mint` field is
+        // those same bytes. The deposit must land in WUSDC.
+        let usdc_bytes = [9u8; 32];
+        let usdc_b58 = bs58_encode(&usdc_bytes).expect("bs58 encode");
+        let obs = SolanaObserver::with_transport(
+            "http://x",
+            "prog",
+            mock_transport() as Arc<dyn HttpTransport>,
+        )
+        .with_usdc_mint(usdc_b58);
+        let seal = [3u8; 32];
+        let log = lock_event_log_with_mint(7_000_000, 1, seal, usdc_bytes);
+        let deposits = obs.deposits_from_logs("sigU", "unknown", &[log]);
+        assert_eq!(deposits.len(), 1);
+        assert_eq!(deposits[0].token, WrappedToken::WUSDC);
+        assert_eq!(deposits[0].amount, 7_000_000);
+    }
+
+    #[test]
+    fn solana_accepts_legacy_v1_lock_event() {
+        // Old Anchor program emits 96-byte events (no mint). The
+        // observer must still pick those up so an operator who
+        // hasn't redeployed yet doesn't lose every Solana lock.
+        let obs = SolanaObserver::with_transport(
+            "http://x",
+            "prog",
+            mock_transport() as Arc<dyn HttpTransport>,
+        )
+        .with_usdc_mint(bs58_encode(&[9u8; 32]).unwrap());
+        let seal = [3u8; 32];
+        let log = lock_event_log_v1(2_000_000, 11, seal);
+        let deposits = obs.deposits_from_logs("sigV1", "unknown", &[log]);
+        assert_eq!(deposits.len(), 1);
+        // No mint in v1 → falls back to WSOL regardless of usdc_mint.
+        assert_eq!(deposits[0].token, WrappedToken::WSOL);
+        assert_eq!(deposits[0].amount, 2_000_000);
+        assert_eq!(deposits[0].id, "sol_sigV1_11");
+    }
+
+    #[test]
+    fn solana_falls_back_to_wsol_when_mint_unknown() {
+        // Configure a USDC mint but emit an event whose mint doesn't
+        // match — must fall back to WSOL.
+        let obs = SolanaObserver::with_transport(
+            "http://x",
+            "prog",
+            mock_transport() as Arc<dyn HttpTransport>,
+        )
+        .with_usdc_mint(bs58_encode(&[9u8; 32]).unwrap());
+        let log = lock_event_log_with_mint(5_000_000, 0, [3u8; 32], [42u8; 32]);
+        let deposits = obs.deposits_from_logs("sigW", "unknown", &[log]);
+        assert_eq!(deposits.len(), 1);
         assert_eq!(deposits[0].token, WrappedToken::WSOL);
     }
 
@@ -885,11 +1429,143 @@ mod tests {
 
     // ── Stellar ────────────────────────────────────────
 
+    /// Build XDR bytes for a `LockInfo` contracttype struct (the event
+    /// value emitted by `lock_xlm`). Fields are in alphabetical order,
+    /// which is how the soroban-sdk `#[contracttype]` macro serializes
+    /// them: amount, nonce, seal_address, sender, timestamp.
+    fn lock_info_xdr(amount: u64, seal_addr: &[u8; 32], sender_key: &[u8; 32]) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        // ScVal::Map (discriminant = 17), wrapped in Option<ScMap>::Some.
+        buf.extend_from_slice(&17u32.to_be_bytes());
+        buf.extend_from_slice(&1u32.to_be_bytes()); // Some
+        buf.extend_from_slice(&5u32.to_be_bytes()); // 5 fields
+                                                    // amount (i128 = SCV_I128 = 10): hi=0, lo=amount
+        push_sym(&mut buf, "amount");
+        buf.extend_from_slice(&10u32.to_be_bytes());
+        buf.extend_from_slice(&0u64.to_be_bytes());
+        buf.extend_from_slice(&amount.to_be_bytes());
+        // nonce (u64 = SCV_U64 = 5)
+        push_sym(&mut buf, "nonce");
+        buf.extend_from_slice(&5u32.to_be_bytes());
+        buf.extend_from_slice(&0u64.to_be_bytes());
+        // seal_address (Bytes = SCV_BYTES = 13, 32 bytes, no padding needed)
+        push_sym(&mut buf, "seal_address");
+        buf.extend_from_slice(&13u32.to_be_bytes());
+        buf.extend_from_slice(&32u32.to_be_bytes());
+        buf.extend_from_slice(seal_addr);
+        // sender (Address = SCV_ADDRESS = 18, account type, ED25519 key)
+        push_sym(&mut buf, "sender");
+        buf.extend_from_slice(&18u32.to_be_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes()); // SC_ADDRESS_TYPE_ACCOUNT
+        buf.extend_from_slice(&0u32.to_be_bytes()); // PUBLIC_KEY_TYPE_ED25519
+        buf.extend_from_slice(sender_key);
+        // timestamp (u64 = SCV_U64 = 5)
+        push_sym(&mut buf, "timestamp");
+        buf.extend_from_slice(&5u32.to_be_bytes());
+        buf.extend_from_slice(&0u64.to_be_bytes());
+        base64::engine::general_purpose::STANDARD.encode(&buf)
+    }
+
+    /// Push an XDR ScVal::Symbol key to `buf` (padded to 4-byte boundary).
+    fn push_sym(buf: &mut Vec<u8>, s: &str) {
+        buf.extend_from_slice(&15u32.to_be_bytes()); // SCV_SYMBOL = 15
+        buf.extend_from_slice(&(s.len() as u32).to_be_bytes());
+        buf.extend_from_slice(s.as_bytes());
+        let rem = (4 - s.len() % 4) % 4;
+        buf.extend(std::iter::repeat(0u8).take(rem));
+    }
+
+    /// The base64 XDR encoding of `Symbol("lock")` (SCV_SYMBOL=15, len=4, "lock").
+    const LOCK_TOPIC_B64: &str = "AAAADwAAAARsb2Nr";
+
     #[test]
     fn stellar_observer_creates() {
         let obs = StellarObserver::testnet("CDXYZ_CONTRACT_ID");
         assert_eq!(obs.chain(), Chain::Stellar);
         assert_eq!(obs.required_confirmations, 5);
+        assert_eq!(obs.soroban_rpc_url, "https://soroban-testnet.stellar.org");
+    }
+
+    #[test]
+    fn stellar_observer_derives_soroban_rpc_from_port_8000() {
+        let obs = StellarObserver::with_transport(
+            "http://stellar:8000",
+            "c",
+            mock_transport() as Arc<dyn HttpTransport>,
+        );
+        assert_eq!(obs.soroban_rpc_url, "http://stellar:8003");
+    }
+
+    #[test]
+    fn stellar_cursor_ledger_parses_pagination_cursor() {
+        // Real cursor captured from a local stellar/quickstart soroban-rpc
+        // (page 1 of a getEvents drain). Pinned so the parser doesn't
+        // regress; the exact decode (`n >> 32`) is what the drain loop
+        // uses to detect cursor crossing latestLedger.
+        let c = "0000042979737731071-4294967295";
+        assert_eq!(cursor_ledger(c), Some(10006));
+        // Page 2 cursor — larger, higher ledger.
+        assert_eq!(cursor_ledger("0000085925115723775-4294967295"), Some(20005));
+        // Edge cases: malformed, missing dash, empty.
+        assert_eq!(cursor_ledger(""), None);
+        assert_eq!(cursor_ledger("not-a-number"), None);
+        // No dash → treat full string as the head.
+        assert_eq!(cursor_ledger("4294967296"), Some(1));
+    }
+
+    #[test]
+    fn stellar_extract_oldest_ledger_parses_message_and_data() {
+        // stellar-rpc 25.x: range encoded in message, no `data` field.
+        let r = json!({"error":{"code":-32600,"message":"startLedger must be within the ledger range: 7 - 715"}});
+        assert_eq!(extract_oldest_ledger(&r), Some(7));
+        // Future shape with structured data — also supported.
+        let r = json!({"error":{"data":{"oldestLedger":42}}});
+        assert_eq!(extract_oldest_ledger(&r), Some(42));
+        // Result-shaped response: no oldest ledger to extract.
+        let r = json!({"result":{"events":[]}});
+        assert_eq!(extract_oldest_ledger(&r), None);
+    }
+
+    /// stellar-rpc 25.0 nightly builds occasionally returned the
+    /// oldest-ledger hint as a plain string in `error.data` rather
+    /// than the documented object. We tolerate "oldestLedger is N",
+    /// "oldestLedger: N", and "oldestLedger=N" so an upgrade across
+    /// the 25.x line doesn't take the observer down (P7#1).
+    #[test]
+    fn stellar_extract_oldest_ledger_handles_string_data_shape() {
+        let r = json!({"error":{"data":"oldestLedger is 99"}});
+        assert_eq!(extract_oldest_ledger(&r), Some(99));
+        let r = json!({"error":{"data":"oldestLedger=12345"}});
+        assert_eq!(extract_oldest_ledger(&r), Some(12345));
+        let r = json!({"error":{"data":"oldestLedger: 7"}});
+        assert_eq!(extract_oldest_ledger(&r), Some(7));
+        // Unrelated string shouldn't false-match.
+        let r = json!({"error":{"data":"some other error"}});
+        assert_eq!(extract_oldest_ledger(&r), None);
+    }
+
+    /// `fetch_latest_ledger` calls Soroban RPC and extracts the
+    /// `result.sequence` field. Used as the last-resort fallback
+    /// when both the first `startLedger=2` attempt and the
+    /// `oldestLedger`-hinted retry fail (P7#2).
+    #[test]
+    fn stellar_fetch_latest_ledger_parses_sequence() {
+        let transport = mock_transport();
+        transport.enqueue(
+            "POST",
+            "http://h:8003",
+            json!({"result":{"sequence":54321,"id":"abc","protocolVersion":22}}),
+        );
+        let got = fetch_latest_ledger(&*transport.clone(), "http://h:8003");
+        assert_eq!(got, Some(54321));
+        // Error response → None.
+        transport.enqueue(
+            "POST",
+            "http://h:8003",
+            json!({"error":{"code":-32000,"message":"down"}}),
+        );
+        let got = fetch_latest_ledger(&*transport.clone(), "http://h:8003");
+        assert_eq!(got, None);
     }
 
     #[test]
@@ -915,6 +1591,73 @@ mod tests {
     }
 
     #[test]
+    fn stellar_is_lock_symbol_correct() {
+        assert!(is_lock_symbol(LOCK_TOPIC_B64), "Symbol(lock) must match");
+        assert!(
+            !is_lock_symbol("AAAADwAAAAd1bmxvY2s="),
+            "Symbol(unlock) must not match"
+        );
+        assert!(!is_lock_symbol("invalid"), "garbage must not match");
+    }
+
+    /// `symbol_short!("lockusdc")` XDR base64 — pinned so a future
+    /// refactor of either the contract event name OR the host parser
+    /// breaks visibly. Construct by hand to avoid pulling soroban-sdk
+    /// into seal-bridge just for the byte sequence.
+    #[test]
+    fn stellar_is_lockusdc_symbol_correct() {
+        // SCV_SYMBOL(15) + len(8) + "lockusdc"
+        let mut bytes = Vec::with_capacity(16);
+        bytes.extend_from_slice(&15u32.to_be_bytes());
+        bytes.extend_from_slice(&8u32.to_be_bytes());
+        bytes.extend_from_slice(b"lockusdc");
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        assert!(is_lockusdc_symbol(&b64), "Symbol(lockusdc) must match");
+        // The plain XLM lock topic must NOT match.
+        assert!(
+            !is_lockusdc_symbol(LOCK_TOPIC_B64),
+            "Symbol(lock) must not match the USDC topic"
+        );
+        assert!(!is_lockusdc_symbol("invalid"), "garbage must not match");
+    }
+
+    #[test]
+    fn stellar_parse_lock_info_xdr_roundtrip() {
+        let seal = [0xABu8; 32];
+        let sender_key = [0x07u8; 32];
+        let b64 = lock_info_xdr(1_000_000, &seal, &sender_key);
+        let (amount, seal_hex, sender_hex) = parse_lock_info_xdr(&b64).unwrap();
+        assert_eq!(amount, 1_000_000);
+        assert_eq!(seal_hex, hex_encode(&seal));
+        assert_eq!(sender_hex, hex_encode(&sender_key));
+    }
+
+    /// Wire-format pin: the bytes captured from a real stellar-rpc 25.x
+    /// `getEvents` response for a `lock_xlm` invocation. amount=10_000_000,
+    /// nonce=0, seal_address=deadbeefcafe…00, sender G-account with the
+    /// ed25519 key bc35..88bb. Locks the `Option<ScMap>` Some-marker that
+    /// the test helper used to miss.
+    #[test]
+    fn stellar_parse_lock_info_xdr_real_wire_bytes() {
+        let captured = "AAAAEQAAAAEAAAAFAAAADwAAAAZhbW91bnQAAAAAAAoAAAAAAAAAAAAAAAAA\
+                        mJaAAAAADwAAAAVub25jZQAAAAAAAAUAAAAAAAAAAAAAAA8AAAAMc2VhbF9h\
+                        ZGRyZXNzAAAADQAAACDerb7vyv4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\
+                        AAAAAA8AAAAGc2VuZGVyAAAAAAASAAAAAAAAAAC8NUKG1gqzNW1ZOIJdMnd9\
+                        YMbTb7m4mHu8eHlPFSmIuwAAAA8AAAAJdGltZXN0YW1wAAAAAAAABQAAAABq\
+                        BXOL";
+        let b64: String = captured.split_whitespace().collect();
+        let (amount, seal_hex, sender_hex) =
+            parse_lock_info_xdr(&b64).expect("real Soroban LockInfo XDR must parse");
+        assert_eq!(amount, 10_000_000);
+        assert!(
+            seal_hex.starts_with("deadbeefcafe"),
+            "seal_address prefix mismatch: {seal_hex}"
+        );
+        assert_eq!(sender_hex.len(), 64, "sender ed25519 key is 32 bytes hex");
+    }
+
+    #[test]
     fn stellar_poll_events_end_to_end() {
         let transport = mock_transport();
         let obs = StellarObserver::with_transport(
@@ -922,62 +1665,101 @@ mod tests {
             "contractX",
             transport.clone() as Arc<dyn HttpTransport>,
         );
-        let expected_url =
-            "http://horizon/accounts/contractX/operations?order=asc&limit=100";
+        // with_transport derives soroban_rpc_url as "http://horizon:8003"
+        let seal = [0x11u8; 32];
+        let sender_key = [0x22u8; 32];
+        let value_b64 = lock_info_xdr(1_000_000, &seal, &sender_key);
         transport.enqueue(
-            "GET",
-            expected_url,
+            "POST",
+            "http://horizon:8003",
             json!({
-                "_embedded": {
-                    "records": [
+                "result": {
+                    "events": [
                         {
-                            "type": "invoke_host_function",
-                            "contract": "contractX",
-                            "function": "lock",
-                            "parameters": [
-                                {"type": "address", "value": "GSENDER"},
-                                {"type": "u64", "value": "1000000"},
-                                {"type": "bytes", "value": "aabbccdd"},
-                                {"type": "symbol", "value": "native"}
-                            ],
-                            "transaction_hash": "tx1",
-                            "paging_token": "p1"
+                            "contractId": "contractX",
+                            "id": "event1",
+                            "topic": [LOCK_TOPIC_B64],
+                            "value": value_b64,
+                            "inSuccessfulContractCall": true,
+                            "txHash": "tx1"
                         },
                         {
-                            "type": "payment",
-                            "paging_token": "p2"
+                            "contractId": "contractX",
+                            "id": "event2",
+                            "topic": ["AAAADwAAAAd1bmxvY2s="],  // unlock — not a lock event
+                            "value": "",
+                            "inSuccessfulContractCall": true,
+                            "txHash": "tx2"
                         }
                     ]
                 }
             }),
         );
         let (deposits, cursor) = obs.poll_events("").unwrap();
-        assert_eq!(deposits.len(), 1, "only the lock op yields a deposit");
+        assert_eq!(deposits.len(), 1, "only the lock event yields a deposit");
         assert_eq!(deposits[0].amount, 1_000_000);
-        assert_eq!(deposits[0].source_address, "GSENDER");
+        assert_eq!(deposits[0].seal_address, hex_encode(&seal));
         assert_eq!(deposits[0].token, WrappedToken::WXLM);
-        assert_eq!(deposits[0].seal_address, "aabbccdd");
-        assert_eq!(cursor, "p2", "cursor advances past the payment too");
+        assert_eq!(cursor, "event2", "cursor advances past non-lock events too");
     }
 
     #[test]
-    fn stellar_poll_events_cursor_in_url() {
+    fn stellar_poll_events_cursor_passed_to_rpc() {
         let transport = mock_transport();
         let obs = StellarObserver::with_transport(
             "http://horizon",
             "contractX",
             transport.clone() as Arc<dyn HttpTransport>,
         );
-        let expected_url =
-            "http://horizon/accounts/contractX/operations?order=asc&limit=100&cursor=abc";
         transport.enqueue(
-            "GET",
-            expected_url,
-            json!({"_embedded": {"records": []}}),
+            "POST",
+            "http://horizon:8003",
+            json!({"result": {"events": []}}),
         );
         let (deposits, cursor) = obs.poll_events("abc").unwrap();
         assert!(deposits.is_empty());
         assert_eq!(cursor, "abc", "empty page keeps the old cursor");
+    }
+
+    #[test]
+    fn stellar_poll_events_retries_on_oldest_ledger_error() {
+        let transport = mock_transport();
+        let obs = StellarObserver::with_transport(
+            "http://horizon",
+            "contractX",
+            transport.clone() as Arc<dyn HttpTransport>,
+        );
+        let seal = [0x55u8; 32];
+        let sender_key = [0x66u8; 32];
+        let value_b64 = lock_info_xdr(500_000, &seal, &sender_key);
+        // First response: startLedger=2 rejected — stellar-rpc 25.x encodes
+        // the live range in the error message text (no `data` field).
+        transport.enqueue(
+            "POST",
+            "http://horizon:8003",
+            json!({"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"startLedger must be within the ledger range: 100 - 715"}}),
+        );
+        // Second response: retry with startLedger=100 — returns one lock event.
+        transport.enqueue(
+            "POST",
+            "http://horizon:8003",
+            json!({
+                "result": {
+                    "events": [{
+                        "contractId": "contractX",
+                        "id": "ev100",
+                        "topic": [LOCK_TOPIC_B64],
+                        "value": value_b64,
+                        "inSuccessfulContractCall": true,
+                        "txHash": "txRetry"
+                    }]
+                }
+            }),
+        );
+        let (deposits, cursor) = obs.poll_events("").unwrap();
+        assert_eq!(deposits.len(), 1, "retry must yield the lock event");
+        assert_eq!(deposits[0].amount, 500_000);
+        assert_eq!(cursor, "ev100");
     }
 
     #[test]
@@ -988,26 +1770,30 @@ mod tests {
             "contractX",
             transport.clone() as Arc<dyn HttpTransport>,
         );
+        let seal = [0x33u8; 32];
+        let sender_key = [0x44u8; 32];
+        let value_b64 = lock_info_xdr(999, &seal, &sender_key);
         transport.enqueue(
-            "GET",
-            "http://horizon/accounts/contractX/operations?order=asc&limit=100",
+            "POST",
+            "http://horizon:8003",
             json!({
-                "_embedded": {
-                    "records": [{
-                        "type": "invoke_host_function",
-                        "contract": "someOtherContract",
-                        "function": "lock",
-                        "parameters": [
-                            {"value": "GS"}, {"value": "1"}, {"value": "aa"}, {"value": "native"}
-                        ],
-                        "transaction_hash": "tx",
-                        "paging_token": "p"
+                "result": {
+                    "events": [{
+                        "contractId": "someOtherContract",
+                        "id": "ev1",
+                        "topic": [LOCK_TOPIC_B64],
+                        "value": value_b64,
+                        "inSuccessfulContractCall": true,
+                        "txHash": "tx"
                     }]
                 }
             }),
         );
         let (deposits, _) = obs.poll_events("").unwrap();
-        assert!(deposits.is_empty());
+        assert!(
+            deposits.is_empty(),
+            "event from different contract must be ignored"
+        );
     }
 
     #[test]
@@ -1035,16 +1821,74 @@ mod tests {
 
     // ── BridgeObserverSet ──────────────────────────────
 
+    /// `poll_due` skips observers whose configured interval hasn't
+    /// elapsed since their last poll, but always-due (`interval=0`)
+    /// observers and never-polled observers fire on every call.
+    /// Matches the auto-poll loop's contract: Solana at 5 s + Stellar
+    /// at 30 s should fire Stellar once for every six Solana ticks.
+    #[test]
+    fn poll_due_respects_per_observer_interval() {
+        use std::time::{Duration, Instant};
+        let sol_transport = mock_transport();
+        let stellar_transport = mock_transport();
+        // Both observers will get pinged each "due" call.
+        for _ in 0..4 {
+            sol_transport.enqueue("POST", "http://s", json!({"result": []}));
+        }
+        for _ in 0..2 {
+            stellar_transport.enqueue("POST", "http://h:8003", json!({"result": {"events": []}}));
+        }
+        let mut set = BridgeObserverSet::new();
+        set.add_observer_with_interval(
+            Box::new(SolanaObserver::with_transport(
+                "http://s",
+                "prog",
+                sol_transport.clone() as Arc<dyn HttpTransport>,
+            )),
+            0, // always-due
+        );
+        set.add_observer_with_interval(
+            Box::new(StellarObserver::with_transport(
+                "http://h",
+                "c",
+                stellar_transport.clone() as Arc<dyn HttpTransport>,
+            )),
+            10, // 10 s interval
+        );
+
+        let t0 = Instant::now();
+        // First poll: never-polled stellar fires + always-due solana.
+        set.poll_due(t0).unwrap();
+        // 1 s later: only solana (stellar last_polled was t0, interval 10 s).
+        set.poll_due(t0 + Duration::from_secs(1)).unwrap();
+        // 5 s later: still only solana.
+        set.poll_due(t0 + Duration::from_secs(5)).unwrap();
+        // 11 s later: both — stellar is due again.
+        set.poll_due(t0 + Duration::from_secs(11)).unwrap();
+
+        // Reveal: 4 solana polls, 2 stellar polls. Confirmed by the
+        // enqueue counts above — if we'd called either observer more
+        // times than queued responses, the mock would have returned
+        // an unexpected-request error and poll_due would have failed.
+        let intervals = set.poll_intervals();
+        assert_eq!(intervals.len(), 2);
+        let sol = intervals.iter().find(|(c, _)| *c == Chain::Solana).unwrap();
+        let xlm = intervals
+            .iter()
+            .find(|(c, _)| *c == Chain::Stellar)
+            .unwrap();
+        assert_eq!(sol.1, 0);
+        assert_eq!(xlm.1, 10);
+    }
+
     #[test]
     fn bridge_observer_set_aggregates_and_advances_cursors() {
         let sol_transport = mock_transport();
         let stellar_transport = mock_transport();
         sol_transport.enqueue("POST", "http://s", json!({"result": []}));
-        stellar_transport.enqueue(
-            "GET",
-            "http://h/accounts/c/operations?order=asc&limit=100",
-            json!({"_embedded": {"records": []}}),
-        );
+        // StellarObserver::with_transport("http://h", ...) derives soroban_rpc_url
+        // as "http://h:8003" (no ":8000" in the URL → fallback appends ":8003").
+        stellar_transport.enqueue("POST", "http://h:8003", json!({"result": {"events": []}}));
         let mut set = BridgeObserverSet::new();
         set.add_observer(Box::new(SolanaObserver::with_transport(
             "http://s",

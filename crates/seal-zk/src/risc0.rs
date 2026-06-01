@@ -63,8 +63,7 @@ mod guest_elf {
         static CELL: OnceLock<[u32; 8]> = OnceLock::new();
         *CELL.get_or_init(|| {
             let kernel_elf = risc0_zkos_v1compat::V1COMPAT_ELF;
-            let program_binary =
-                risc0_binfmt::ProgramBinary::new(SEAL_GUEST_ELF, kernel_elf);
+            let program_binary = risc0_binfmt::ProgramBinary::new(SEAL_GUEST_ELF, kernel_elf);
             let digest = program_binary
                 .compute_image_id()
                 .expect("ProgramBinary::compute_image_id");
@@ -79,7 +78,11 @@ mod guest_elf {
     ///   words[0..8]  = pre_state_root
     ///   words[8..10] = block_height (lo, hi)
     ///   words[10]    = tx_count
-    pub fn encode_guest_input(pre_state_root: &[u8; 32], block_height: u64, tx_count: u32) -> [u32; 11] {
+    pub fn encode_guest_input(
+        pre_state_root: &[u8; 32],
+        block_height: u64,
+        tx_count: u32,
+    ) -> [u32; 11] {
         let mut words = [0u32; 11];
         for i in 0..8 {
             words[i] = u32::from_le_bytes([
@@ -135,8 +138,7 @@ impl RiscZeroProver {
         let input = self.prepare_guest_input(&transition);
 
         // Run the guest program natively
-        let output = risc0_guest::simulate_guest(&input)
-            .map_err(|e| ZkError::ProvingFailed(e))?;
+        let output = risc0_guest::simulate_guest(&input).map_err(ZkError::ProvingFailed)?;
 
         // Serialize the output as the "proof"
         let output_bytes = bincode::serialize(&output)
@@ -195,10 +197,8 @@ impl ZkProver for RiscZeroProver {
                         .map_err(|e| ZkError::ProvingFailed(e.to_string()))?;
 
                     let kernel_elf = risc0_zkos_v1compat::V1COMPAT_ELF;
-                    let program_binary = risc0_binfmt::ProgramBinary::new(
-                        guest_elf::SEAL_GUEST_ELF,
-                        kernel_elf,
-                    );
+                    let program_binary =
+                        risc0_binfmt::ProgramBinary::new(guest_elf::SEAL_GUEST_ELF, kernel_elf);
                     let binary_blob = program_binary.encode();
 
                     // local-prover: run the real in-process LocalProver and
@@ -211,9 +211,8 @@ impl ZkProver for RiscZeroProver {
                             .prove(env, &binary_blob)
                             .map_err(|e| ZkError::ProvingFailed(e.to_string()))?;
                         let receipt = prove_info.receipt;
-                        let proof_bytes = bincode::serialize(&receipt).map_err(|e| {
-                            ZkError::ProvingFailed(format!("serialization: {}", e))
-                        })?;
+                        let proof_bytes = bincode::serialize(&receipt)
+                            .map_err(|e| ZkError::ProvingFailed(format!("serialization: {}", e)))?;
                         return Ok(ZkProof {
                             bytes: proof_bytes,
                             public_inputs: transition,
@@ -273,7 +272,10 @@ impl ZkVerifier for RiscZeroVerifier {
             //   "RZK1" | journal_len_le (u32) | journal (80 bytes fixed layout)
             if proof.bytes.len() >= 8 && &proof.bytes[..4] == b"RZK1" {
                 let len = u32::from_le_bytes([
-                    proof.bytes[4], proof.bytes[5], proof.bytes[6], proof.bytes[7],
+                    proof.bytes[4],
+                    proof.bytes[5],
+                    proof.bytes[6],
+                    proof.bytes[7],
                 ]) as usize;
                 if proof.bytes.len() != 8 + len || len != 80 {
                     return Err(ZkError::InvalidProofFormat);
@@ -288,15 +290,11 @@ impl ZkVerifier for RiscZeroVerifier {
                 if &journal[..32] != proof.public_inputs.pre_state_root.0.as_slice() {
                     return Err(ZkError::VerificationFailed);
                 }
-                let height = u64::from_le_bytes(
-                    journal[64..72].try_into().expect("8 bytes"),
-                );
+                let height = u64::from_le_bytes(journal[64..72].try_into().expect("8 bytes"));
                 if height != proof.public_inputs.block_height {
                     return Err(ZkError::VerificationFailed);
                 }
-                let tx_count = u32::from_le_bytes(
-                    journal[72..76].try_into().expect("4 bytes"),
-                );
+                let tx_count = u32::from_le_bytes(journal[72..76].try_into().expect("4 bytes"));
                 if tx_count != proof.public_inputs.tx_count {
                     return Err(ZkError::VerificationFailed);
                 }
@@ -424,13 +422,17 @@ mod tests {
 
         // Verify ProgramBinary wrapping works
         let kernel_elf = risc0_zkos_v1compat::V1COMPAT_ELF;
-        let program = risc0_binfmt::ProgramBinary::new(
-            guest_elf::SEAL_GUEST_ELF,
-            kernel_elf,
-        );
+        let program = risc0_binfmt::ProgramBinary::new(guest_elf::SEAL_GUEST_ELF, kernel_elf);
         let blob = program.encode();
-        assert!(blob.len() > guest_elf::SEAL_GUEST_ELF.len(), "ProgramBinary should be larger than raw ELF");
-        assert_eq!(&blob[..4], b"R0BF", "ProgramBinary should start with R0BF magic");
+        assert!(
+            blob.len() > guest_elf::SEAL_GUEST_ELF.len(),
+            "ProgramBinary should be larger than raw ELF"
+        );
+        assert_eq!(
+            &blob[..4],
+            b"R0BF",
+            "ProgramBinary should start with R0BF magic"
+        );
 
         println!(
             "Guest ELF: {} bytes, ProgramBinary: {} bytes, kernel: {} bytes",

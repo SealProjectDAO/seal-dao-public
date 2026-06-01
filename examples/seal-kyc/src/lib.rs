@@ -156,8 +156,7 @@ pub fn has_kyc(
     now_unix: u64,
 ) -> bool {
     attestations.iter().any(|(att, sig, vk)| {
-        att.tier >= requested_tier
-            && verify_attestation(att, sig, vk, now_unix).is_ok()
+        att.tier >= requested_tier && verify_attestation(att, sig, vk, now_unix).is_ok()
     })
 }
 
@@ -201,8 +200,7 @@ mod tests {
         let (sk, vk) = SigningKey::generate();
         let att = make_att("alice", tier::GOV_ID, 9_999_999_999);
         let sig_hex = issue(&att, &sk);
-        verify_attestation(&att, &sig_hex, &vk, 1_000_000)
-            .expect("honest attestation must verify");
+        verify_attestation(&att, &sig_hex, &vk, 1_000_000).expect("honest attestation must verify");
     }
 
     #[test]

@@ -1,5 +1,5 @@
 #![allow(unexpected_cfgs)] // `cfg(kani)` is fed by the Kani verifier; cargo
-                            // doesn't know about it. Match seal-bridge.
+// doesn't know about it. Match seal-bridge.
 //! Seal DAO node — integrates all crates into a working node.
 //!
 //! - PQC identity (ML-DSA keypair + address)
@@ -23,6 +23,7 @@ pub mod persistent;
 pub mod pq_rpc;
 pub mod private_tables;
 pub mod rpc;
+pub mod snapshot_bootstrap;
 pub mod state;
 pub mod tee;
 pub mod trace;

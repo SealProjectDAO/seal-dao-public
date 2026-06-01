@@ -78,7 +78,9 @@ footer { text-align: center; padding: 20px 0; color: var(--dim); font-size: 0.7r
         <span class="dim">Address:</span>
         <div class="address" id="walletAddress">—</div>
       </div>
+      <div id="qrHost" class="hidden" style="background:#fff;padding:10px;border-radius:8px;text-align:center;margin-bottom:10px"></div>
       <div class="row" style="gap:8px;flex-wrap:wrap">
+        <button class="btn-outline btn-sm" onclick="toggleQR()">Show QR</button>
         <button class="btn-outline btn-sm" onclick="showMnemonic()">Backup</button>
         <button class="btn-outline btn-sm" onclick="$('signSection').classList.toggle('hidden')">Sign</button>
         <button class="btn-outline btn-sm" onclick="lockWallet()" style="margin-left:auto;color:var(--red)">Lock</button>
@@ -118,6 +120,24 @@ footer { text-align: center; padding: 20px 0; color: var(--dim); font-size: 0.7r
       <span class="dim" style="margin-left:auto">State root:</span>
       <span id="stateRoot" class="mono" style="max-width:120px;overflow:hidden;text-overflow:ellipsis">—</span>
     </div>
+  </div>
+
+  <!-- Send SEAL -->
+  <div id="sendCard" class="card hidden">
+    <h2>Send SEAL</h2>
+    <div class="row" style="margin-bottom:8px">
+      <span class="dim">My balance:</span>
+      <span id="myBalance" class="mono">—</span>
+      <span class="dim">µSEAL</span>
+      <button class="btn-outline btn-sm" onclick="refreshBalances()" style="margin-left:auto">Refresh</button>
+    </div>
+    <div id="tokenBalances" class="hidden" style="margin-bottom:8px"></div>
+    <div class="row">
+      <input id="sendTo" placeholder="seal1… recipient address" class="flex1" />
+      <input id="sendAmount" placeholder="amount (µSEAL)" style="width:140px" />
+      <button class="btn btn-sm" onclick="sendSeal()">Send</button>
+    </div>
+    <div id="sendResult" class="dim hidden" style="margin-top:8px"></div>
   </div>
 
   <!-- SQL -->
@@ -195,9 +215,11 @@ footer { text-align: center; padding: 20px 0; color: var(--dim); font-size: 0.7r
       <input id="dexPrice" placeholder="price" style="width:80px" />
       <input id="dexQty" placeholder="qty" style="width:80px" />
       <button class="btn btn-sm" onclick="placeOrder()">Order</button>
+      <button class="btn-outline btn-sm" onclick="toggleTradeTape()">Tape</button>
     </div>
     <div id="dexResult" class="dim hidden" style="margin-top:8px"></div>
     <div id="dexBook" class="hidden" style="margin-top:12px"></div>
+    <div id="dexTape" class="hidden" style="margin-top:12px"></div>
   </div>
 
   <footer>
@@ -206,6 +228,7 @@ footer { text-align: center; padding: 20px 0; color: var(--dim); font-size: 0.7r
   </footer>
 </div>
 
+<script src="qrcode.js"></script>
 <script>
 const $ = id => document.getElementById(id);
 
@@ -270,6 +293,14 @@ function showWallet() {
   $('walletAddress').textContent = walletKeys.address;
   $('importSection').classList.add('hidden');
   $('error').classList.add('hidden');
+  // If the user already pressed Connect (chainCard visible), show
+  // the Send panel and pull a balance immediately. Otherwise the
+  // panel stays hidden until Connect.
+  if (!$('chainCard').classList.contains('hidden')) {
+    $('sendCard').classList.remove('hidden');
+    refreshBalances();
+    startBalancePoll();
+  }
 }
 
 function lockWallet() {
@@ -278,6 +309,13 @@ function lockWallet() {
   $('walletInfo').classList.add('hidden');
   $('mnemonicSection').classList.add('hidden');
   $('signSection').classList.add('hidden');
+  $('qrHost').classList.add('hidden');
+  $('qrHost').innerHTML = '';
+  // Hide the Send SEAL panel — it's pointless without keys, and
+  // leaving it visible would let a user paste a recipient into a
+  // box that can't sign.
+  $('sendCard').classList.add('hidden');
+  stopBalancePoll();
 }
 
 function showMnemonic() {
@@ -370,6 +408,11 @@ async function connect() {
     $('zkCard').classList.remove('hidden');
     $('tokenCard').classList.remove('hidden');
     $('dexCard').classList.remove('hidden');
+    if (walletKeys) {
+      $('sendCard').classList.remove('hidden');
+      refreshBalances();
+      startBalancePoll();
+    }
 
     const sr = await rpc('seal_getStateRoot');
     $('stateRoot').textContent = sr.state_root.slice(0, 16) + '...';
@@ -378,6 +421,133 @@ async function connect() {
     $('nodeStatus').innerHTML = '<span class="status status-off"></span>Failed: ' + e.message;
     $('error').textContent = e.message;
     $('error').classList.remove('hidden');
+  }
+}
+
+// --- Send SEAL ---
+//
+// `refreshBalances` polls native SEAL plus every custom token the
+// node knows about. Called once on Connect, again 1.5s after a Send
+// (one slot of dev devnet), and on a 5-second auto-poll while the
+// Send panel is visible.
+async function refreshBalances() {
+  if (!walletKeys) return;
+  try {
+    const r = await rpc('seal_getBalance', { address: walletKeys.address });
+    const bal = r.balance ?? r.available ?? 0;
+    $('myBalance').textContent = bal.toLocaleString();
+  } catch (e) {
+    $('myBalance').textContent = '?';
+    console.warn('refreshBalances seal_getBalance failed:', e.message);
+    return;
+  }
+  // Custom tokens — list, then per-symbol balance fetch. Resilient
+  // to mid-poll token creations and to a node that hasn't enabled
+  // tokens (the list call simply returns []).
+  let tokens = [];
+  try {
+    const r = await rpc('seal_listTokens');
+    tokens = r.tokens || [];
+  } catch (_) { /* no token RPC — leave panel empty */ }
+  const host = $('tokenBalances');
+  host.innerHTML = '';
+  if (!tokens.length) {
+    host.classList.add('hidden');
+    return;
+  }
+  for (const t of tokens) {
+    let bal;
+    try {
+      const r = await rpc('seal_getTokenBalance', { symbol: t.symbol, address: walletKeys.address });
+      bal = r.balance ?? 0;
+    } catch (_) { bal = '?'; }
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.style.cssText = 'font-size:0.8rem;padding:2px 0';
+    const sym = document.createElement('span');
+    sym.style.cssText = 'min-width:60px;color:var(--accent);font-weight:600';
+    sym.textContent = t.symbol;
+    if (t.frozen) sym.title = 'Token is globally frozen — transfers will reject';
+    const amt = document.createElement('span');
+    amt.className = 'mono';
+    amt.style.cssText = 'flex:1;text-align:right';
+    amt.textContent = typeof bal === 'number' ? bal.toLocaleString() : String(bal);
+    const unit = document.createElement('span');
+    unit.className = 'dim';
+    unit.style.cssText = 'min-width:60px;text-align:right';
+    unit.textContent = t.frozen ? 'FROZEN' : ('10^-' + (t.decimals ?? 0));
+    if (t.frozen) unit.style.color = 'var(--red, #c33)';
+    row.appendChild(sym);
+    row.appendChild(amt);
+    row.appendChild(unit);
+    host.appendChild(row);
+  }
+  host.classList.remove('hidden');
+}
+
+// 5-second auto-poll. Lives only while the Send panel is visible
+// and the wallet is unlocked.
+let balancePollTimer = null;
+function startBalancePoll() {
+  if (balancePollTimer) return;
+  balancePollTimer = setInterval(() => {
+    if (!walletKeys || $('sendCard').classList.contains('hidden')) {
+      stopBalancePoll();
+      return;
+    }
+    refreshBalances();
+  }, 5000);
+}
+function stopBalancePoll() {
+  if (balancePollTimer) { clearInterval(balancePollTimer); balancePollTimer = null; }
+}
+
+// --- Address QR ---
+function toggleQR() {
+  const host = $('qrHost');
+  if (!host.classList.contains('hidden')) {
+    host.classList.add('hidden');
+    host.innerHTML = '';
+    return;
+  }
+  if (!globalThis.SealQR || !walletKeys) {
+    host.textContent = 'QR unavailable';
+    host.classList.remove('hidden');
+    return;
+  }
+  host.innerHTML = '';
+  const canvas = document.createElement('canvas');
+  host.appendChild(canvas);
+  try {
+    globalThis.SealQR.draw(canvas, walletKeys.address, 5);
+  } catch (e) {
+    host.textContent = 'QR error: ' + e.message;
+  }
+  host.classList.remove('hidden');
+}
+
+async function sendSeal() {
+  if (!walletKeys) return;
+  const to = $('sendTo').value.trim();
+  const amountRaw = $('sendAmount').value.trim();
+  if (!to) { $('sendResult').textContent = 'Recipient required.'; $('sendResult').classList.remove('hidden'); return; }
+  const amount = parseInt(amountRaw, 10);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    $('sendResult').textContent = 'Amount must be a positive integer (µSEAL).';
+    $('sendResult').classList.remove('hidden'); return;
+  }
+  try {
+    $('sendResult').textContent = 'Sending…';
+    $('sendResult').classList.remove('hidden');
+    const r = await signedRpc('seal_transfer', { to, amount });
+    const tx = r.tx_hash || r.txHash || '(no hash)';
+    $('sendResult').textContent = 'Sent ' + amount.toLocaleString() + ' µSEAL → ' + to.slice(0, 14) + '… (tx: ' + tx.slice(0, 16) + '…)';
+    // Wait one slot then refresh — block production needs a moment
+    // to apply the tx. Polling cadence matches the dev devnet's 1s
+    // slot.
+    setTimeout(refreshBalances, 1500);
+  } catch (e) {
+    $('sendResult').textContent = 'Error: ' + e.message;
   }
 }
 
@@ -593,6 +763,84 @@ function renderLob(bids, asks) {
 
   html += '</div>';
   return html;
+}
+
+// --- DEX trade tape (rolling window via seal_listTrades) ---
+//
+// Polls every 2 s when visible so a busy pair stays current
+// without flooding the node. since_id keeps the request body small;
+// we accumulate locally in `tradeTapeBuffer` and trim to 50 rows.
+let tradeTapeBuffer = [];
+let tradeTapeTimer = null;
+let tradeTapeLastId = 0;
+let tradeTapePair = null;
+
+async function toggleTradeTape() {
+  const tape = $('dexTape');
+  if (!tape.classList.contains('hidden')) {
+    // Already showing — turn off.
+    tape.classList.add('hidden');
+    if (tradeTapeTimer) { clearInterval(tradeTapeTimer); tradeTapeTimer = null; }
+    tradeTapeBuffer = []; tradeTapeLastId = 0; tradeTapePair = null;
+    return;
+  }
+  tradeTapePair = $('dexPair').value.trim();
+  if (!tradeTapePair) {
+    tape.innerHTML = '<div style="color:var(--dim);font-size:0.8rem">Set a pair first.</div>';
+    tape.classList.remove('hidden');
+    return;
+  }
+  tradeTapeBuffer = []; tradeTapeLastId = 0;
+  tape.classList.remove('hidden');
+  await pollTradeTape();
+  tradeTapeTimer = setInterval(pollTradeTape, 2000);
+}
+
+async function pollTradeTape() {
+  if (!tradeTapePair) return;
+  try {
+    const r = await rpc('seal_listTrades', {
+      pair: tradeTapePair,
+      since_id: tradeTapeLastId,
+      limit: 50,
+    });
+    const newTrades = r.trades || [];
+    if (newTrades.length) {
+      tradeTapeBuffer = [...tradeTapeBuffer, ...newTrades].slice(-50);
+      tradeTapeLastId = r.last_id || tradeTapeLastId;
+    }
+    renderTradeTape();
+  } catch (e) {
+    $('dexTape').innerHTML = '<div style="color:var(--dim);font-size:0.8rem">Error: ' + e.message + '</div>';
+  }
+}
+
+function renderTradeTape() {
+  const tape = $('dexTape');
+  if (!tradeTapeBuffer.length) {
+    tape.innerHTML = '<div style="color:var(--dim);font-size:0.8rem;padding:6px 10px">no trades yet on ' + tradeTapePair + '</div>';
+    return;
+  }
+  // Newest first.
+  const rows = [...tradeTapeBuffer].reverse();
+  let html = '<div style="border:1px solid var(--border);border-radius:8px;overflow:hidden">';
+  html += '<div style="display:flex;justify-content:space-between;padding:4px 10px;border-bottom:1px solid var(--border);font-size:0.7rem;color:var(--dim);text-transform:uppercase;letter-spacing:0.5px">';
+  html += '<span style="min-width:40px">id</span>';
+  html += '<span style="min-width:50px;text-align:right">price</span>';
+  html += '<span style="min-width:50px;text-align:right">qty</span>';
+  html += '<span style="margin-left:auto">side</span>';
+  html += '</div>';
+  for (const t of rows) {
+    const sideColor = t.side === 'bid' ? '#4ADE80' : '#F87171';
+    html += '<div style="display:flex;justify-content:space-between;padding:3px 10px;font-family:monospace;font-size:0.78rem">';
+    html += '<span style="min-width:40px;color:var(--dim)">' + t.id + '</span>';
+    html += '<span style="min-width:50px;text-align:right;color:var(--text);font-weight:600">' + t.price + '</span>';
+    html += '<span style="min-width:50px;text-align:right;color:var(--text)">' + t.quantity + '</span>';
+    html += '<span style="margin-left:auto;color:' + sideColor + '">' + t.side.toUpperCase() + '</span>';
+    html += '</div>';
+  }
+  html += '</div>';
+  tape.innerHTML = html;
 }
 
 async function showOrderBook() {

@@ -172,33 +172,39 @@ curl -s localhost:8545 \
 
 ### Row-Level Security
 
-Enable RLS on a table and add policies:
+RLS is driven through SQL DDL via `seal_submitSql`, not through dedicated
+JSON-RPC methods. The supported PostgreSQL-shape statements are
+documented in `crates/seal-sql/src/rls.rs`:
 
 ```bash
-# Enable RLS
-curl -s localhost:8545 \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc":"2.0",
-    "method":"seal_enableRls",
-    "params":{"table":"items"},
-    "signature":"<hex>",
-    "sender":"<pubkey_hex>",
-    "id":1
-  }'
+# Enable RLS on a table — wrapped in seal_submitSql so the ML-DSA
+# signature binds the caller as the DDL initiator.
+seal sql "ALTER TABLE items ENABLE ROW LEVEL SECURITY" \
+    --node http://localhost:8545 --key alice.json
 
-# Add a policy (restrict reads to owner)
-curl -s localhost:8545 \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "jsonrpc":"2.0",
-    "method":"seal_addPolicy",
-    "params":{"table":"items","policy_name":"owner_only","check":"owner = current_user"},
-    "signature":"<hex>",
-    "sender":"<pubkey_hex>",
-    "id":1
-  }'
+# Add a policy. Predicates use SQL expressions over the row + a
+# small set of built-ins (current_user, has_kyc(<tier>), etc.).
+seal sql "CREATE POLICY owner_only ON items FOR SELECT \
+          USING (owner = current_user)" \
+    --node http://localhost:8545 --key alice.json
 ```
+
+Equivalent raw curl (object-param `seal_submitSql` with the same
+canonicalized envelope `seal sql` builds):
+
+```bash
+curl -s localhost:8545 -H 'Content-Type: application/json' -d '{
+  "jsonrpc":"2.0","id":1,"method":"seal_submitSql",
+  "params":{"sql":"ALTER TABLE items ENABLE ROW LEVEL SECURITY"},
+  "signature":"<ML-DSA hex>","sender":"<verifying-key hex>"
+}'
+```
+
+(Earlier revisions of this guide showed `seal_enableRls` /
+`seal_addPolicy` as dedicated RPCs. No handler was ever wired —
+they returned `-32601 method not found` after passing auth. The
+entries have been removed from `requires_auth`; use the SQL DDL
+above instead.)
 
 ### Supported SQL
 
@@ -309,23 +315,29 @@ Response: `{"result":{"peers":["12D3Koo..."],"count":3}}`
 | `seal_getTokenBalance` | No | Get balance of a custom token |
 | `seal_listTokens` | No | List all custom tokens |
 
+Addresses below are placeholders (`seal1abc…`, `seal1xyz…`); the
+handlers run bech32m validation and reject anything other than a real
+key's full encoding (generate one with `seal keygen --output key.json`
+and substitute its `address` field). Pasting the placeholders verbatim
+yields `-32602 invalid 'address': bech32m: …`.
+
 **`seal_getBalance`**
 ```json
 {"jsonrpc":"2.0","method":"seal_getBalance","params":{"address":"seal1abc..."},"id":1}
 ```
-Response: `{"result":{"balance":1000000000,"total_supply":1000000000000}}`
+Response: `{"result":{"address":"…","balance":N,"total_supply":S}}`
 
 **`seal_transfer`**
 ```json
 {"jsonrpc":"2.0","method":"seal_transfer","params":{"to":"seal1xyz...","amount":500},"signature":"...","sender":"...","id":1}
 ```
-Response: `{"result":{"status":"ok","from":"seal1abc...","to":"seal1xyz...","amount":500}}`
+Response: `{"result":{"from":"…","to":"…","amount":500,"status":"confirmed"}}`
 
 **`seal_createToken`**
 ```json
 {"jsonrpc":"2.0","method":"seal_createToken","params":{"symbol":"GOLD","name":"Gold Token","decimals":9,"max_supply":1000000},"signature":"...","sender":"...","id":1}
 ```
-Response: `{"result":{"symbol":"GOLD","creator":"seal1abc..."}}`
+Response: `{"result":{"symbol":"GOLD","name":"Gold Token","decimals":9,"max_supply":1000000,"creator":"…","status":"created"}}`
 
 **`seal_mintToken`**
 ```json
@@ -390,9 +402,10 @@ Response: `{"result":{"tokens":[{"symbol":"GOLD","name":"Gold Token","total_supp
 |--------|------|-------------|
 | `seal_createPrivateTable` | Yes | Create a private (encrypted) table |
 | `seal_listPrivateTables` | No | List private tables |
-| `seal_setVisibility` | Yes | Set table visibility |
-| `seal_enableRls` | Yes | Enable row-level security on a table |
-| `seal_addPolicy` | Yes | Add an RLS policy to a table |
+
+(Table visibility / RLS toggles / RLS policies all flow through SQL
+DDL via `seal_submitSql` — `ALTER TABLE … ENABLE ROW LEVEL SECURITY`
+and `CREATE POLICY …`. See the Row-Level Security section above.)
 
 **`seal_createPrivateTable`**
 ```json

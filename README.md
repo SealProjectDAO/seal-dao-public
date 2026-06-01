@@ -74,7 +74,7 @@ unlock round-trip was paused. Full session handoff:
 
 ```bash
 cargo build                          # Build all 17 crates
-cargo test                           # Run 996 tests (`--lib` on some crates)
+cargo test                           # Run 1100+ tests (some crates need `--lib`)
 cargo run -p seal-node -- \
   --slots 0 --rpc-port 8545 --dev-faucet   # Start a node (P2P + RPC + dev faucet)
 cargo run -p seal-cli -- wallet      # Interactive TUI wallet
@@ -175,6 +175,10 @@ seal-bridge ──────────────────────�
 | [FORMAL-METHODS.md](FORMAL-METHODS.md) | Verification tool survey + plan |
 | [docs/TESTING.md](docs/TESTING.md) | Manual testing guide (21 sections) |
 | [DEPLOY.md](DEPLOY.md) | How to run nodes |
+| [docs/RUNBOOK-TESTNET-OPERATOR.md](docs/RUNBOOK-TESTNET-OPERATOR.md) | End-to-end testnet operator runbook (deploy + Ringtail flip + fund + smoke) |
+| [docs/TESTNET-VALIDATOR-SIZES.md](docs/TESTNET-VALIDATOR-SIZES.md) | 3 / 5 / 7-validator recipes + variable bridge-committee sizing |
+| [docs/BRIDGE-USDC-VENUES.md](docs/BRIDGE-USDC-VENUES.md) | Where wrapped USDC produced by the bridge is liquid (CEX + DEX, regional) |
+| [docs/CRYPTO-HOSTING-PROVIDERS.md](docs/CRYPTO-HOSTING-PROVIDERS.md) | Hosting providers that accept SOL/XLM/USDC/ETH/BTC, pricing vs AWS/Azure/GCP |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | How to contribute |
 
 ---

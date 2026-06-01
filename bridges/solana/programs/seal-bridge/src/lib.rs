@@ -4,7 +4,7 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 // Program ID — replace with actual deployed address after `anchor deploy`.
 // The placeholder below is Anchor's default; it will be overwritten by
 // `anchor keys sync` after first deployment to devnet/mainnet.
-declare_id!("Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS");
+declare_id!("FaYr7yXwC3QnZapqTKkYU1Fgy6zwGUzoFjvyKQVXypyD");
 
 /// Seal DAO <-> Solana Bridge Program (Skeleton)
 ///
@@ -36,11 +36,35 @@ pub mod seal_bridge {
         bridge_state.nonce = 0;
         bridge_state.bump = ctx.bumps.bridge_state;
         bridge_state.committee_key = committee_key;
+        bridge_state.paused = false;
 
         msg!(
             "Seal bridge initialized. Authority: {} Committee-key: {:x?}",
             bridge_state.authority,
             &committee_key[..4],
+        );
+        Ok(())
+    }
+
+    /// Set the in-program pause flag. Restricted to the authority
+    /// (admin) set at init. Defence-in-depth: the global per-chain
+    /// pause on `seal-node`'s `BridgeManager` already rejects deposits
+    /// / processing / withdrawals at the Seal-side router level, but
+    /// the on-chain flag here is the source-of-truth that a watcher
+    /// or relayer can also observe directly. While paused, both
+    /// `lock_tokens` and `unlock_tokens` reject with `BridgePaused`.
+    pub fn set_pause(ctx: Context<SetPause>, paused: bool) -> Result<()> {
+        let bridge_state = &mut ctx.accounts.bridge_state;
+        bridge_state.paused = paused;
+        emit!(PauseStateChanged {
+            authority: ctx.accounts.authority.key(),
+            paused,
+            timestamp: Clock::get()?.unix_timestamp,
+        });
+        msg!(
+            "Bridge pause flag set to {} by {}",
+            paused,
+            ctx.accounts.authority.key()
         );
         Ok(())
     }
@@ -70,6 +94,10 @@ pub mod seal_bridge {
         seal_address: [u8; 32],
     ) -> Result<()> {
         require!(amount > 0, BridgeError::InsufficientBalance);
+        require!(
+            !ctx.accounts.bridge_state.paused,
+            BridgeError::BridgePaused
+        );
 
         // Transfer tokens from sender to vault
         let transfer_ctx = CpiContext::new(
@@ -102,11 +130,18 @@ pub mod seal_bridge {
         lock_record.timestamp = Clock::get()?.unix_timestamp;
         lock_record.nonce = current_nonce;
 
-        // Emit event for relayers
+        // Emit event for relayers. `mint` is the SPL mint of the
+        // transferred tokens — the Seal observer routes locks to
+        // WSOL vs WUSDC by comparing this against its configured
+        // USDC mint pubkey. Read from the vault account (Anchor
+        // verifies sender_token_account.mint == vault_token_account.mint
+        // implicitly via the `Transfer` CPI, so either is correct).
+        let mint = ctx.accounts.vault_token_account.mint;
         emit!(LockEvent {
             sender: ctx.accounts.sender.key(),
             amount,
             seal_address,
+            mint,
             nonce: current_nonce,
             timestamp: lock_record.timestamp,
         });
@@ -130,6 +165,10 @@ pub mod seal_bridge {
         signature: Vec<u8>,
     ) -> Result<()> {
         require!(amount > 0, BridgeError::InsufficientBalance);
+        require!(
+            !ctx.accounts.bridge_state.paused,
+            BridgeError::BridgePaused
+        );
 
         // Snapshot the committee key by value before we take any `&mut`
         // borrow of bridge_state — anchor 0.31's borrow checker is
@@ -475,6 +514,19 @@ pub struct RotateCommitteeKey<'info> {
 }
 
 #[derive(Accounts)]
+pub struct SetPause<'info> {
+    #[account(
+        mut,
+        seeds = [b"bridge_state"],
+        bump = bridge_state.bump,
+        has_one = authority,
+    )]
+    pub bridge_state: Account<'info, BridgeState>,
+
+    pub authority: Signer<'info>,
+}
+
+#[derive(Accounts)]
 pub struct UnlockTokens<'info> {
     #[account(
         mut,
@@ -518,6 +570,10 @@ pub struct BridgeState {
     /// `verify_committee_sig`). Rotated per Seal epoch via
     /// `rotate_committee_key`.
     pub committee_key: [u8; 32],
+    /// In-program kill-switch. When true, `lock_tokens` and
+    /// `unlock_tokens` reject with `BridgePaused`. Toggled by the
+    /// authority via `set_pause`. Defaults to false.
+    pub paused: bool,
 }
 
 #[account]
@@ -544,6 +600,11 @@ pub struct LockEvent {
     pub sender: Pubkey,
     pub amount: u64,
     pub seal_address: [u8; 32],
+    /// SPL mint of the locked tokens. The Seal observer routes
+    /// to WUSDC when this matches its configured USDC mint and to
+    /// WSOL otherwise. Field order matters — observer decodes Borsh
+    /// positionally.
+    pub mint: Pubkey,
     pub nonce: u64,
     pub timestamp: i64,
 }
@@ -562,6 +623,13 @@ pub struct KeyRotatedEvent {
     pub timestamp: i64,
 }
 
+#[event]
+pub struct PauseStateChanged {
+    pub authority: Pubkey,
+    pub paused: bool,
+    pub timestamp: i64,
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -576,6 +644,9 @@ pub enum BridgeError {
 
     #[msg("This nonce has already been processed")]
     AlreadyProcessed,
+
+    #[msg("Bridge is paused; lock and unlock are temporarily disabled")]
+    BridgePaused,
 }
 
 // ---------------------------------------------------------------------------

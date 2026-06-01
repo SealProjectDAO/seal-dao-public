@@ -23,24 +23,23 @@ default = []
 #       verify_signature_full. Separate track.
 # Keep OFF for default testnet/mainnet-initial builds.
 # `seal-ringtail-verify` is `no_std + alloc`; enabling it on a Soroban
-# contract requires a global allocator. soroban-sdk 22 ships a bump
+# contract requires a global allocator. soroban-sdk ships a bump
 # allocator behind its `alloc` feature — turn it on here or the WASM
 # link step fails with "no global memory allocator found".
 ringtail-verify = ["dep:seal-ringtail-verify", "soroban-sdk/alloc"]
 
 [dependencies]
-# 22.x is pinned to match the installed stellar-cli 22.0.0. SDK 21's
-# `symbol_short!` expanded identifier constants at macro time; 22 now
-# requires string literals, so the previous `symbol_short!(ADMIN_KEY)`
-# pattern needs to become `symbol_short!("admin")` — see src/lib.rs.
-soroban-sdk = "22"
+# 25.x matches stellar-rpc 25.1.0 in stellar/quickstart:v637-*-nightly
+# (the oldest available nightly as of 2026-05-13; protocol-22-era images
+# expired). `symbol_short!` still requires string literals as in 22.x.
+soroban-sdk = "25"
 
 # no_std-compatible Ringtail verifier. Optional until Soroban
 # instruction-cost and signer-fix blockers are cleared.
 seal-ringtail-verify = { path = "../../crates/seal-ringtail-verify", optional = true }
 
 [dev-dependencies]
-soroban-sdk = { version = "22", features = ["testutils"] }
+soroban-sdk = { version = "25", features = ["testutils"] }
 
 [profile.release]
 opt-level = "z"

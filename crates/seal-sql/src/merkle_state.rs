@@ -132,7 +132,8 @@ impl MerkleEngine {
                 // Same row content with different salts produces different leaf hashes,
                 // preventing correlation across historical Merkle roots.
                 let merkle_value = format!("{}:{:?}", hex::encode(row.salt), row.values);
-                let _ = self.merkle
+                let _ = self
+                    .merkle
                     .insert(merkle_key.clone().into_bytes(), merkle_value.into_bytes());
                 current_pks.insert(merkle_key);
             }

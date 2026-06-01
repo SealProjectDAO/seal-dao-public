@@ -133,3 +133,35 @@ footer {
   font-size: 0.8rem;
   border-top: 1px solid var(--border);
 }
+
+#markets-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+}
+
+#markets-controls label {
+  color: var(--dim);
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+}
+
+#market-pair {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.85rem;
+  min-width: 140px;
+}
+
+#market-summary { font-size: 0.8rem; }
+
+#trade-list .side-bid { color: var(--green); font-weight: 600; }
+#trade-list .side-ask { color: var(--red); font-weight: 600; }
+
+.dim { color: var(--dim); }

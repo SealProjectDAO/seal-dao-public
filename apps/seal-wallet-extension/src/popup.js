@@ -5,7 +5,16 @@
 // passphrase, signs whatever the background service worker has queued,
 // and writes the result back.
 //
-// Vault layout in chrome.storage.local:
+// `browserApi` is a cross-browser alias for `chrome`/`browser`.
+// Inlined; same logic in `browser-polyfill.js` for the content
+// script. On Chromium `browserApi === chrome`; on Firefox/Safari
+// it's `browser`.
+const browserApi =
+  typeof globalThis.browser !== "undefined" && globalThis.browser?.runtime
+    ? globalThis.browser
+    : globalThis.chrome;
+
+// Vault layout in browserApi.storage.local:
 //   "seal:vault"    → { ciphertext_b64, iv_b64, salt_b64, kdf, iter }
 //   "seal:accounts" → ["seal1...", ...]   (public addresses, not keys)
 //   "seal:rpc_url"  → "http://localhost:8545"
@@ -84,7 +93,7 @@ async function saveVault(plaintextBytes, passphrase) {
   const ct = new Uint8Array(
     await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, plaintextBytes),
   );
-  await chrome.storage.local.set({
+  await browserApi.storage.local.set({
     [VAULT_KEY]: {
       ciphertext_b64: b64.encode(ct),
       iv_b64: b64.encode(iv),
@@ -96,12 +105,12 @@ async function saveVault(plaintextBytes, passphrase) {
 }
 
 async function hasVault() {
-  const out = await chrome.storage.local.get(VAULT_KEY);
+  const out = await browserApi.storage.local.get(VAULT_KEY);
   return !!out[VAULT_KEY];
 }
 
 async function decryptVault(passphrase) {
-  const out = await chrome.storage.local.get(VAULT_KEY);
+  const out = await browserApi.storage.local.get(VAULT_KEY);
   const v = out[VAULT_KEY];
   if (!v) return null;
   const key = await deriveKey(passphrase, b64.decode(v.salt_b64));
@@ -120,6 +129,62 @@ function zeroize(bytes) {
 function lock() {
   zeroize(unlocked);
   unlocked = null;
+  cancelIdleTimer();
+  stopBalancePoll();
+  // Reset DEX tape state so it doesn't bleed across sessions.
+  selectedPair = null;
+  tradeTapeBuffer = [];
+  tradeTapeLastId = 0;
+  // Hide the QR if it was visible — locking the wallet shouldn't
+  // leave the address image up after the user navigates away.
+  if (qrShown) toggleAddressQR();
+}
+
+// ── Idle auto-lock ─────────────────────────────────────────────────
+//
+// While `unlocked` is non-null, schedule a `lock()` after
+// `IDLE_TIMEOUT_MS` of no user input. Any click / keydown / focus
+// resets the timer. Closing the popup also wipes `unlocked` via
+// pagehide (see bottom of file), so the popup-closed case is
+// already covered; this handles "user opened the popup, walked
+// away".
+//
+// Service-worker `chrome.alarms` would let us also enforce a max
+// session length across closes — but the popup's `unlocked` buffer
+// is gone the moment the popup closes (JS context discarded), so
+// that's already implicit. Tracking idle outside the popup would
+// only matter if we cached a hot key in the service worker, which
+// we explicitly do not (see seal:signMessage flow in background.js).
+const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+let idleTimer = null;
+
+function resetIdleTimer() {
+  if (!unlocked) return;
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    if (!unlocked) return; // race: user locked between schedule and fire
+    lock();
+    // Best-effort: route back to the unlock screen so the user knows
+    // why the popup changed state. show() is no-op if the section
+    // isn't in the DOM (the popup may have been torn down already).
+    try {
+      show("screen-unlock");
+      const passEl = document.getElementById("unlock-pass");
+      if (passEl) {
+        passEl.value = "";
+        passEl.focus();
+      }
+    } catch (_) {
+      // Popup torn down between fire and DOM access — fine.
+    }
+  }, IDLE_TIMEOUT_MS);
+}
+
+function cancelIdleTimer() {
+  if (idleTimer) {
+    clearTimeout(idleTimer);
+    idleTimer = null;
+  }
 }
 
 // ── Wallet ops ─────────────────────────────────────────────────────
@@ -128,8 +193,9 @@ async function createWallet(passphrase) {
   const json = JSON.parse(generate_keypair(false));
   const vaultPayload = new TextEncoder().encode(JSON.stringify(json));
   await saveVault(vaultPayload, passphrase);
-  await chrome.storage.local.set({ [ACCOUNTS_KEY]: [json.address] });
+  await browserApi.storage.local.set({ [ACCOUNTS_KEY]: [json.address] });
   unlocked = vaultPayload;
+  resetIdleTimer();
   return json;
 }
 
@@ -138,8 +204,9 @@ async function importMnemonic(mnemonic, passphrase) {
   const json = JSON.parse(import_from_mnemonic(mnemonic, false));
   const vaultPayload = new TextEncoder().encode(JSON.stringify(json));
   await saveVault(vaultPayload, passphrase);
-  await chrome.storage.local.set({ [ACCOUNTS_KEY]: [json.address] });
+  await browserApi.storage.local.set({ [ACCOUNTS_KEY]: [json.address] });
   unlocked = vaultPayload;
+  resetIdleTimer();
   return json;
 }
 
@@ -174,6 +241,8 @@ function show(id) {
   for (const el of document.querySelectorAll("main > section")) {
     el.hidden = el.id !== id;
   }
+  // Balance polling only runs on the account screen.
+  if (id !== "screen-account") stopBalancePoll();
 }
 
 function showError(elId, message) {
@@ -202,7 +271,7 @@ async function routeOnOpen() {
 }
 
 async function renderAccount() {
-  const out = await chrome.storage.local.get([ACCOUNTS_KEY, RPC_URL_KEY]);
+  const out = await browserApi.storage.local.get([ACCOUNTS_KEY, RPC_URL_KEY]);
   const accounts = out[ACCOUNTS_KEY] || [];
   if (accounts.length === 0) {
     show("screen-empty");
@@ -213,10 +282,281 @@ async function renderAccount() {
     out[RPC_URL_KEY] || "http://localhost:8545";
   await renderRequests();
   show("screen-account");
+  // Refresh once on entry, then keep ticking while the screen is up.
+  refreshBalances();
+  startBalancePoll();
+}
+
+// ── Balance polling ───────────────────────────────────────────────
+//
+// Polls `seal_getBalance(self)` plus any custom-token balances every
+// `BAL_POLL_MS` while the account screen is visible. Stops on lock,
+// reset, or screen change. The query is unsigned — public read of the
+// caller's own balance — so we never touch the unlocked vault.
+const BAL_POLL_MS = 5_000;
+let balPollTimer = null;
+let knownTokens = []; // [{ symbol, decimals }, ...] — refreshed on each tick
+
+async function jsonRpc(method, params) {
+  const out = await browserApi.storage.local.get(RPC_URL_KEY);
+  const url = out[RPC_URL_KEY] || "http://localhost:8545";
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message);
+  return data.result;
+}
+
+function getMyAddress() {
+  return document.getElementById("addr").textContent;
+}
+
+async function refreshBalances() {
+  const addr = getMyAddress();
+  if (!addr) return;
+  const errEl = document.getElementById("balances-err");
+  errEl.hidden = true;
+  // Native SEAL.
+  try {
+    const r = await jsonRpc("seal_getBalance", { address: addr });
+    const bal = r?.balance ?? r?.available ?? 0;
+    document.getElementById("bal-seal").textContent =
+      Number(bal).toLocaleString();
+  } catch (e) {
+    document.getElementById("bal-seal").textContent = "?";
+    errEl.textContent = "Balance fetch failed: " + e.message;
+    errEl.hidden = false;
+    return; // don't try tokens if the node's unreachable
+  }
+  // Tokens — list-then-fetch each. Cheap, and resilient to mid-poll
+  // token creations (the next tick picks up the new symbol).
+  let tokens = [];
+  try {
+    const r = await jsonRpc("seal_listTokens", {});
+    tokens = (r?.tokens || []).map((t) => ({
+      symbol: t.symbol,
+      decimals: t.decimals,
+      frozen: t.frozen === true,
+    }));
+  } catch (_) {
+    // Token RPC may be unimplemented on a stripped-down node — leave
+    // the list empty; the SEAL row above stays.
+  }
+  knownTokens = tokens;
+  await renderTokenBalances(addr, tokens);
+}
+
+async function renderTokenBalances(addr, tokens) {
+  const list = document.getElementById("balances");
+  // Wipe everything below the SEAL row, rebuild from `tokens`.
+  while (list.children.length > 1) list.removeChild(list.lastChild);
+  for (const t of tokens) {
+    let bal;
+    try {
+      const r = await jsonRpc("seal_getTokenBalance", {
+        symbol: t.symbol,
+        address: addr,
+      });
+      bal = r?.balance ?? 0;
+    } catch (_) {
+      bal = "?";
+    }
+    const li = document.createElement("li");
+    li.className = "bal-row";
+    const sym = document.createElement("span");
+    sym.className = "bal-sym";
+    sym.textContent = t.symbol;
+    if (t.frozen) sym.title = "Token is globally frozen — transfers will reject";
+    const amt = document.createElement("span");
+    amt.className = "bal-amt mono";
+    amt.textContent =
+      typeof bal === "number" ? bal.toLocaleString() : String(bal);
+    const unit = document.createElement("span");
+    unit.className = "bal-unit muted";
+    if (t.frozen) {
+      unit.textContent = "FROZEN";
+      unit.style.color = "#c33";
+    } else {
+      unit.textContent = t.decimals != null ? `10^-${t.decimals}` : "";
+    }
+    li.appendChild(sym);
+    li.appendChild(amt);
+    li.appendChild(unit);
+    list.appendChild(li);
+  }
+}
+
+function startBalancePoll() {
+  if (balPollTimer) return;
+  balPollTimer = setInterval(() => {
+    refreshBalances();
+    refreshPairs();          // cheap, also detects newly-listed pairs
+    if (selectedPair) pollTrades();
+  }, BAL_POLL_MS);
+}
+
+function stopBalancePoll() {
+  if (balPollTimer) {
+    clearInterval(balPollTimer);
+    balPollTimer = null;
+  }
+}
+
+// ── DEX trade tape ────────────────────────────────────────────────
+//
+// Same RPC shape as the Electron / explorer tapes
+// (`seal_listTrades`, `seal_listPairs`). The popup reuses the
+// 5-second balance poll cadence so we don't run two timers; the
+// budget per tick is one balance + one tokens roundtrip + one
+// pairs + (if selected) one trades. Comfortably under 1s for a
+// nearby node.
+const TRADE_TAPE_MAX = 30; // popup is 360px wide — keep this tight
+let knownPairs = new Set();
+let selectedPair = null;
+let tradeTapeBuffer = [];
+let tradeTapeLastId = 0;
+
+async function refreshPairs() {
+  let pairs;
+  try {
+    const r = await jsonRpc("seal_listPairs", {});
+    pairs = r?.pairs || [];
+  } catch (_) {
+    return; // no DEX RPC on this node — leave dropdown empty
+  }
+  const names = pairs.map((p) =>
+    typeof p === "string" ? p : p.pair || `${p.base}/${p.quote}`,
+  );
+  const next = new Set(names);
+  if (
+    next.size === knownPairs.size &&
+    [...next].every((p) => knownPairs.has(p))
+  ) {
+    return;
+  }
+  knownPairs = next;
+  const sel = document.getElementById("market-pair");
+  const prev = selectedPair || sel.value;
+  sel.innerHTML = "";
+  const empty = document.createElement("option");
+  empty.value = "";
+  empty.textContent = names.length ? "Pick a pair…" : "No pairs";
+  sel.appendChild(empty);
+  for (const name of names) {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    if (name === prev) opt.selected = true;
+    sel.appendChild(opt);
+  }
+  if (prev && !next.has(prev)) {
+    selectedPair = null;
+    tradeTapeBuffer = [];
+    tradeTapeLastId = 0;
+    renderTradeTape();
+  }
+}
+
+async function pollTrades() {
+  if (!selectedPair) return;
+  let r;
+  try {
+    r = await jsonRpc("seal_listTrades", {
+      pair: selectedPair,
+      since_id: tradeTapeLastId,
+      limit: TRADE_TAPE_MAX,
+    });
+  } catch (e) {
+    document.getElementById("market-summary").textContent =
+      "err: " + e.message;
+    return;
+  }
+  const newTrades = r?.trades || [];
+  if (newTrades.length) {
+    tradeTapeBuffer = [...tradeTapeBuffer, ...newTrades].slice(
+      -TRADE_TAPE_MAX,
+    );
+    tradeTapeLastId = r.last_id || tradeTapeLastId;
+  }
+  document.getElementById("market-summary").textContent = selectedPair
+    ? `${tradeTapeBuffer.length} · #${tradeTapeLastId || "—"}`
+    : "";
+  renderTradeTape();
+}
+
+function renderTradeTape() {
+  const ul = document.getElementById("trade-tape");
+  ul.innerHTML = "";
+  if (!selectedPair || !tradeTapeBuffer.length) return;
+  for (const t of [...tradeTapeBuffer].reverse()) {
+    const li = document.createElement("li");
+    const id = document.createElement("span");
+    id.className = "tape-id";
+    id.textContent = "#" + (t.id ?? "");
+    const price = document.createElement("span");
+    price.className = "tape-price";
+    price.textContent = String(t.price ?? "");
+    const qty = document.createElement("span");
+    qty.className = "tape-qty";
+    qty.textContent = String(t.quantity ?? "");
+    const side = document.createElement("span");
+    side.className =
+      "tape-side " + (t.side === "bid" ? "side-bid" : "side-ask");
+    side.textContent = (t.side || "").toUpperCase();
+    li.appendChild(id);
+    li.appendChild(price);
+    li.appendChild(qty);
+    li.appendChild(side);
+    ul.appendChild(li);
+  }
+}
+
+function onPairChange(e) {
+  const v = e.target.value || null;
+  if (v === selectedPair) return;
+  selectedPair = v;
+  tradeTapeBuffer = [];
+  tradeTapeLastId = 0;
+  if (selectedPair) pollTrades();
+  else renderTradeTape();
+}
+
+// ── Address QR ────────────────────────────────────────────────────
+let qrShown = false;
+function toggleAddressQR() {
+  const host = document.getElementById("qr-host");
+  const btn = document.getElementById("btn-toggle-qr");
+  if (qrShown) {
+    host.classList.remove("shown");
+    host.innerHTML = "";
+    btn.textContent = "Show QR";
+    qrShown = false;
+    return;
+  }
+  if (!globalThis.SealQR) {
+    host.textContent = "QR unavailable";
+    host.classList.add("shown");
+    return;
+  }
+  host.innerHTML = "";
+  const canvas = document.createElement("canvas");
+  host.appendChild(canvas);
+  try {
+    globalThis.SealQR.draw(canvas, getMyAddress(), 4);
+    host.classList.add("shown");
+    btn.textContent = "Hide QR";
+    qrShown = true;
+  } catch (e) {
+    host.textContent = "QR error: " + e.message;
+    host.classList.add("shown");
+  }
 }
 
 async function renderRequests() {
-  const list = await chrome.runtime.sendMessage({ type: "seal:popup:listRequests" });
+  const list = await browserApi.runtime.sendMessage({ type: "seal:popup:listRequests" });
   const ul = document.getElementById("requests");
   ul.innerHTML = "";
   if (!list || list.length === 0) {
@@ -262,7 +602,7 @@ document.addEventListener("click", async (e) => {
       result = { ok: false, error: String(err) };
     }
   }
-  await chrome.runtime.sendMessage({
+  await browserApi.runtime.sendMessage({
     type: "seal:popup:resolveRequest",
     id,
     result,
@@ -338,6 +678,7 @@ document.getElementById("btn-unlock").addEventListener("click", async () => {
       return;
     }
     unlocked = pt;
+    resetIdleTimer();
     document.getElementById("unlock-pass").value = "";
     await renderAccount();
   } catch (e) {
@@ -416,6 +757,7 @@ document.getElementById("btn-chpass-save").addEventListener("click", async () =>
     const prev = unlocked;
     unlocked = plaintext;
     zeroize(prev);
+    resetIdleTimer();
     for (const id of ["chpass-old", "chpass-new1", "chpass-new2"]) {
       document.getElementById(id).value = "";
     }
@@ -454,7 +796,7 @@ document.getElementById("btn-reset-confirm").addEventListener("click", async () 
     return;
   }
   try {
-    await chrome.storage.local.remove([VAULT_KEY, ACCOUNTS_KEY]);
+    await browserApi.storage.local.remove([VAULT_KEY, ACCOUNTS_KEY]);
     lock();
     pendingNewVault = null;
     document.getElementById("reset-confirm").value = "";
@@ -472,9 +814,17 @@ document.getElementById("btn-copy").addEventListener("click", async () => {
   await navigator.clipboard.writeText(document.getElementById("addr").textContent);
 });
 
+document
+  .getElementById("btn-toggle-qr")
+  .addEventListener("click", toggleAddressQR);
+
+document
+  .getElementById("market-pair")
+  .addEventListener("change", onPairChange);
+
 document.getElementById("btn-save-rpc").addEventListener("click", async () => {
   const url = document.getElementById("rpc-url").value.trim();
-  await chrome.storage.local.set({ [RPC_URL_KEY]: url });
+  await browserApi.storage.local.set({ [RPC_URL_KEY]: url });
 });
 
 // Best-effort wipe when the popup is torn down (also happens naturally
@@ -482,5 +832,13 @@ document.getElementById("btn-save-rpc").addEventListener("click", async () => {
 // the intent explicit and covers the rare bfcache case).
 window.addEventListener("pagehide", lock);
 window.addEventListener("beforeunload", lock);
+
+// Activity sources that count as "user is here" — reset the idle
+// timer on each. Capture phase on document so all clicks, keys, and
+// focus changes are observed regardless of which child element
+// caught the event.
+document.addEventListener("click", resetIdleTimer, { capture: true });
+document.addEventListener("keydown", resetIdleTimer, { capture: true });
+window.addEventListener("focus", resetIdleTimer);
 
 routeOnOpen();

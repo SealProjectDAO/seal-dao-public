@@ -342,7 +342,9 @@ mod tests {
 
         let committee_root = compute_committee_root(&pks);
         let wrong_hash = sha3_256(b"wrong-message");
-        assert!(agg.verify(&proof, &committee_root, &wrong_hash, 67).is_err());
+        assert!(agg
+            .verify(&proof, &committee_root, &wrong_hash, 67)
+            .is_err());
     }
 
     #[test]

@@ -14,28 +14,24 @@ patches that modify the vendored source.
 
 ## Patches
 
-### `libp2p-noise-pqc.patch` (TODO)
+### `libp2p-noise-pqc.patch` — superseded
 
-Modifies `vendor/libp2p-noise/` to:
-- Replace X25519 DH with ML-KEM-768 key encapsulation
-- Use ML-DSA-65 for handshake authentication (instead of Ed25519)
-- Derive symmetric keys from ML-KEM shared secret
+Original plan was to patch `vendor/libp2p-noise/` to swap X25519 → ML-KEM-768
+inside the Noise framework. **Superseded** by `crates/seal-p2p/src/pq_transport.rs`,
+which implements an ML-KEM-768 native transport at a layer above libp2p (no
+modification to vendored Noise sources). See STATUS.md row "P2P networking".
 
-Files modified:
-- `src/protocol.rs`: replace `x25519_dalek` with `seal-crypto` ML-KEM
-- `src/io/handshake.rs`: modify Noise XX pattern for KEM
-- `Cargo.toml`: add `seal-crypto` dependency
+If a future libp2p-native PQC story needs the in-Noise patch (e.g. for
+QUIC-PQ interop), the original sketch lives in `git log` of this file.
 
-### `libp2p-core-pqc.patch` (TODO)
+### `libp2p-core-pqc.patch` — superseded
 
-Modifies `vendor/libp2p-core/` to:
-- Add ML-DSA-65 as a peer identity key type
-- Derive PeerId from SHA3(ML-DSA public key)
-- Support PQC key serialization in multicodec format
-
-Files modified:
-- `src/identity.rs` (or equivalent): add PQC key variant
-- `src/peer_id.rs` (or equivalent): derive from ML-DSA pk
+Original plan was to add ML-DSA-65 as a libp2p `Keypair` variant and derive
+`PeerId` from `SHA3(ML-DSA pk)`. **Superseded**: `seal-crypto::SealAddress`
+serves as the application-level identity (bech32m over `SHA3-256(ML-DSA pk)`),
+and the PQ transport binds it independent of libp2p's own peer-id type.
+Track upstream libp2p for native PQC peer-id support and revisit only if
+we want classic libp2p-rooted peer routing again.
 
 ## Applying patches
 

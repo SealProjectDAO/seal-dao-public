@@ -1,2 +1,0 @@
-cargo:rustc-cfg=feature="simd256"
-cargo::rustc-check-cfg=cfg(eurydice)

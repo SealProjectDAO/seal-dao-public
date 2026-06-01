@@ -226,7 +226,10 @@ impl SpdzParty {
         z_mac = field_add(z_mac, field_mul(epsilon, triple.b.mac));
         z_mac = field_add(z_mac, field_mul(delta, triple.a.mac));
         if self.id == 0 {
-            z_mac = field_add(z_mac, field_mul(self.alpha_share, field_mul(epsilon, delta)));
+            z_mac = field_add(
+                z_mac,
+                field_mul(self.alpha_share, field_mul(epsilon, delta)),
+            );
         }
 
         Ok(SpdzShare {
@@ -277,10 +280,7 @@ impl SpdzParty {
     /// leaking partial MAC information. This helper folds each pair's
     /// `(alpha * (a+b) == mac_a + mac_b)` check into a single constant-
     /// time aggregate: XOR of each per-pair mask bit → 0 iff all pass.
-    pub fn verify_all_macs(
-        &self,
-        pairs: &[(SpdzShare, SpdzShare)],
-    ) -> Result<(), SpdzError> {
+    pub fn verify_all_macs(&self, pairs: &[(SpdzShare, SpdzShare)]) -> Result<(), SpdzError> {
         // Accumulate `expected_mac ^ actual_mac` in a u64 so we only
         // compare at the end. A single non-zero means at least one failed.
         let mut acc: u64 = 0;
@@ -407,13 +407,7 @@ fn prg_value(seed: &[u8], party_id: usize, index: usize, sub_index: usize) -> u6
 pub fn spdz_sum(party: &SpdzParty, shares: &[SpdzShare]) -> SpdzShare {
     shares
         .iter()
-        .fold(
-            SpdzShare {
-                value: 0,
-                mac: 0,
-            },
-            |acc, s| party.add(&acc, s),
-        )
+        .fold(SpdzShare { value: 0, mac: 0 }, |acc, s| party.add(&acc, s))
 }
 
 /// Compute COUNT of non-zero secret-shared values.
@@ -474,8 +468,14 @@ mod tests {
         let alpha = 777u64;
         let party = SpdzParty::new(0, alpha, 10, b"seed");
 
-        let a = SpdzShare { value: 10, mac: field_mul(alpha, 10) };
-        let b = SpdzShare { value: 20, mac: field_mul(alpha, 20) };
+        let a = SpdzShare {
+            value: 10,
+            mac: field_mul(alpha, 10),
+        };
+        let b = SpdzShare {
+            value: 20,
+            mac: field_mul(alpha, 20),
+        };
 
         let sum = party.add(&a, &b);
         assert_eq!(sum.value, 30);
@@ -487,7 +487,10 @@ mod tests {
         let alpha = 777u64;
         let party = SpdzParty::new(0, alpha, 10, b"seed");
 
-        let a = SpdzShare { value: 10, mac: field_mul(alpha, 10) };
+        let a = SpdzShare {
+            value: 10,
+            mac: field_mul(alpha, 10),
+        };
         let result = party.mul_constant(&a, 5);
         assert_eq!(result.value, 50);
         assert_eq!(result.mac, field_mul(alpha, 50));

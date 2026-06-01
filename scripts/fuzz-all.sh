@@ -26,6 +26,7 @@ TARGETS=(
     fuzz_tx_deserialize
     fuzz_merkle_ops
     fuzz_ringtail_verify
+    fuzz_ringtail_sign
     fuzz_committee_vote
 )
 

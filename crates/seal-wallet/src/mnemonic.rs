@@ -46,8 +46,8 @@ impl Seed {
 
     /// Import from mnemonic words.
     pub fn from_words(words: &[String]) -> Result<Self, crate::WalletError> {
-        let bytes = crate::wordlist::words_to_bytes(words)
-            .map_err(|e| crate::WalletError::InvalidMnemonic(e))?;
+        let bytes =
+            crate::wordlist::words_to_bytes(words).map_err(crate::WalletError::InvalidMnemonic)?;
         Ok(Seed { bytes })
     }
 

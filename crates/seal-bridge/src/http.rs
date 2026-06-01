@@ -114,7 +114,9 @@ impl MockTransport {
         let key = (method.to_string(), url.to_string());
         let mut map = self.responses.lock().unwrap();
         let queue = map.get_mut(&key).ok_or_else(|| {
-            BridgeError::RpcError(format!("MockTransport: no enqueued response for {method} {url}"))
+            BridgeError::RpcError(format!(
+                "MockTransport: no enqueued response for {method} {url}"
+            ))
         })?;
         if queue.is_empty() {
             return Err(BridgeError::RpcError(format!(

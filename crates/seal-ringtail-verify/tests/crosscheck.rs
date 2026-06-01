@@ -16,13 +16,18 @@
 //!  - module-constant equality so the two crates can't silently drift on
 //!    `RING_N`, `RING_Q`, or `MODULE_K`.
 
-use seal_ringtail_verify::{field::{MODULE_K, RING_N, RING_Q}, ntt::NttCtx, verify::{PublicParams, Signature}, VerifyError};
-use seal_threshold::ringtail::{
-    expand_challenge, generate_public_params, generate_public_params_no_error,
-    sign_single_full, verify_signature_full, PublicParams as HostParams,
-    RingtailSignature as HostSignature, RingOps, MODULE_L,
+use seal_ringtail_verify::{
+    field::{MODULE_K, RING_N, RING_Q},
+    ntt::NttCtx,
+    verify::{PublicParams, Signature},
+    VerifyError,
 };
 use seal_threshold::ntt::HandRolledOps;
+use seal_threshold::ringtail::{
+    expand_challenge, generate_public_params, generate_public_params_no_error, sign_single_full,
+    verify_signature_full, PublicParams as HostParams, RingOps, RingtailSignature as HostSignature,
+    MODULE_L,
+};
 use seal_threshold::traits::Bitfield;
 use sha3::{Digest, Sha3_256};
 
@@ -105,7 +110,11 @@ fn valid_signature_accepted_by_both() {
 
     // BPF-compat verifier must also pass with identical inputs.
     let ctx = NttCtx::new();
-    let matrix_a_bytes: Vec<&[u8]> = params.matrix_a.iter().map(|row| row[0].as_slice()).collect();
+    let matrix_a_bytes: Vec<&[u8]> = params
+        .matrix_a
+        .iter()
+        .map(|row| row[0].as_slice())
+        .collect();
     let t_bytes: Vec<&[u8]> = params.public_key_t.iter().map(|p| p.as_slice()).collect();
 
     let bpf_sig = Signature {
@@ -115,12 +124,18 @@ fn valid_signature_accepted_by_both() {
     };
     let bpf_pp = PublicParams {
         matrix_a: [
-            matrix_a_bytes[0], matrix_a_bytes[1], matrix_a_bytes[2], matrix_a_bytes[3],
-            matrix_a_bytes[4], matrix_a_bytes[5], matrix_a_bytes[6], matrix_a_bytes[7],
+            matrix_a_bytes[0],
+            matrix_a_bytes[1],
+            matrix_a_bytes[2],
+            matrix_a_bytes[3],
+            matrix_a_bytes[4],
+            matrix_a_bytes[5],
+            matrix_a_bytes[6],
+            matrix_a_bytes[7],
         ],
         public_key_t: [
-            t_bytes[0], t_bytes[1], t_bytes[2], t_bytes[3],
-            t_bytes[4], t_bytes[5], t_bytes[6], t_bytes[7],
+            t_bytes[0], t_bytes[1], t_bytes[2], t_bytes[3], t_bytes[4], t_bytes[5], t_bytes[6],
+            t_bytes[7],
         ],
     };
 
@@ -174,8 +189,7 @@ fn valid_signature_accepted_by_both_n_of_n() {
     let message = b"BPF cross-check 2-of-2";
     let r2_0 = p0.round2_full(&aggregated, message).unwrap();
     let r2_1 = p1.round2_full(&aggregated, message).unwrap();
-    let sig =
-        aggregate_responses_full(&ring, &aggregated, &[r2_0, r2_1], message, 2, 2).unwrap();
+    let sig = aggregate_responses_full(&ring, &aggregated, &[r2_0, r2_1], message, 2, 2).unwrap();
 
     // Host verifier accepts.
     verify_signature_full(&ring, &sig, &host_params, message, 2)
@@ -183,9 +197,16 @@ fn valid_signature_accepted_by_both_n_of_n() {
 
     // BPF verifier accepts the same bytes.
     let ctx = NttCtx::new();
-    let matrix_a_bytes: Vec<&[u8]> =
-        host_params.matrix_a.iter().map(|row| row[0].as_slice()).collect();
-    let t_bytes: Vec<&[u8]> = host_params.public_key_t.iter().map(|p| p.as_slice()).collect();
+    let matrix_a_bytes: Vec<&[u8]> = host_params
+        .matrix_a
+        .iter()
+        .map(|row| row[0].as_slice())
+        .collect();
+    let t_bytes: Vec<&[u8]> = host_params
+        .public_key_t
+        .iter()
+        .map(|p| p.as_slice())
+        .collect();
     let bpf_sig = Signature {
         z: &sig.z,
         challenge: &sig.challenge,
@@ -193,12 +214,18 @@ fn valid_signature_accepted_by_both_n_of_n() {
     };
     let bpf_pp = PublicParams {
         matrix_a: [
-            matrix_a_bytes[0], matrix_a_bytes[1], matrix_a_bytes[2], matrix_a_bytes[3],
-            matrix_a_bytes[4], matrix_a_bytes[5], matrix_a_bytes[6], matrix_a_bytes[7],
+            matrix_a_bytes[0],
+            matrix_a_bytes[1],
+            matrix_a_bytes[2],
+            matrix_a_bytes[3],
+            matrix_a_bytes[4],
+            matrix_a_bytes[5],
+            matrix_a_bytes[6],
+            matrix_a_bytes[7],
         ],
         public_key_t: [
-            t_bytes[0], t_bytes[1], t_bytes[2], t_bytes[3],
-            t_bytes[4], t_bytes[5], t_bytes[6], t_bytes[7],
+            t_bytes[0], t_bytes[1], t_bytes[2], t_bytes[3], t_bytes[4], t_bytes[5], t_bytes[6],
+            t_bytes[7],
         ],
     };
     seal_ringtail_verify::verify(&ctx, &bpf_sig, &bpf_pp, message, 2)
@@ -220,7 +247,11 @@ fn tampered_challenge_rejected_by_both() {
 
     // BPF verifier also rejects.
     let ctx = NttCtx::new();
-    let matrix_a_bytes: Vec<&[u8]> = params.matrix_a.iter().map(|row| row[0].as_slice()).collect();
+    let matrix_a_bytes: Vec<&[u8]> = params
+        .matrix_a
+        .iter()
+        .map(|row| row[0].as_slice())
+        .collect();
     let t_bytes: Vec<&[u8]> = params.public_key_t.iter().map(|p| p.as_slice()).collect();
 
     let bpf_sig = Signature {
@@ -230,12 +261,18 @@ fn tampered_challenge_rejected_by_both() {
     };
     let bpf_pp = PublicParams {
         matrix_a: [
-            matrix_a_bytes[0], matrix_a_bytes[1], matrix_a_bytes[2], matrix_a_bytes[3],
-            matrix_a_bytes[4], matrix_a_bytes[5], matrix_a_bytes[6], matrix_a_bytes[7],
+            matrix_a_bytes[0],
+            matrix_a_bytes[1],
+            matrix_a_bytes[2],
+            matrix_a_bytes[3],
+            matrix_a_bytes[4],
+            matrix_a_bytes[5],
+            matrix_a_bytes[6],
+            matrix_a_bytes[7],
         ],
         public_key_t: [
-            t_bytes[0], t_bytes[1], t_bytes[2], t_bytes[3],
-            t_bytes[4], t_bytes[5], t_bytes[6], t_bytes[7],
+            t_bytes[0], t_bytes[1], t_bytes[2], t_bytes[3], t_bytes[4], t_bytes[5], t_bytes[6],
+            t_bytes[7],
         ],
     };
 
@@ -253,7 +290,11 @@ fn wrong_message_rejected_by_bpf() {
 
     // Verify with a different message.
     let ctx = NttCtx::new();
-    let matrix_a_bytes: Vec<&[u8]> = params.matrix_a.iter().map(|row| row[0].as_slice()).collect();
+    let matrix_a_bytes: Vec<&[u8]> = params
+        .matrix_a
+        .iter()
+        .map(|row| row[0].as_slice())
+        .collect();
     let t_bytes: Vec<&[u8]> = params.public_key_t.iter().map(|p| p.as_slice()).collect();
 
     let bpf_sig = Signature {
@@ -263,12 +304,18 @@ fn wrong_message_rejected_by_bpf() {
     };
     let bpf_pp = PublicParams {
         matrix_a: [
-            matrix_a_bytes[0], matrix_a_bytes[1], matrix_a_bytes[2], matrix_a_bytes[3],
-            matrix_a_bytes[4], matrix_a_bytes[5], matrix_a_bytes[6], matrix_a_bytes[7],
+            matrix_a_bytes[0],
+            matrix_a_bytes[1],
+            matrix_a_bytes[2],
+            matrix_a_bytes[3],
+            matrix_a_bytes[4],
+            matrix_a_bytes[5],
+            matrix_a_bytes[6],
+            matrix_a_bytes[7],
         ],
         public_key_t: [
-            t_bytes[0], t_bytes[1], t_bytes[2], t_bytes[3],
-            t_bytes[4], t_bytes[5], t_bytes[6], t_bytes[7],
+            t_bytes[0], t_bytes[1], t_bytes[2], t_bytes[3], t_bytes[4], t_bytes[5], t_bytes[6],
+            t_bytes[7],
         ],
     };
 
@@ -295,7 +342,11 @@ fn oversized_z_rejected_by_norm_check() {
     let (params, sig, _) = build_valid_sig(&ring, message, z_poly);
 
     let ctx = NttCtx::new();
-    let matrix_a_bytes: Vec<&[u8]> = params.matrix_a.iter().map(|row| row[0].as_slice()).collect();
+    let matrix_a_bytes: Vec<&[u8]> = params
+        .matrix_a
+        .iter()
+        .map(|row| row[0].as_slice())
+        .collect();
     let t_bytes: Vec<&[u8]> = params.public_key_t.iter().map(|p| p.as_slice()).collect();
 
     let bpf_sig = Signature {
@@ -305,12 +356,18 @@ fn oversized_z_rejected_by_norm_check() {
     };
     let bpf_pp = PublicParams {
         matrix_a: [
-            matrix_a_bytes[0], matrix_a_bytes[1], matrix_a_bytes[2], matrix_a_bytes[3],
-            matrix_a_bytes[4], matrix_a_bytes[5], matrix_a_bytes[6], matrix_a_bytes[7],
+            matrix_a_bytes[0],
+            matrix_a_bytes[1],
+            matrix_a_bytes[2],
+            matrix_a_bytes[3],
+            matrix_a_bytes[4],
+            matrix_a_bytes[5],
+            matrix_a_bytes[6],
+            matrix_a_bytes[7],
         ],
         public_key_t: [
-            t_bytes[0], t_bytes[1], t_bytes[2], t_bytes[3],
-            t_bytes[4], t_bytes[5], t_bytes[6], t_bytes[7],
+            t_bytes[0], t_bytes[1], t_bytes[2], t_bytes[3], t_bytes[4], t_bytes[5], t_bytes[6],
+            t_bytes[7],
         ],
     };
 

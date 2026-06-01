@@ -73,6 +73,185 @@
         { "expr": "seal_fees_burned", "legendFormat": "Total Burned" }
       ],
       "fieldConfig": { "defaults": { "unit": "short", "custom": { "fillOpacity": 10 } } }
+    },
+    {
+      "title": "Bridge Committee Key",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 20 },
+      "description": "1 if seal-node has a committee MAC key installed, else 0. Red 0 means seal_bridgeWithdraw signatures will be unverifiable on-chain.",
+      "targets": [
+        { "expr": "seal_bridge_committee_key_set", "legendFormat": "Key set" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      }
+    },
+    {
+      "title": "Bridge Paused Chains",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 20 },
+      "description": "Number of source chains currently paused by council vote (seal_bridgePauseChain). >0 = bridge traffic halted on at least one chain.",
+      "targets": [
+        { "expr": "seal_bridge_paused_chains", "legendFormat": "Paused" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      }
+    },
+    {
+      "title": "Bridge Pending Deposits",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 20 },
+      "description": "Source-chain deposits observed but not yet processed (waiting for confirmations or paused).",
+      "targets": [
+        { "expr": "seal_bridge_deposits_pending", "legendFormat": "Pending" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "title": "Bridge Withdrawals Total",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 20 },
+      "description": "Cumulative seal_bridgeWithdraw burns since this node started.",
+      "targets": [
+        { "expr": "seal_bridge_withdrawals_total", "legendFormat": "Withdrawals" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "title": "Bridge Queue Depth Over Time",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "description": "Tracks deposits (total / pending) and withdrawals to spot back-pressure or stuck observers.",
+      "targets": [
+        { "expr": "seal_bridge_deposits_total", "legendFormat": "Deposits (total)" },
+        { "expr": "seal_bridge_deposits_pending", "legendFormat": "Deposits (pending)" },
+        { "expr": "seal_bridge_withdrawals_total", "legendFormat": "Withdrawals (total)" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "custom": { "fillOpacity": 10 } } }
+    },
+    {
+      "title": "Bridge Invariant (total_minted <= total_locked)",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 32 },
+      "description": "Hard 0/1: 1 means the bridge minted more wrapped tokens than are collateralized on the source chain. CRITICAL — pause affected chain via 2/3 council and investigate.",
+      "targets": [
+        { "expr": "seal_bridge_invariant_violated", "legendFormat": "Violated" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        }
+      }
+    },
+    {
+      "title": "Bridge Locked vs Minted (per wrapped token)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 32 },
+      "description": "Locked on the source chain should always be >= minted on Seal for each wrapped token. Persistent gap = wrapped supply diverging from collateral.",
+      "targets": [
+        { "expr": "seal_bridge_total_locked", "legendFormat": "locked {{token}}" },
+        { "expr": "seal_bridge_total_minted", "legendFormat": "minted {{token}}" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none", "custom": { "fillOpacity": 5 } } }
+    },
+    {
+      "title": "Faucet Drips",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "description": "Per-minute drip rate (attempted, successful, upstream_failures). Upstream-failure spike indicates either a drained keypair or unhealthy seal-node target.",
+      "targets": [
+        { "expr": "rate(seal_faucet_drips_attempted[1m])*60", "legendFormat": "Attempted/min" },
+        { "expr": "rate(seal_faucet_drips_successful[1m])*60", "legendFormat": "Successful/min" },
+        { "expr": "rate(seal_faucet_upstream_failures[1m])*60", "legendFormat": "Upstream errors/min" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops/min", "custom": { "fillOpacity": 10 } } }
+    },
+    {
+      "title": "Faucet Rejections",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "description": "Rejection breakdown: per-address cooldown, per-IP cooldown, bad-address. Cooldown spike = scripted abuse; bad-address = wrong-HRP paste.",
+      "targets": [
+        { "expr": "rate(seal_faucet_cooldown_rejections_addr[1m])*60", "legendFormat": "Cooldown addr/min" },
+        { "expr": "rate(seal_faucet_cooldown_rejections_ip[1m])*60", "legendFormat": "Cooldown ip/min" },
+        { "expr": "rate(seal_faucet_bad_address_rejections[1m])*60", "legendFormat": "Bad address/min" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops/min", "custom": { "fillOpacity": 10 } } }
+    },
+    {
+      "title": "Registration Portal",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 48 },
+      "description": "Unique validators registered via POST /register. Capped by the JSONL store; cumulative across restarts.",
+      "targets": [
+        { "expr": "seal_registration_validators_total", "legendFormat": "Validators" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "title": "Registration Activity",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 48 },
+      "description": "Accepts / duplicates / signature failures over time. Persistent signature_failures spike means operators are pasting wrong keys or the canonical-message contract has drifted.",
+      "targets": [
+        { "expr": "rate(seal_registration_accepted[5m])*60", "legendFormat": "Accepted/min" },
+        { "expr": "rate(seal_registration_duplicates[5m])*60", "legendFormat": "Duplicates/min" },
+        { "expr": "rate(seal_registration_signature_failures[5m])*60", "legendFormat": "Sig failures/min" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops/min", "custom": { "fillOpacity": 10 } } }
+    },
+    {
+      "title": "Relayer State",
+      "type": "stat",
+      "gridPos": { "h": 4, "w": 8, "x": 0, "y": 56 },
+      "description": "Per-validator bridge unlock relayer (P1#3). Submissions = successful destination-chain unlocks paid by this validator's relayer key. dry_run = 1 means the relayer is logging but not submitting.",
+      "targets": [
+        { "expr": "seal_relayer_submissions_total", "legendFormat": "Submissions" },
+        { "expr": "seal_relayer_dry_run", "legendFormat": "Dry run" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "none" } }
+    },
+    {
+      "title": "Relayer Activity",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 16, "x": 8, "y": 56 },
+      "description": "Submissions / failures / mark-executed races over time. mark_executed_already > mark_executed_total is normal for a non-leading validator (others race ahead). Sustained submission_failures means the destination-chain RPC is unreachable, gas drained, or recipient ATA missing.",
+      "targets": [
+        { "expr": "rate(seal_relayer_submissions_total[5m])*60", "legendFormat": "Submissions/min (first writer)" },
+        { "expr": "rate(seal_relayer_mark_executed_already[5m])*60", "legendFormat": "Race no-ops/min" },
+        { "expr": "rate(seal_relayer_submission_failures[5m])*60", "legendFormat": "Submission failures/min" },
+        { "expr": "rate(seal_relayer_mark_executed_failures[5m])*60", "legendFormat": "Mark-executed failures/min" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops/min", "custom": { "fillOpacity": 10 } } }
     }
   ],
   "schemaVersion": 39,

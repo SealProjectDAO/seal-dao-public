@@ -42,10 +42,7 @@ impl StakingManager {
         amount: u64,
     ) -> Result<(), TokenError> {
         // Move from available to staked in balance
-        let bal = balance_store
-            .get_mut(address)
-            .ok_or_else(|| TokenError::AccountNotFound(address.into()))?;
-        bal.stake(amount)?;
+        balance_store.update(address, |b| b.stake(amount))?;
 
         // Track in staking manager
         let info = self.stakes.entry(address.to_string()).or_insert(StakeInfo {
@@ -117,10 +114,7 @@ impl StakingManager {
         info.unbonding_complete_epoch = 0;
 
         // Move from staked to available in balance
-        let bal = balance_store
-            .get_mut(address)
-            .ok_or_else(|| TokenError::AccountNotFound(address.into()))?;
-        bal.unstake(amount)?;
+        balance_store.update(address, |b| b.unstake(amount))?;
 
         Ok(amount)
     }

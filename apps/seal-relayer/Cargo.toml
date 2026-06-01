@@ -1,0 +1,20 @@
+[package]
+name = "seal-relayer"
+description = "Seal DAO bridge relayer — submits destination-chain unlock claims for committee-signed withdrawals"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "seal-relayer"
+path = "src/main.rs"
+
+[dependencies]
+seal-crypto = { path = "../../crates/seal-crypto" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+sha3 = "0.10"
+tracing = "0.1"
+tracing-subscriber = "0.3"

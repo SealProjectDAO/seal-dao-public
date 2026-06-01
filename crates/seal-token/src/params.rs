@@ -78,8 +78,7 @@ pub mod genesis {
 
     /// Reserve (emergency, future use): 10% of initial supply.
     pub const RESERVE_PERCENT: u64 = 10;
-    pub const RESERVE: u64 =
-        (INITIAL_SUPPLY_SEAL * RESERVE_PERCENT / 100) * MICRO_SEAL_PER_SEAL;
+    pub const RESERVE: u64 = (INITIAL_SUPPLY_SEAL * RESERVE_PERCENT / 100) * MICRO_SEAL_PER_SEAL;
 }
 
 #[cfg(kani)]
@@ -131,7 +130,7 @@ mod tests {
     #[test]
     fn test_denomination() {
         assert_eq!(MICRO_SEAL_PER_SEAL, 1_000_000_000);
-        assert_eq!(1 * MICRO_SEAL_PER_SEAL, 1_000_000_000); // 1 SEAL
+        assert_eq!(MICRO_SEAL_PER_SEAL, 1_000_000_000); // 1 SEAL
     }
 
     #[test]
@@ -141,6 +140,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_max_supply() {
         assert_eq!(MAX_SUPPLY, 10_000_000_000_000_000_000);
         assert!(MAX_SUPPLY > INITIAL_SUPPLY);
@@ -160,7 +160,10 @@ mod tests {
             + genesis::ECOSYSTEM_FUND
             + genesis::PUBLIC_DISTRIBUTION
             + genesis::RESERVE;
-        assert_eq!(total, INITIAL_SUPPLY, "genesis allocations must sum to initial supply");
+        assert_eq!(
+            total, INITIAL_SUPPLY,
+            "genesis allocations must sum to initial supply"
+        );
     }
 
     #[test]

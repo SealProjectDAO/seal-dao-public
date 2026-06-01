@@ -82,9 +82,7 @@ impl SigningKey {
             .map_err(|_| CryptoError::InvalidSecretKey)?;
         let sk = MLDSA65SigningKey::new(sk_arr);
         // Derive randomness deterministically from sk + message
-        let randomness = crate::hash::sha3_256(
-            &[&self.bytes[..32], message].concat(),
-        ).0;
+        let randomness = crate::hash::sha3_256(&[&self.bytes[..32], message].concat()).0;
         let context = b"";
         let sig = ml_dsa_65::sign(&sk, message, context, randomness)
             .map_err(|_| CryptoError::InvalidSecretKey)?;

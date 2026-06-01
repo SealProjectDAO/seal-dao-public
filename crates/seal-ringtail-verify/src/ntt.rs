@@ -13,8 +13,8 @@
 //! Correctness is cross-checked against `seal-threshold::HandRolledRing`
 //! in `tests/crosscheck.rs` under the `std-crosscheck` feature.
 
-use alloc::boxed::Box;
 use crate::field::{mod_add, mod_inv, mod_mul, mod_pow, mod_sub, RING_N, RING_Q};
+use alloc::boxed::Box;
 
 /// Precomputed NTT state. `new()` is expensive (~300 modular ops) — build
 /// it once and reuse it across verifies.
@@ -52,7 +52,13 @@ impl NttCtx {
             inv_twiddles[i] = mod_mul(inv_twiddles[i - 1], omega_inv);
         }
 
-        Self { psi, psi_inv, twiddles, inv_twiddles, inv_n }
+        Self {
+            psi,
+            psi_inv,
+            twiddles,
+            inv_twiddles,
+            inv_n,
+        }
     }
 
     /// Forward negacyclic NTT: coefficient representation → evaluation.
@@ -118,21 +124,16 @@ impl NttCtx {
 
         // Normalize by 1/N and post-multiply by ψ^{-i}.
         let mut psi_inv_pow: u64 = 1;
-        for i in 0..RING_N {
-            out[i] = mod_mul(out[i], self.inv_n);
-            out[i] = mod_mul(out[i], psi_inv_pow);
+        for slot in out.iter_mut() {
+            *slot = mod_mul(*slot, self.inv_n);
+            *slot = mod_mul(*slot, psi_inv_pow);
             psi_inv_pow = mod_mul(psi_inv_pow, self.psi_inv);
         }
     }
 
     /// `c = a * b` in `R_q`. Performs three NTTs + one pointwise mul.
     /// Writes into `out`. No heap allocation.
-    pub fn poly_mul(
-        &self,
-        a: &[u64; RING_N],
-        b: &[u64; RING_N],
-        out: &mut [u64; RING_N],
-    ) {
+    pub fn poly_mul(&self, a: &[u64; RING_N], b: &[u64; RING_N], out: &mut [u64; RING_N]) {
         // Scratch buffers on the heap (BPF's 4 KB stack can't hold two
         // [u64; 256] locals comfortably alongside the verify frame).
         let mut a_ntt = alloc::boxed::Box::new([0u64; RING_N]);
@@ -171,7 +172,7 @@ fn bit_reverse(a: &mut [u64; RING_N]) {
 /// small candidate generators; the Ringtail prime admits one below 100.
 fn find_primitive_2n_root() -> u64 {
     let order = 2 * RING_N as u64; // 512
-    // (q - 1) % (2N) must be 0 for a 2N-th root to exist.
+                                   // (q - 1) % (2N) must be 0 for a 2N-th root to exist.
     debug_assert_eq!((RING_Q - 1) % order, 0);
 
     let exp = (RING_Q - 1) / order;
@@ -190,6 +191,7 @@ fn find_primitive_2n_root() -> u64 {
 }
 
 #[cfg(test)]
+#[allow(clippy::needless_range_loop, clippy::manual_memcpy)]
 mod tests {
     use super::*;
 

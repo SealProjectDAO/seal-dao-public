@@ -150,12 +150,10 @@ impl GenesisConfig {
             chain_id: "seal-testnet".into(),
             genesis_time: 1700000000,
             validators,
-            allocations: vec![
-                GenesisAllocation {
-                    address: "seal1faucet".into(),
-                    amount: 1_000_000_000_000, // 1000 SEAL
-                },
-            ],
+            allocations: vec![GenesisAllocation {
+                address: "seal1faucet".into(),
+                amount: 1_000_000_000_000, // 1000 SEAL
+            }],
             consensus: GenesisConsensusParams::default(),
             initial_supply: 1_000_000_000_000_000_000, // 1B SEAL in micro-SEAL
         }
@@ -339,7 +337,7 @@ impl GenesisConfig {
                 slots_per_epoch: 128,
                 committee_size,
                 finality_threshold_percent: 67,
-                min_stake: 1_000_000_000_000, // 1,000 SEAL
+                min_stake: 1_000_000_000_000,    // 1,000 SEAL
                 max_block_size: 2 * 1024 * 1024, // 2 MB
                 max_txs_per_block: 1_000,
             },
@@ -352,7 +350,7 @@ impl GenesisConfig {
         let mut config = Self::testnet(num_validators, 10_000_000_000);
         config.chain_id = "seal-devnet".into();
         config.consensus.slot_duration_ms = 1000; // 1 second
-        config.consensus.slots_per_epoch = 8;     // 8-second epochs
+        config.consensus.slots_per_epoch = 8; // 8-second epochs
         config.consensus.committee_size = num_validators as u32;
         config
     }
@@ -524,7 +522,10 @@ mod tests {
 
         assert_eq!(block1.hash, block2.hash);
         assert_eq!(block1.state_root, block2.state_root);
-        assert_eq!(block1.validator_set.total_stake, block2.validator_set.total_stake);
+        assert_eq!(
+            block1.validator_set.total_stake,
+            block2.validator_set.total_stake
+        );
     }
 
     #[test]
@@ -583,7 +584,7 @@ mod tests {
 
     #[test]
     fn test_validate_low_stake() {
-        let mut config = GenesisConfig::testnet(1, 100); // Below min_stake
+        let config = GenesisConfig::testnet(1, 100); // Below min_stake
         assert!(config.validate().is_err());
     }
 
@@ -712,7 +713,12 @@ mod tests {
 
         // Every allocation landed in the store.
         for alloc in &config.allocations {
-            assert_eq!(store.available(&alloc.address), alloc.amount, "{}", alloc.address);
+            assert_eq!(
+                store.available(&alloc.address),
+                alloc.amount,
+                "{}",
+                alloc.address
+            );
         }
         // Every validator's stake landed too (under the val_<hex> address).
         for v in &config.validators {

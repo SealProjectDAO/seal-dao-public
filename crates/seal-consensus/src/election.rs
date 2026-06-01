@@ -130,12 +130,29 @@ mod tests {
             let slot = Slot::from_absolute(slot_num, &config);
             let result = run_election(&v, &slot, &epoch, &vs, &config);
             match result {
-                ElectionResult::Proposer { vrf_output, vrf_proof }
-                | ElectionResult::Committee { vrf_output, vrf_proof } => {
+                ElectionResult::Proposer {
+                    vrf_output,
+                    vrf_proof,
+                }
+                | ElectionResult::Committee {
+                    vrf_output,
+                    vrf_proof,
+                } => {
                     // The VRF proof should verify
-                    assert!(verify_election(
-                        &v, &slot, &epoch, &vrf_output, &vrf_proof, &vk, &vs, &config
-                    ), "VRF proof should verify for slot {}", slot_num);
+                    assert!(
+                        verify_election(
+                            &v,
+                            &slot,
+                            &epoch,
+                            &vrf_output,
+                            &vrf_proof,
+                            &vk,
+                            &vs,
+                            &config
+                        ),
+                        "VRF proof should verify for slot {}",
+                        slot_num
+                    );
                 }
                 ElectionResult::NotElected => {
                     // Not elected is also valid

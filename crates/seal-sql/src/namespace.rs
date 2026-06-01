@@ -288,8 +288,9 @@ impl NamespaceRegistry {
         }
 
         // Execute the query in the target namespace
-        let target = self.namespaces.get_mut(target_app)
-            .ok_or_else(|| SqlError::TableNotFound(format!("namespace '{}' not found", target_app)))?;
+        let target = self.namespaces.get_mut(target_app).ok_or_else(|| {
+            SqlError::TableNotFound(format!("namespace '{}' not found", target_app))
+        })?;
         target.engine.execute(sql)
     }
 

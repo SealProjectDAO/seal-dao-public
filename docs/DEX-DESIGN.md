@@ -105,14 +105,22 @@ This is not competitive with HFT venues but is adequate for:
 
 ### RPC Methods
 
+Live today (see MANUAL-TESTING.md §19.2 for end-to-end curl /
+seal-cli recipes):
+
 ```
-seal_placeOrder    { pair, side, price, quantity, order_type }  → order_id
-seal_cancelOrder   { order_id }
-seal_getOrderBook  { pair, depth }  → { bids: [...], asks: [...] }
-seal_getMyOrders   { pair }  → [...]
-seal_getTradeHistory { pair, limit }  → [...]
-seal_listPairs     {}  → [{ base, quote, last_price, volume_24h }]
+seal_createPair    { base, quote }                              → { base, quote }     [auth]
+seal_placeOrder    { pair, side, price, quantity }              → { order_id, … }     [auth]
+seal_cancelOrder   { pair, order_id }                           → { ok }              [auth]
+seal_getOrderBook  { pair }                                     → { bids: [...], asks: [...] }
+seal_listPairs     {}                                           → { pairs: [{ base, quote, ... }] }
 ```
+
+Not yet wired (Phase 4 below, deferred for testnet readiness):
+`seal_getMyOrders { pair }`, `seal_getTradeHistory { pair, limit }`.
+For the "what orders did I place?" query today, walk the global
+order book and filter caller-side, or use the `TxType::DexMatch`
+emissions on each block (see MANUAL-TESTING.md §23.5).
 
 ### Transaction Types
 

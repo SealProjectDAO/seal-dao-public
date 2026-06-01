@@ -38,6 +38,15 @@ sled = { workspace = true }
 aes-gcm = "0.10"
 zeroize = { version = "1.8", features = ["zeroize_derive"] }
 rand = "0.8"
+base64 = "0.22"
+
+[features]
+default = []
+# Pulls in seal-bridge's `ringtail-singleton` feature, plus the
+# seal-node-side orchestrator wiring (--bridge-ringtail-* CLI flags,
+# Arc<Mutex<RingtailBridgeOrchestrator>> on RpcState, network-loop
+# routing). P1#5 layer 4 — see docs/decisions/ADR-002.
+ringtail-singleton = ["seal-bridge/ringtail-singleton"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

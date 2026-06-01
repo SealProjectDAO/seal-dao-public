@@ -33,6 +33,9 @@ members = [
     "examples/seal-copy-trading",
     "examples/seal-kyc",
     "examples/seal-kindle",
+    "apps/seal-faucet",
+    "apps/seal-registration",
+    "apps/seal-relayer",
 ]
 
 [workspace.package]
@@ -44,7 +47,7 @@ repository = "https://github.com/SealProjectDAO/seal-dao-master"
 
 [workspace.dependencies]
 # PQC cryptography (libcrux — formally verified with hax + F*)
-libcrux-ml-dsa = "0.0.8"
+libcrux-ml-dsa = "0.0.9"  # 0.0.8 → 0.0.9 closes RUSTSEC-2026-0125 (AVX2 verify edge case, severity 8.2)
 libcrux-ml-kem = "0.0.8"
 libcrux-sha3 = "0.0.8"
 # Legacy PQC (kept as fallback, migrating to libcrux)

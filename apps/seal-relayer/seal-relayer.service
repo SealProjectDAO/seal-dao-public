@@ -1,0 +1,111 @@
+# /etc/systemd/system/seal-relayer.service
+#
+# Systemd unit for the per-validator bridge unlock relayer.
+# Place at /etc/systemd/system/ and enable with:
+#
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now seal-relayer
+#   sudo journalctl -u seal-relayer -f
+#
+# Pre-flight (do once per host):
+#   1. Build + install the binary:
+#        cargo build --release -p seal-relayer
+#        sudo install -m 755 target/release/seal-relayer /usr/local/bin/
+#   2. Create the seal user + state dir:
+#        sudo useradd --system --home /var/lib/seal --shell /usr/sbin/nologin seal
+#        sudo install -d -o seal -g seal -m 700 /var/lib/seal
+#        sudo install -d -o seal -g seal -m 700 /var/lib/seal/keys
+#   3. Place the validator keyfile (validator.json) and the
+#      destination-chain wallets at /var/lib/seal/keys/, owned by
+#      seal:seal with mode 600.
+#   4. Fund the destination-chain keys:
+#        ./scripts/bridge-faucet.sh sol $(solana address -k /var/lib/seal/keys/solana-relayer.json)
+#        ./scripts/bridge-faucet.sh xlm $(stellar keys address seal-relayer)
+#   5. Drop in /etc/seal/relayer.env (mode 600) with operator-specific
+#      values (see EnvironmentFile below); systemd will inject them
+#      into the process environment without writing them on the
+#      command line where they'd show up in `ps`.
+#
+# Mainnet hardening notes (deferred today):
+#   * The destination-chain keys live as JSON files on the host.
+#     Move them behind an HSM / KMS once the relayer learns to
+#     delegate signing.
+#   * No fee reimbursement out of bridge fees yet — the validator
+#     pays gas directly. Top up monthly.
+
+[Unit]
+Description=Seal DAO bridge unlock relayer (per-validator)
+Documentation=file:///opt/seal/apps/seal-relayer/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=seal
+Group=seal
+WorkingDirectory=/var/lib/seal
+
+# Operator-specific values (RPC URLs, contract IDs, mint pubkeys,
+# vault ATAs, authority pubkey) live in this file so the unit itself
+# stays generic. Use `Environment=KEY=VAL` if you don't want a file.
+EnvironmentFile=-/etc/seal/relayer.env
+
+# The seal-relayer reads chain config from CLI flags (not env), so
+# the EnvironmentFile is interpolated into ExecStart via $VARS. If a
+# given chain isn't configured (e.g. you only relay Stellar), unset
+# the corresponding $SEAL_RELAYER_SOLANA_* vars in /etc/seal/relayer.env
+# and remove the matching --solana-* lines below.
+ExecStart=/usr/local/bin/seal-relayer \
+    --key /var/lib/seal/keys/validator.json \
+    --node ${SEAL_RELAYER_NODE_URL} \
+    --cursor-file /var/lib/seal/relayer-cursor.json \
+    --interval-secs ${SEAL_RELAYER_INTERVAL_SECS} \
+    --max-backoff-secs ${SEAL_RELAYER_MAX_BACKOFF_SECS} \
+    --metrics-bind ${SEAL_RELAYER_METRICS_BIND} \
+    --stellar-source ${SEAL_RELAYER_STELLAR_SOURCE} \
+    --stellar-network ${SEAL_RELAYER_STELLAR_NETWORK} \
+    --stellar-contract-id ${SEAL_RELAYER_STELLAR_CONTRACT_ID} \
+    --stellar-contract-dir ${SEAL_RELAYER_STELLAR_CONTRACT_DIR} \
+    --solana-program-id ${SEAL_RELAYER_SOLANA_PROGRAM_ID} \
+    --solana-cluster ${SEAL_RELAYER_SOLANA_CLUSTER} \
+    --solana-wallet /var/lib/seal/keys/solana-relayer.json \
+    --solana-authority ${SEAL_RELAYER_SOLANA_AUTHORITY} \
+    --anchor-program-dir ${SEAL_RELAYER_ANCHOR_DIR} \
+    --solana-mint-wsol ${SEAL_RELAYER_SOLANA_MINT_WSOL} \
+    --solana-vault-ata-wsol ${SEAL_RELAYER_SOLANA_VAULT_ATA_WSOL} \
+    --solana-mint-wusdc ${SEAL_RELAYER_SOLANA_MINT_WUSDC} \
+    --solana-vault-ata-wusdc ${SEAL_RELAYER_SOLANA_VAULT_ATA_WUSDC}
+
+# Restart policy. The relayer's main loop already retries individual
+# RPC + chain-submission failures, so we only restart on a hard exit
+# (panic, OOM, or the operator running `systemctl stop`).
+Restart=on-failure
+RestartSec=30s
+StartLimitInterval=600s
+StartLimitBurst=5
+
+# Hardening — minimize what the process can touch outside its state
+# directory. Drop these if your operator workflow needs the relayer
+# to spawn helpers from elsewhere on the host.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/seal /etc/seal
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+# stdout/stderr → journald — view with `journalctl -u seal-relayer -f`.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=seal-relayer
+
+[Install]
+WantedBy=multi-user.target

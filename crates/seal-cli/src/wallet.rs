@@ -154,6 +154,9 @@ pub fn run_wallet() {
                 }
             }
             "pairs" => list_pairs(&wallet),
+            "orders" | "my-orders" => list_my_orders(&wallet),
+            "trade-history" | "my-trades" => list_my_trade_history(&wallet),
+            "wrapped" | "wrapped-balances" => list_my_wrapped_balances(&wallet),
             "mpc" => {
                 if parts.len() < 4 {
                     eprintln!("Usage: mpc <sum|count|avg> <table> <column>");
@@ -220,7 +223,9 @@ fn print_help() {
     println!("Node:");
     println!("  connect <url>              Connect to a Seal node RPC");
     println!("  balance                    Show balance on connected node");
-    println!("  faucet [amount]            Dev-faucet drip to self (same amount syntax as transfer;");
+    println!(
+        "  faucet [amount]            Dev-faucet drip to self (same amount syntax as transfer;"
+    );
     println!("                             requires --dev-faucet on node)");
     println!("  height                     Show chain height");
     println!("  query <SQL>                Execute read-only SQL on node");
@@ -236,6 +241,9 @@ fn print_help() {
     println!("  cancel-order <PAIR> <id>   Cancel an order");
     println!("  orderbook <PAIR>           Show order book");
     println!("  pairs                      List trading pairs");
+    println!("  orders                     List my open orders across every pair");
+    println!("  trade-history              Recent trades I'm party to (maker or taker)");
+    println!("  wrapped                    Bridge wrapped balances (wSOL / wXLM / wUSDC)");
     println!("  mpc <func> <table> <col>   MPC aggregate (sum/count/avg)");
     println!("  zk <table> <statement>     ZK proof of SQL condition");
     println!();
@@ -252,7 +260,10 @@ fn create_wallet(network: Option<&str>) -> WalletState {
 
     println!("Created new wallet");
     println!("  Address:  {}", address);
-    println!("  Network:  {}", if testnet { "testnet" } else { "mainnet" });
+    println!(
+        "  Network:  {}",
+        if testnet { "testnet" } else { "mainnet" }
+    );
     println!();
     println!("  RECOVERY PHRASE (write this down!):");
     println!("  {}", mnemonic_display);
@@ -294,7 +305,12 @@ fn restore_wallet(hex_seed: &str) -> Option<WalletState> {
 
 fn import_wallet(words: &[&str]) -> Option<WalletState> {
     let phrase = words.join(" ");
-    match Seed::from_words(&phrase.split_whitespace().map(String::from).collect::<Vec<_>>()) {
+    match Seed::from_words(
+        &phrase
+            .split_whitespace()
+            .map(String::from)
+            .collect::<Vec<_>>(),
+    ) {
         Ok(seed) => {
             let mnemonic_display = seed.to_mnemonic_display();
             let seed_hex = seed.to_hex();
@@ -329,9 +345,16 @@ fn show_info(wallet: &Option<WalletState>) {
         Some(w) => {
             let vk = w.wallet.verifying_key();
             println!("Address:     {}", w.address);
-            println!("Public key:  {}...{}", &hex::encode(vk.to_bytes())[..16], &hex::encode(vk.to_bytes())[vk.to_bytes().len()*2-16..]);
+            println!(
+                "Public key:  {}...{}",
+                &hex::encode(vk.to_bytes())[..16],
+                &hex::encode(vk.to_bytes())[vk.to_bytes().len() * 2 - 16..]
+            );
             println!("Key type:    ML-DSA-65 (FIPS 204)");
-            println!("Key size:    {} bytes (signing), {} bytes (verifying)", 4032, 1952);
+            println!(
+                "Key size:    {} bytes (signing), {} bytes (verifying)",
+                4032, 1952
+            );
         }
         None => eprintln!("No wallet loaded."),
     }
@@ -339,16 +362,18 @@ fn show_info(wallet: &Option<WalletState>) {
 
 fn sign_message(wallet: &Option<WalletState>, message: &str) {
     match wallet {
-        Some(w) => {
-            match w.wallet.sign(message.as_bytes()) {
-                Ok(sig) => {
-                    let sig_hex = hex::encode(sig.to_bytes());
-                    println!("Signature: {}...{}", &sig_hex[..32], &sig_hex[sig_hex.len()-32..]);
-                    println!("Full ({} bytes): {}", sig.to_bytes().len(), sig_hex);
-                }
-                Err(e) => eprintln!("Signing failed: {}", e),
+        Some(w) => match w.wallet.sign(message.as_bytes()) {
+            Ok(sig) => {
+                let sig_hex = hex::encode(sig.to_bytes());
+                println!(
+                    "Signature: {}...{}",
+                    &sig_hex[..32],
+                    &sig_hex[sig_hex.len() - 32..]
+                );
+                println!("Full ({} bytes): {}", sig.to_bytes().len(), sig_hex);
             }
-        }
+            Err(e) => eprintln!("Signing failed: {}", e),
+        },
         None => eprintln!("No wallet loaded."),
     }
 }
@@ -394,7 +419,10 @@ fn export_key(wallet: &Option<WalletState>, filename: Option<&str>) {
                 "verifying_key": hex::encode(vk.to_bytes()),
                 "mnemonic": w.mnemonic_display,
             });
-            match std::fs::write(output, serde_json::to_string_pretty(&key_json).unwrap_or_default()) {
+            match std::fs::write(
+                output,
+                serde_json::to_string_pretty(&key_json).unwrap_or_default(),
+            ) {
                 Ok(()) => println!("Exported to {}", output),
                 Err(e) => eprintln!("Failed to write: {}", e),
             }
@@ -407,29 +435,46 @@ fn export_key(wallet: &Option<WalletState>, filename: Option<&str>) {
 
 fn connect_node(wallet: &mut Option<WalletState>, url: &str) {
     match wallet {
-        Some(w) => {
-            match rpc_call(url, "seal_getHeight", &serde_json::json!({})) {
-                Ok(resp) => {
-                    let height = resp.get("height").and_then(|h| h.as_u64()).unwrap_or(0);
-                    w.node_url = Some(url.to_string());
-                    println!("Connected to {} (height: {})", url, height);
-                }
-                Err(e) => eprintln!("Connection failed: {}", e),
+        Some(w) => match rpc_call(url, "seal_getHeight", &serde_json::json!({})) {
+            Ok(resp) => {
+                let height = resp.get("height").and_then(|h| h.as_u64()).unwrap_or(0);
+                w.node_url = Some(url.to_string());
+                println!("Connected to {} (height: {})", url, height);
             }
-        }
+            Err(e) => eprintln!("Connection failed: {}", e),
+        },
         None => eprintln!("Create a wallet first, then connect."),
     }
 }
 
 fn show_balance(wallet: &Option<WalletState>) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected. Use: connect <url>"); return; } };
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected. Use: connect <url>");
+            return;
+        }
+    };
 
     // Query SEAL balance
-    match rpc_call(url, "seal_getBalance", &serde_json::json!({"address": w.address})) {
+    match rpc_call(
+        url,
+        "seal_getBalance",
+        &serde_json::json!({"address": w.address}),
+    ) {
         Ok(resp) => {
             let bal = resp.get("balance").and_then(|b| b.as_u64()).unwrap_or(0);
-            let supply = resp.get("total_supply").and_then(|s| s.as_u64()).unwrap_or(0);
+            let supply = resp
+                .get("total_supply")
+                .and_then(|s| s.as_u64())
+                .unwrap_or(0);
             println!("SEAL balance: {}", format_seal(bal));
             println!("Total supply: {}", format_seal(supply));
         }
@@ -437,30 +482,48 @@ fn show_balance(wallet: &Option<WalletState>) {
     }
 
     // Query custom tokens
-    match rpc_call(url, "seal_listTokens", &serde_json::json!({})) {
-        Ok(resp) => {
-            if let Some(tokens) = resp.get("tokens").and_then(|t| t.as_array()) {
-                for token in tokens {
-                    let symbol = token.get("symbol").and_then(|s| s.as_str()).unwrap_or("?");
-                    match rpc_call(url, "seal_getTokenBalance", &serde_json::json!({"symbol": symbol, "address": w.address})) {
-                        Ok(tb) => {
-                            let bal = tb.get("balance").and_then(|b| b.as_u64()).unwrap_or(0);
-                            if bal > 0 {
-                                println!("{} balance: {}", symbol, bal);
-                            }
+    if let Ok(resp) = rpc_call(url, "seal_listTokens", &serde_json::json!({})) {
+        if let Some(tokens) = resp.get("tokens").and_then(|t| t.as_array()) {
+            for token in tokens {
+                let symbol = token.get("symbol").and_then(|s| s.as_str()).unwrap_or("?");
+                let frozen = token
+                    .get("frozen")
+                    .and_then(|f| f.as_bool())
+                    .unwrap_or(false);
+                if let Ok(tb) = rpc_call(
+                    url,
+                    "seal_getTokenBalance",
+                    &serde_json::json!({"symbol": symbol, "address": w.address}),
+                ) {
+                    let bal = tb.get("balance").and_then(|b| b.as_u64()).unwrap_or(0);
+                    if bal > 0 {
+                        if frozen {
+                            println!("{} balance: {} (FROZEN — transfers disabled)", symbol, bal);
+                        } else {
+                            println!("{} balance: {}", symbol, bal);
                         }
-                        Err(_) => {}
                     }
                 }
             }
         }
-        Err(_) => {}
     }
 }
 
 fn faucet_drip(wallet: &Option<WalletState>, amount: Option<u64>) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
     let mut params = serde_json::json!({ "address": w.address });
     if let Some(a) = amount {
         params["amount"] = serde_json::json!(a);
@@ -472,15 +535,25 @@ fn faucet_drip(wallet: &Option<WalletState>, amount: Option<u64>) {
             println!("Faucet dripped {}", format_seal(amt));
             println!("Balance now {}", format_seal(bal));
         }
-        Err(e) => eprintln!(
-            "Faucet failed: {e}\n  (Did the node start with --dev-faucet?)"
-        ),
+        Err(e) => eprintln!("Faucet failed: {e}\n  (Did the node start with --dev-faucet?)"),
     }
 }
 
 fn show_height(wallet: &Option<WalletState>) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
     match rpc_call(url, "seal_getHeight", &serde_json::json!({})) {
         Ok(resp) => {
             let height = resp.get("height").and_then(|h| h.as_u64()).unwrap_or(0);
@@ -491,8 +564,20 @@ fn show_height(wallet: &Option<WalletState>) {
 }
 
 fn query_node(wallet: &Option<WalletState>, sql: &str) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
     match rpc_call(url, "seal_querySql", &serde_json::json!({"sql": sql})) {
         Ok(resp) => {
             if let Some(columns) = resp.get("columns").and_then(|c| c.as_array()) {
@@ -517,9 +602,26 @@ fn query_node(wallet: &Option<WalletState>, sql: &str) {
 }
 
 fn send_tx(wallet: &Option<WalletState>, sql: &str) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
-    match signed_rpc_call(url, "seal_submitSql", &serde_json::json!({"sql": sql}), &w.wallet) {
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
+    match signed_rpc_call(
+        url,
+        "seal_submitSql",
+        &serde_json::json!({"sql": sql}),
+        &w.wallet,
+    ) {
         Ok(result) => {
             if let Some(affected) = result.get("rows_affected") {
                 println!("OK ({} rows affected)", affected);
@@ -588,6 +690,7 @@ fn tokenize_line(s: &str) -> Vec<String> {
 ///   - a bare integer      → base units (legacy, 1 = 10⁻⁹ SEAL)
 ///   - a decimal           → SEAL (`1.5` = 1 500 000 000 base units)
 ///   - trailing `SEAL`     → force SEAL interpretation (`50 SEAL`, `1.5SEAL`)
+///
 /// Returns the amount in base units (9-decimal precision).
 pub fn parse_amount(raw: &str) -> Result<u64, String> {
     const DECIMALS: u32 = 9;
@@ -660,13 +763,33 @@ pub fn format_seal(base_units: u64) -> String {
 }
 
 fn transfer_seal(wallet: &Option<WalletState>, to: &str, amount_str: &str) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
     let amount: u64 = match parse_amount(amount_str) {
         Ok(a) => a,
-        Err(e) => { eprintln!("Invalid amount: {e}"); return; }
+        Err(e) => {
+            eprintln!("Invalid amount: {e}");
+            return;
+        }
     };
-    match signed_rpc_call(url, "seal_transfer", &serde_json::json!({"to": to, "amount": amount}), &w.wallet) {
+    match signed_rpc_call(
+        url,
+        "seal_transfer",
+        &serde_json::json!({"to": to, "amount": amount}),
+        &w.wallet,
+    ) {
         Ok(resp) => {
             println!("Transferred {} to {}", format_seal(amount), to);
             if let Some(status) = resp.get("status").and_then(|s| s.as_str()) {
@@ -678,11 +801,28 @@ fn transfer_seal(wallet: &Option<WalletState>, to: &str, amount_str: &str) {
 }
 
 fn create_token(wallet: &Option<WalletState>, symbol: &str, name: &str, max_supply: u64) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
-    match signed_rpc_call(url, "seal_createToken", &serde_json::json!({
-        "symbol": symbol, "name": name, "decimals": 9, "max_supply": max_supply
-    }), &w.wallet) {
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
+    match signed_rpc_call(
+        url,
+        "seal_createToken",
+        &serde_json::json!({
+            "symbol": symbol, "name": name, "decimals": 9, "max_supply": max_supply
+        }),
+        &w.wallet,
+    ) {
         Ok(resp) => {
             println!("Token created: {}", symbol);
             if let Some(creator) = resp.get("creator").and_then(|c| c.as_str()) {
@@ -694,37 +834,75 @@ fn create_token(wallet: &Option<WalletState>, symbol: &str, name: &str, max_supp
 }
 
 fn mint_token(wallet: &Option<WalletState>, symbol: &str, to: &str, amount_str: &str) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
     // Custom tokens use the same 9-decimal convention as SEAL (see
     // create_token `"decimals": 9`), so `parse_amount` applies.
     let amount: u64 = match parse_amount(amount_str) {
         Ok(a) => a,
-        Err(e) => { eprintln!("Invalid amount: {e}"); return; }
+        Err(e) => {
+            eprintln!("Invalid amount: {e}");
+            return;
+        }
     };
-    match signed_rpc_call(url, "seal_mintToken", &serde_json::json!({"symbol": symbol, "to": to, "amount": amount}), &w.wallet) {
+    match signed_rpc_call(
+        url,
+        "seal_mintToken",
+        &serde_json::json!({"symbol": symbol, "to": to, "amount": amount}),
+        &w.wallet,
+    ) {
         Ok(_) => println!("Minted {} {} to {}", amount, symbol, to),
         Err(e) => eprintln!("Mint failed: {}", e),
     }
 }
 
 fn list_tokens(wallet: &Option<WalletState>) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
     match rpc_call(url, "seal_listTokens", &serde_json::json!({})) {
         Ok(resp) => {
             if let Some(tokens) = resp.get("tokens").and_then(|t| t.as_array()) {
                 if tokens.is_empty() {
                     println!("No custom tokens created yet.");
                 } else {
-                    println!("{:<8} {:<15} {:>12} {:>12}", "SYMBOL", "NAME", "SUPPLY", "MAX");
-                    println!("{}", "-".repeat(50));
+                    println!(
+                        "{:<8} {:<15} {:>12} {:>12} {:>6}",
+                        "SYMBOL", "NAME", "SUPPLY", "MAX", "FRZ"
+                    );
+                    println!("{}", "-".repeat(57));
                     for t in tokens {
-                        println!("{:<8} {:<15} {:>12} {:>12}",
+                        let frozen = t.get("frozen").and_then(|f| f.as_bool()).unwrap_or(false);
+                        println!(
+                            "{:<8} {:<15} {:>12} {:>12} {:>6}",
                             t.get("symbol").and_then(|s| s.as_str()).unwrap_or("?"),
                             t.get("name").and_then(|s| s.as_str()).unwrap_or("?"),
                             t.get("total_supply").and_then(|s| s.as_u64()).unwrap_or(0),
                             t.get("max_supply").and_then(|s| s.as_u64()).unwrap_or(0),
+                            if frozen { "YES" } else { "no" },
                         );
                     }
                 }
@@ -735,22 +913,74 @@ fn list_tokens(wallet: &Option<WalletState>) {
 }
 
 fn create_pair(wallet: &Option<WalletState>, base: &str, quote: &str) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
-    match signed_rpc_call(url, "seal_createPair", &serde_json::json!({"base": base, "quote": quote}), &w.wallet) {
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
+    match signed_rpc_call(
+        url,
+        "seal_createPair",
+        &serde_json::json!({"base": base, "quote": quote}),
+        &w.wallet,
+    ) {
         Ok(_) => println!("Pair created: {}/{}", base, quote),
         Err(e) => eprintln!("Create pair failed: {}", e),
     }
 }
 
-fn place_order(wallet: &Option<WalletState>, pair: &str, side: &str, price_str: &str, qty_str: &str) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
-    let price: u64 = match price_str.parse() { Ok(p) => p, Err(_) => { eprintln!("Invalid price"); return; } };
-    let quantity: u64 = match qty_str.parse() { Ok(q) => q, Err(_) => { eprintln!("Invalid quantity"); return; } };
-    match signed_rpc_call(url, "seal_placeOrder", &serde_json::json!({
-        "pair": pair, "side": side, "price": price, "quantity": quantity
-    }), &w.wallet) {
+fn place_order(
+    wallet: &Option<WalletState>,
+    pair: &str,
+    side: &str,
+    price_str: &str,
+    qty_str: &str,
+) {
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
+    let price: u64 = match price_str.parse() {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("Invalid price");
+            return;
+        }
+    };
+    let quantity: u64 = match qty_str.parse() {
+        Ok(q) => q,
+        Err(_) => {
+            eprintln!("Invalid quantity");
+            return;
+        }
+    };
+    match signed_rpc_call(
+        url,
+        "seal_placeOrder",
+        &serde_json::json!({
+            "pair": pair, "side": side, "price": price, "quantity": quantity
+        }),
+        &w.wallet,
+    ) {
         Ok(resp) => {
             let oid = resp.get("order_id").and_then(|o| o.as_u64()).unwrap_or(0);
             let trades = resp.get("trades").and_then(|t| t.as_u64()).unwrap_or(0);
@@ -761,51 +991,112 @@ fn place_order(wallet: &Option<WalletState>, pair: &str, side: &str, price_str: 
 }
 
 fn cancel_order(wallet: &Option<WalletState>, pair: &str, order_id_str: &str) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
-    let order_id: u64 = match order_id_str.parse() { Ok(o) => o, Err(_) => { eprintln!("Invalid order ID"); return; } };
-    match signed_rpc_call(url, "seal_cancelOrder", &serde_json::json!({"pair": pair, "order_id": order_id}), &w.wallet) {
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
+    let order_id: u64 = match order_id_str.parse() {
+        Ok(o) => o,
+        Err(_) => {
+            eprintln!("Invalid order ID");
+            return;
+        }
+    };
+    match signed_rpc_call(
+        url,
+        "seal_cancelOrder",
+        &serde_json::json!({"pair": pair, "order_id": order_id}),
+        &w.wallet,
+    ) {
         Ok(_) => println!("Order #{} cancelled", order_id),
         Err(e) => eprintln!("Cancel failed: {}", e),
     }
 }
 
 fn show_orderbook(wallet: &Option<WalletState>, pair: &str) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
     match rpc_call(url, "seal_getOrderBook", &serde_json::json!({"pair": pair})) {
         Ok(resp) => {
-            let bids: Vec<(u64, u64)> = resp.get("bids").and_then(|b| b.as_array()).map(|arr| {
-                arr.iter().map(|o| (
-                    o.get("price").and_then(|p| p.as_u64()).unwrap_or(0),
-                    o.get("quantity").and_then(|q| q.as_u64()).unwrap_or(0),
-                )).collect()
-            }).unwrap_or_default();
-            let asks: Vec<(u64, u64)> = resp.get("asks").and_then(|a| a.as_array()).map(|arr| {
-                arr.iter().map(|o| (
-                    o.get("price").and_then(|p| p.as_u64()).unwrap_or(0),
-                    o.get("quantity").and_then(|q| q.as_u64()).unwrap_or(0),
-                )).collect()
-            }).unwrap_or_default();
+            let bids: Vec<(u64, u64)> = resp
+                .get("bids")
+                .and_then(|b| b.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|o| {
+                            (
+                                o.get("price").and_then(|p| p.as_u64()).unwrap_or(0),
+                                o.get("quantity").and_then(|q| q.as_u64()).unwrap_or(0),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let asks: Vec<(u64, u64)> = resp
+                .get("asks")
+                .and_then(|a| a.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .map(|o| {
+                            (
+                                o.get("price").and_then(|p| p.as_u64()).unwrap_or(0),
+                                o.get("quantity").and_then(|q| q.as_u64()).unwrap_or(0),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
 
-            let max_qty = bids.iter().chain(asks.iter()).map(|(_, q)| *q).max().unwrap_or(1);
+            let max_qty = bids
+                .iter()
+                .chain(asks.iter())
+                .map(|(_, q)| *q)
+                .max()
+                .unwrap_or(1);
             let bar_width: u64 = 20;
 
             println!("  {}", pair);
-            println!("  {:>8}  {:>6}  {:>10}  {}", "QTY", "PRICE", "TOTAL", "");
+            println!("  {:>8}  {:>6}  {:>10}  ", "QTY", "PRICE", "TOTAL");
             println!("  {}", "-".repeat(50));
 
             // Asks: sorted highest-first (top), red
             let mut sorted_asks = asks.clone();
             sorted_asks.sort_by(|a, b| b.0.cmp(&a.0));
             if sorted_asks.is_empty() {
-                println!("  {:>8}  {:>6}  {:>10}  {}", "--", "--", "--", "(no asks)");
+                println!("  {:>8}  {:>6}  {:>10}  (no asks)", "--", "--", "--");
             }
             for (price, qty) in &sorted_asks {
                 let total = price * qty;
                 let bars = (qty * bar_width / max_qty) as usize;
-                println!("  \x1b[31m{:>8}\x1b[0m  {:>6}  {:>10}  \x1b[31m{}\x1b[0m",
-                    qty, price, total, "\u{2588}".repeat(bars));
+                println!(
+                    "  \x1b[31m{:>8}\x1b[0m  {:>6}  {:>10}  \x1b[31m{}\x1b[0m",
+                    qty,
+                    price,
+                    total,
+                    "\u{2588}".repeat(bars)
+                );
             }
 
             // Spread
@@ -813,8 +1104,10 @@ fn show_orderbook(wallet: &Option<WalletState>, pair: &str) {
             let best_ask = sorted_asks.last().map(|(p, _)| *p).unwrap_or(0);
             if best_bid > 0 && best_ask > 0 {
                 let spread = best_ask.saturating_sub(best_bid);
-                println!("  {:>8}  \x1b[33m{:>6}\x1b[0m  {:>10}  spread",
-                    "", spread, "");
+                println!(
+                    "  {:>8}  \x1b[33m{:>6}\x1b[0m  {:>10}  spread",
+                    "", spread, ""
+                );
             } else {
                 println!("  {:>8}  {:>6}  {:>10}  spread: --", "", "--", "");
             }
@@ -823,13 +1116,18 @@ fn show_orderbook(wallet: &Option<WalletState>, pair: &str) {
             let mut sorted_bids = bids.clone();
             sorted_bids.sort_by(|a, b| b.0.cmp(&a.0));
             if sorted_bids.is_empty() {
-                println!("  {:>8}  {:>6}  {:>10}  {}", "--", "--", "--", "(no bids)");
+                println!("  {:>8}  {:>6}  {:>10}  (no bids)", "--", "--", "--");
             }
             for (price, qty) in &sorted_bids {
                 let total = price * qty;
                 let bars = (qty * bar_width / max_qty) as usize;
-                println!("  \x1b[32m{:>8}\x1b[0m  {:>6}  {:>10}  \x1b[32m{}\x1b[0m",
-                    qty, price, total, "\u{2588}".repeat(bars));
+                println!(
+                    "  \x1b[32m{:>8}\x1b[0m  {:>6}  {:>10}  \x1b[32m{}\x1b[0m",
+                    qty,
+                    price,
+                    total,
+                    "\u{2588}".repeat(bars)
+                );
             }
             println!("  {}", "-".repeat(50));
         }
@@ -838,16 +1136,192 @@ fn show_orderbook(wallet: &Option<WalletState>, pair: &str) {
 }
 
 fn list_pairs(wallet: &Option<WalletState>) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
     match rpc_call(url, "seal_listPairs", &serde_json::json!({})) {
         Ok(resp) => {
             if let Some(pairs) = resp.get("pairs").and_then(|p| p.as_array()) {
                 if pairs.is_empty() {
                     println!("No trading pairs created yet.");
                 } else {
+                    // `seal_listPairs` returns objects of the shape
+                    // `{pair, last_price, volume_24h, trade_count}` —
+                    // not bare strings — so the previous `p.as_str()`
+                    // print path always rendered "?". Pull the named
+                    // fields out and align them as a small table.
+                    println!(
+                        "{:<16}  {:>12}  {:>14}  {:>8}",
+                        "pair", "last_price", "volume_24h", "trades"
+                    );
                     for p in pairs {
-                        println!("  {}", p.as_str().unwrap_or("?"));
+                        let pair = p.get("pair").and_then(|v| v.as_str()).unwrap_or("?");
+                        let last_price = p.get("last_price").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let volume_24h = p.get("volume_24h").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let trade_count =
+                            p.get("trade_count").and_then(|v| v.as_u64()).unwrap_or(0);
+                        println!(
+                            "{:<16}  {:>12}  {:>14}  {:>8}",
+                            pair, last_price, volume_24h, trade_count
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => eprintln!("{}", e),
+    }
+}
+
+/// Show every open order owned by the active wallet across all
+/// trading pairs. Reads `seal_listOrdersByOwner` (unsigned;
+/// the address is a query param, not a signing field).
+fn list_my_orders(wallet: &Option<WalletState>) {
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
+    match rpc_call(
+        url,
+        "seal_listOrdersByOwner",
+        &serde_json::json!({"address": w.address}),
+    ) {
+        Ok(resp) => {
+            if let Some(orders) = resp.get("orders").and_then(|o| o.as_array()) {
+                if orders.is_empty() {
+                    println!("No open orders for {}.", w.address);
+                } else {
+                    println!(
+                        "{:<14}  {:>8}  {:<5}  {:>10}  {:>10}  {:>10}",
+                        "pair", "id", "side", "price", "qty", "remaining"
+                    );
+                    for o in orders {
+                        let pair = o.get("pair").and_then(|v| v.as_str()).unwrap_or("?");
+                        let id = o.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let side = o.get("side").and_then(|v| v.as_str()).unwrap_or("?");
+                        let price = o.get("price").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let qty = o.get("quantity").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let remaining = o.get("remaining").and_then(|v| v.as_u64()).unwrap_or(0);
+                        println!(
+                            "{:<14}  {:>8}  {:<5}  {:>10}  {:>10}  {:>10}",
+                            pair, id, side, price, qty, remaining
+                        );
+                    }
+                    println!("\n{} open order(s).", orders.len());
+                }
+            }
+        }
+        Err(e) => eprintln!("{}", e),
+    }
+}
+
+/// Show recent trades involving the active wallet (maker or
+/// taker). Bounded by each pair's `MAX_TRADE_HISTORY`. Sorted
+/// newest-first.
+fn list_my_trade_history(wallet: &Option<WalletState>) {
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
+    match rpc_call(
+        url,
+        "seal_listTradesByOwner",
+        &serde_json::json!({"address": w.address, "limit": 100}),
+    ) {
+        Ok(resp) => {
+            if let Some(trades) = resp.get("trades").and_then(|t| t.as_array()) {
+                if trades.is_empty() {
+                    println!("No retained trades for {}.", w.address);
+                } else {
+                    println!(
+                        "{:<14}  {:>8}  {:<5}  {:>10}  {:>10}  {:>12}",
+                        "pair", "id", "role", "price", "qty", "timestamp"
+                    );
+                    for t in trades {
+                        let pair = t.get("pair").and_then(|v| v.as_str()).unwrap_or("?");
+                        let id = t.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let price = t.get("price").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let qty = t.get("quantity").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let ts = t.get("timestamp").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let maker = t.get("maker").and_then(|v| v.as_str()).unwrap_or("?");
+                        let role = if maker == w.address { "maker" } else { "taker" };
+                        println!(
+                            "{:<14}  {:>8}  {:<5}  {:>10}  {:>10}  {:>12}",
+                            pair, id, role, price, qty, ts
+                        );
+                    }
+                    println!("\n{} trade(s).", trades.len());
+                }
+            }
+        }
+        Err(e) => eprintln!("{}", e),
+    }
+}
+
+/// Show every non-zero bridge wrapped-token balance owned by
+/// the active wallet. Reads `seal_listBridgeWrappedBalances`
+/// (unsigned). Skips zero-balance entries node-side.
+fn list_my_wrapped_balances(wallet: &Option<WalletState>) {
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
+    match rpc_call(
+        url,
+        "seal_listBridgeWrappedBalances",
+        &serde_json::json!({"address": w.address}),
+    ) {
+        Ok(resp) => {
+            if let Some(balances) = resp.get("balances").and_then(|b| b.as_array()) {
+                if balances.is_empty() {
+                    println!("No wrapped balances for {}.", w.address);
+                } else {
+                    println!("{:<8}  {:<10}  {:>16}", "token", "chain", "balance");
+                    for b in balances {
+                        let token = b.get("token").and_then(|v| v.as_str()).unwrap_or("?");
+                        let chain = b.get("chain").and_then(|v| v.as_str()).unwrap_or("?");
+                        let bal = b.get("balance").and_then(|v| v.as_u64()).unwrap_or(0);
+                        println!("{:<8}  {:<10}  {:>16}", token, chain, bal);
                     }
                 }
             }
@@ -857,36 +1331,85 @@ fn list_pairs(wallet: &Option<WalletState>) {
 }
 
 fn mpc_aggregate(wallet: &Option<WalletState>, function: &str, table: &str, column: &str) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
-    match rpc_call(url, "seal_mpcAggregate", &serde_json::json!({"function": function, "table": table, "column": column})) {
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
+    match rpc_call(
+        url,
+        "seal_mpcAggregate",
+        &serde_json::json!({"function": function, "table": table, "column": column}),
+    ) {
         Ok(resp) => {
             let result = resp.get("result").and_then(|r| r.as_i64()).unwrap_or(0);
             let count = resp.get("row_count").and_then(|r| r.as_u64()).unwrap_or(0);
-            println!("{}({}.{}) = {} ({} rows)", function, table, column, result, count);
+            println!(
+                "{}({}.{}) = {} ({} rows)",
+                function, table, column, result, count
+            );
         }
         Err(e) => eprintln!("{}", e),
     }
 }
 
 fn zk_prove(wallet: &Option<WalletState>, table: &str, statement: &str) {
-    let w = match wallet { Some(w) => w, None => { eprintln!("No wallet."); return; } };
-    let url = match &w.node_url { Some(u) => u, None => { eprintln!("Not connected."); return; } };
-    match rpc_call(url, "seal_zkProve", &serde_json::json!({"table": table, "statement": statement})) {
+    let w = match wallet {
+        Some(w) => w,
+        None => {
+            eprintln!("No wallet.");
+            return;
+        }
+    };
+    let url = match &w.node_url {
+        Some(u) => u,
+        None => {
+            eprintln!("Not connected.");
+            return;
+        }
+    };
+    match rpc_call(
+        url,
+        "seal_zkProve",
+        &serde_json::json!({"table": table, "statement": statement}),
+    ) {
         Ok(resp) => {
-            let satisfied = resp.get("satisfied").and_then(|s| s.as_bool()).unwrap_or(false);
+            let satisfied = resp
+                .get("satisfied")
+                .and_then(|s| s.as_bool())
+                .unwrap_or(false);
             let proof = resp.get("proof").and_then(|p| p.as_str()).unwrap_or("");
-            let height = resp.get("block_height").and_then(|h| h.as_u64()).unwrap_or(0);
+            let height = resp
+                .get("block_height")
+                .and_then(|h| h.as_u64())
+                .unwrap_or(0);
             println!("Statement: {} WHERE {}", table, statement);
             println!("Satisfied: {}", if satisfied { "YES" } else { "NO" });
-            println!("Proof:     {}...{}", &proof[..16.min(proof.len())], &proof[proof.len().saturating_sub(16)..]);
+            println!(
+                "Proof:     {}...{}",
+                &proof[..16.min(proof.len())],
+                &proof[proof.len().saturating_sub(16)..]
+            );
             println!("Height:    {}", height);
         }
         Err(e) => eprintln!("{}", e),
     }
 }
 
-fn rpc_call(url: &str, method: &str, params: &serde_json::Value) -> Result<serde_json::Value, String> {
+fn rpc_call(
+    url: &str,
+    method: &str,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "method": method,
@@ -895,16 +1418,27 @@ fn rpc_call(url: &str, method: &str, params: &serde_json::Value) -> Result<serde
     });
     let resp = rpc_call_raw(url, &body)?;
     if let Some(error) = resp.get("error") {
-        return Err(error.get("message").and_then(|m| m.as_str()).unwrap_or("unknown").to_string());
+        return Err(error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown")
+            .to_string());
     }
     resp.get("result").cloned().ok_or("no result".to_string())
 }
 
-fn signed_rpc_call(url: &str, method: &str, params: &serde_json::Value, wallet: &Wallet) -> Result<serde_json::Value, String> {
+fn signed_rpc_call(
+    url: &str,
+    method: &str,
+    params: &serde_json::Value,
+    wallet: &Wallet,
+) -> Result<serde_json::Value, String> {
     let params_json = serde_json::to_string(params).unwrap_or_default();
     let message = format!("{}{}", method, params_json);
     let message_hash = seal_crypto::hash::sha3_256(message.as_bytes());
-    let sig = wallet.sign(message_hash.as_ref()).map_err(|e| format!("signing failed: {}", e))?;
+    let sig = wallet
+        .sign(message_hash.as_ref())
+        .map_err(|e| format!("signing failed: {}", e))?;
     let vk = wallet.verifying_key();
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -916,7 +1450,11 @@ fn signed_rpc_call(url: &str, method: &str, params: &serde_json::Value, wallet: 
     });
     let resp = rpc_call_raw(url, &body)?;
     if let Some(error) = resp.get("error") {
-        return Err(error.get("message").and_then(|m| m.as_str()).unwrap_or("unknown").to_string());
+        return Err(error
+            .get("message")
+            .and_then(|m| m.as_str())
+            .unwrap_or("unknown")
+            .to_string());
     }
     resp.get("result").cloned().ok_or("no result".to_string())
 }
@@ -924,17 +1462,23 @@ fn signed_rpc_call(url: &str, method: &str, params: &serde_json::Value, wallet: 
 fn rpc_call_raw(url: &str, body: &serde_json::Value) -> Result<serde_json::Value, String> {
     use std::io::{Read, Write};
     let addr = url.trim_start_matches("http://");
-    let mut stream = std::net::TcpStream::connect(addr)
-        .map_err(|e| format!("connect: {}", e))?;
+    let mut stream = std::net::TcpStream::connect(addr).map_err(|e| format!("connect: {}", e))?;
     let body_str = body.to_string();
     let req = format!(
         "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body_str.len(), body_str
     );
-    stream.write_all(req.as_bytes()).map_err(|e| format!("send: {}", e))?;
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("send: {}", e))?;
     let mut response = String::new();
-    stream.read_to_string(&mut response).map_err(|e| format!("read: {}", e))?;
-    let json_start = response.find("\r\n\r\n").map(|p| p + 4).ok_or("bad response")?;
+    stream
+        .read_to_string(&mut response)
+        .map_err(|e| format!("read: {}", e))?;
+    let json_start = response
+        .find("\r\n\r\n")
+        .map(|p| p + 4)
+        .ok_or("bad response")?;
     serde_json::from_str(&response[json_start..]).map_err(|e| format!("parse: {}", e))
 }
 
@@ -944,28 +1488,36 @@ mod tests {
 
     #[test]
     fn tokenize_plain_words() {
-        assert_eq!(tokenize_line("create-token GOLD Gold 1000000"),
-                   vec!["create-token", "GOLD", "Gold", "1000000"]);
+        assert_eq!(
+            tokenize_line("create-token GOLD Gold 1000000"),
+            vec!["create-token", "GOLD", "Gold", "1000000"]
+        );
     }
 
     #[test]
     fn tokenize_double_quoted() {
         // The original bug: `"Gold Coin"` was split into two args and the
         // trailing number was shoved down an index.
-        assert_eq!(tokenize_line("create-token GOLD \"Gold Coin\" 1000000"),
-                   vec!["create-token", "GOLD", "Gold Coin", "1000000"]);
+        assert_eq!(
+            tokenize_line("create-token GOLD \"Gold Coin\" 1000000"),
+            vec!["create-token", "GOLD", "Gold Coin", "1000000"]
+        );
     }
 
     #[test]
     fn tokenize_single_quoted() {
-        assert_eq!(tokenize_line("mint GOLD 'with spaces' 5"),
-                   vec!["mint", "GOLD", "with spaces", "5"]);
+        assert_eq!(
+            tokenize_line("mint GOLD 'with spaces' 5"),
+            vec!["mint", "GOLD", "with spaces", "5"]
+        );
     }
 
     #[test]
     fn tokenize_escaped_quote() {
-        assert_eq!(tokenize_line(r#"sign "hello \"world\"""#),
-                   vec!["sign", r#"hello "world""#]);
+        assert_eq!(
+            tokenize_line(r#"sign "hello \"world\"""#),
+            vec!["sign", r#"hello "world""#]
+        );
     }
 
     #[test]
@@ -1008,9 +1560,15 @@ mod tests {
 
     #[test]
     fn format_seal_round_trip() {
-        assert_eq!(format_seal(25_000_000_000), "25 SEAL (25000000000 base units)");
+        assert_eq!(
+            format_seal(25_000_000_000),
+            "25 SEAL (25000000000 base units)"
+        );
         assert_eq!(format_seal(500_000_000), "0.5 SEAL (500000000 base units)");
-        assert_eq!(format_seal(1_234_567_891), "1.234567891 SEAL (1234567891 base units)");
+        assert_eq!(
+            format_seal(1_234_567_891),
+            "1.234567891 SEAL (1234567891 base units)"
+        );
         assert_eq!(format_seal(50), "0.00000005 SEAL (50 base units)");
         assert_eq!(format_seal(0), "0 SEAL (0 base units)");
     }

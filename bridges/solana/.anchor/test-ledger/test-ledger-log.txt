@@ -1,1 +1,0 @@
-Error: program file does not exist: /Users/bechaderenaud/work/seal/seal-dao-master/bridges/solana/target/deploy/seal_bridge.so

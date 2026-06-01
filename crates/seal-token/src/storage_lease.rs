@@ -147,6 +147,41 @@ impl LeaseManager {
     pub fn count(&self) -> usize {
         self.leases.len()
     }
+
+    /// Snapshot of every active lease, sorted by table name so a
+    /// polling client can diff a previous snapshot. Used by the
+    /// `seal_listLeases` RPC for the explorer Storage panel and
+    /// operator dashboards.
+    pub fn all_leases(&self) -> Vec<&StorageLease> {
+        let mut out: Vec<&StorageLease> = self.leases.values().collect();
+        out.sort_by(|a, b| a.table.cmp(&b.table));
+        out
+    }
+
+    /// Snapshot of every lease whose owner derives to
+    /// `address_hash` (the 32-byte SHA3-256 of the owner's
+    /// ML-DSA verifying-key). Sorted lexicographically by table
+    /// name — same diff-stable order as `all_leases`. Empty Vec
+    /// for owners with no leases. Backs `seal_listLeasesByOwner`.
+    /// The hash form is what's testnet/mainnet-agnostic: both
+    /// `seal1...` and `sealt1...` encodings of the same key
+    /// produce identical bytes here, so a wallet doesn't need
+    /// to know which network the lease was registered on.
+    pub fn leases_by_owner_hash(&self, address_hash: &[u8; 32]) -> Vec<&StorageLease> {
+        let mut out: Vec<&StorageLease> = self
+            .leases
+            .values()
+            .filter(|l| {
+                // The lease stores the raw verifying-key bytes;
+                // a bech32m address encodes SHA3(verifying_key).
+                // Hash the lease's pubkey and compare.
+                let h = seal_crypto::sha3_256(&l.owner);
+                h.0 == *address_hash
+            })
+            .collect();
+        out.sort_by(|a, b| a.table.cmp(&b.table));
+        out
+    }
 }
 
 #[cfg(test)]
@@ -220,5 +255,55 @@ mod tests {
         let to_prune = mgr.tables_to_prune(20_000_000);
         assert_eq!(to_prune.len(), 1);
         assert_eq!(to_prune[0], "app2:t2");
+    }
+
+    #[test]
+    fn test_lease_manager_all_leases_sorted() {
+        let mut mgr = LeaseManager::new();
+        // Insert in non-alphabetical order — accessor must sort.
+        mgr.register(StorageLease::new("zoo:cats".into(), vec![1; 32], 1));
+        mgr.register(StorageLease::new("alpha:dogs".into(), vec![2; 32], 1));
+        mgr.register(StorageLease::new("middle:fish".into(), vec![3; 32], 1));
+        let all = mgr.all_leases();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].table, "alpha:dogs");
+        assert_eq!(all[1].table, "middle:fish");
+        assert_eq!(all[2].table, "zoo:cats");
+        // Empty manager → empty Vec, no panic.
+        let empty = LeaseManager::new();
+        assert!(empty.all_leases().is_empty());
+    }
+
+    #[test]
+    fn test_lease_manager_leases_by_owner_hash() {
+        let mut mgr = LeaseManager::new();
+        // Two distinct owner-key fixtures. SHA3-256 of each gives
+        // the address-hash that the RPC compares against.
+        let alice_key = vec![1u8; 32];
+        let bob_key = vec![2u8; 32];
+        let alice_hash = seal_crypto::sha3_256(&alice_key).0;
+        let bob_hash = seal_crypto::sha3_256(&bob_key).0;
+        // Alice owns two tables, bob owns one. Insert in non-
+        // alphabetical order — accessor must sort by table name.
+        mgr.register(StorageLease::new("zoo:cats".into(), alice_key.clone(), 1));
+        mgr.register(StorageLease::new("alpha:dogs".into(), alice_key.clone(), 1));
+        mgr.register(StorageLease::new("middle:fish".into(), bob_key.clone(), 1));
+        // Alice: ["alpha:dogs", "zoo:cats"], sorted.
+        let alice: Vec<&str> = mgr
+            .leases_by_owner_hash(&alice_hash)
+            .iter()
+            .map(|l| l.table.as_str())
+            .collect();
+        assert_eq!(alice, vec!["alpha:dogs", "zoo:cats"]);
+        // Bob: ["middle:fish"].
+        let bob: Vec<&str> = mgr
+            .leases_by_owner_hash(&bob_hash)
+            .iter()
+            .map(|l| l.table.as_str())
+            .collect();
+        assert_eq!(bob, vec!["middle:fish"]);
+        // Unknown owner-hash: empty Vec, not error.
+        let unknown_hash = [0u8; 32];
+        assert!(mgr.leases_by_owner_hash(&unknown_hash).is_empty());
     }
 }

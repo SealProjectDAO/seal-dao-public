@@ -1,0 +1,15 @@
+/home/pc/work/seal-dao-master/apps/seal-wallet-android/target/debug/deps/borsh-25317692cf76907f.d: /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/lib.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/de/mod.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/de/hint.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/ser/mod.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/ser/helpers.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/error.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/../docs/rustdoc_include/borsh_crate_top_level.md /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/../docs/rustdoc_include/borsh_deserialize.md /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/../docs/rustdoc_include/borsh_serialize.md
+
+/home/pc/work/seal-dao-master/apps/seal-wallet-android/target/debug/deps/libborsh-25317692cf76907f.rlib: /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/lib.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/de/mod.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/de/hint.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/ser/mod.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/ser/helpers.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/error.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/../docs/rustdoc_include/borsh_crate_top_level.md /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/../docs/rustdoc_include/borsh_deserialize.md /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/../docs/rustdoc_include/borsh_serialize.md
+
+/home/pc/work/seal-dao-master/apps/seal-wallet-android/target/debug/deps/libborsh-25317692cf76907f.rmeta: /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/lib.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/de/mod.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/de/hint.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/ser/mod.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/ser/helpers.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/error.rs /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/../docs/rustdoc_include/borsh_crate_top_level.md /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/../docs/rustdoc_include/borsh_deserialize.md /home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/../docs/rustdoc_include/borsh_serialize.md
+
+/home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/lib.rs:
+/home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/de/mod.rs:
+/home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/de/hint.rs:
+/home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/ser/mod.rs:
+/home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/ser/helpers.rs:
+/home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/error.rs:
+/home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/../docs/rustdoc_include/borsh_crate_top_level.md:
+/home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/../docs/rustdoc_include/borsh_deserialize.md:
+/home/pc/work/seal-dao-master/vendor/borsh-1.6.1/src/../docs/rustdoc_include/borsh_serialize.md:

@@ -83,7 +83,11 @@ anchor deploy --provider.cluster devnet
 - [ ] Full algebraic Ringtail verify in BPF (48-bit prime, sparse
       polynomial ops; ~150-200K CU budget estimate).
 - [ ] Add nonce replay protection (bitmap or set)
-- [ ] Add pause/unpause admin functionality
+- [x] Add pause/unpause admin functionality (`set_pause` ix, admin-only;
+      `paused: bool` in `BridgeState`; `lock_tokens` and `unlock_tokens`
+      reject with `BridgePaused` while set; `PauseStateChanged` event).
+      Defence-in-depth on top of the Seal-side per-chain pause
+      (`seal_bridgePauseChain`, 2/3 Technical Council).
 - [ ] Add fee collection mechanism
 - [ ] Add rate limiting
 - [ ] Integration tests with Seal DAO testnet relayer

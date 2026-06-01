@@ -1,0 +1,192 @@
+# Ringtail 5-validator override — layers the per-validator
+# Ringtail flags + keypair mounts on top of the main 5-validator
+# stack at `docker-compose.yml`. This is **Variant B (5-of-5
+# full committee)** from `docs/TESTNET-VALIDATOR-SIZES.md` §2.2.
+#
+# Prereqs:
+#   * 5 keypair files at `bridges/ringtail-keys/validator-1.json`
+#     … `validator-5.json` (one per validator; for the n-of-n
+#     cross-check fixture every validator shares the same sk).
+#     Generate via:
+#       cargo run --release -p seal-bridge --features ringtail-singleton \
+#           --example bridge-ringtail-keygen \
+#           -- bridges/ringtail-keys/shared.json
+#       for i in 1 2 3 4 5; do
+#           cp bridges/ringtail-keys/shared.json \
+#              bridges/ringtail-keys/validator-$i.json
+#       done
+#
+# Apply with:
+#   docker compose -f docker-compose.yml \
+#                  -f bridges/docker-compose.ringtail-5.override.yml \
+#                  up -d
+#
+# Note: the main `docker-compose.yml` stack does NOT include
+# Solana + Stellar containers — it's the consensus / monitoring
+# stack. To exercise the bridge end-to-end with 5 validators you
+# need EITHER:
+#   * external live chains (Solana devnet + Stellar testnet
+#     reached over the internet — see
+#     `docs/RUNBOOK-TESTNET-OPERATOR.md`), OR
+#   * the 3-validator bridge stack at
+#     `bridges/docker-compose.testnet.yml` (which DOES bundle
+#     Solana + Stellar but caps at 3 validators).
+#
+# RPC ports are mapped to host so the smoke script can poll all 5:
+#   node1 → :8545 (already in base)
+#   node2 → :8546
+#   node3 → :8547
+#   node4 → :8548
+#   node5 → :8549
+
+services:
+  node1:
+    volumes:
+      - ./bridges/ringtail-keys/validator-1.json:/data/ringtail-keypair.json:ro
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      - "--bridge-ringtail-keypair-file"
+      - "/data/ringtail-keypair.json"
+      - "--bridge-ringtail-mac-key-hex"
+      - "2222222222222222222222222222222222222222222222222222222222222222"
+      - "--bridge-ringtail-party-id"
+      - "0"
+      - "--bridge-ringtail-threshold"
+      - "3"
+      - "--bridge-ringtail-committee-size"
+      - "5"
+      - "--bridge-poll-interval-secs"
+      - "10"
+
+  node2:
+    ports:
+      - "8546:8545"
+    volumes:
+      - ./bridges/ringtail-keys/validator-2.json:/data/ringtail-keypair.json:ro
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      - "--bootstrap-peers"
+      - "/dns4/seal-validator-1/tcp/4001"
+      - "--bridge-ringtail-keypair-file"
+      - "/data/ringtail-keypair.json"
+      - "--bridge-ringtail-mac-key-hex"
+      - "2222222222222222222222222222222222222222222222222222222222222222"
+      - "--bridge-ringtail-party-id"
+      - "1"
+      - "--bridge-ringtail-threshold"
+      - "3"
+      - "--bridge-ringtail-committee-size"
+      - "5"
+      - "--bridge-poll-interval-secs"
+      - "10"
+
+  node3:
+    ports:
+      - "8547:8545"
+    volumes:
+      - ./bridges/ringtail-keys/validator-3.json:/data/ringtail-keypair.json:ro
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      - "--bootstrap-peers"
+      - "/dns4/seal-validator-1/tcp/4001"
+      - "--bridge-ringtail-keypair-file"
+      - "/data/ringtail-keypair.json"
+      - "--bridge-ringtail-mac-key-hex"
+      - "2222222222222222222222222222222222222222222222222222222222222222"
+      - "--bridge-ringtail-party-id"
+      - "2"
+      - "--bridge-ringtail-threshold"
+      - "3"
+      - "--bridge-ringtail-committee-size"
+      - "5"
+      - "--bridge-poll-interval-secs"
+      - "10"
+
+  node4:
+    ports:
+      - "8548:8545"
+    volumes:
+      - ./bridges/ringtail-keys/validator-4.json:/data/ringtail-keypair.json:ro
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      - "--bootstrap-peers"
+      - "/dns4/seal-validator-1/tcp/4001"
+      - "--bridge-ringtail-keypair-file"
+      - "/data/ringtail-keypair.json"
+      - "--bridge-ringtail-mac-key-hex"
+      - "2222222222222222222222222222222222222222222222222222222222222222"
+      - "--bridge-ringtail-party-id"
+      - "3"
+      - "--bridge-ringtail-threshold"
+      - "3"
+      - "--bridge-ringtail-committee-size"
+      - "5"
+      - "--bridge-poll-interval-secs"
+      - "10"
+
+  node5:
+    ports:
+      - "8549:8545"
+    volumes:
+      - ./bridges/ringtail-keys/validator-5.json:/data/ringtail-keypair.json:ro
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      - "--bootstrap-peers"
+      - "/dns4/seal-validator-1/tcp/4001"
+      - "--bridge-ringtail-keypair-file"
+      - "/data/ringtail-keypair.json"
+      - "--bridge-ringtail-mac-key-hex"
+      - "2222222222222222222222222222222222222222222222222222222222222222"
+      - "--bridge-ringtail-party-id"
+      - "4"
+      - "--bridge-ringtail-threshold"
+      - "3"
+      - "--bridge-ringtail-committee-size"
+      - "5"
+      - "--bridge-poll-interval-secs"
+      - "10"

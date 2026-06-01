@@ -162,6 +162,14 @@ impl ProverContext {
         Ok(Self { ctx })
     }
 
+    /// Apple Silicon Metal HAL — segment-prover GPU path.
+    /// See `crates/seal-zk/METAL.md` Option A.
+    #[cfg(feature = "metal")]
+    pub fn new_metal(po2: usize) -> Result<Self> {
+        let ctx = ffi_wrap_ptr_mut(|| unsafe { risc0_circuit_rv32im_m3_prover_new_metal(po2) })?;
+        Ok(Self { ctx })
+    }
+
     pub fn prove(&self, preflight: &PreflightContext) -> Result<Seal> {
         tracing::debug!("prove");
         ffi_wrap_void(|| unsafe {
@@ -193,6 +201,8 @@ pub fn segment_prover(po2: usize) -> Result<ProverContext> {
     cfg_if! {
         if #[cfg(feature = "cuda")] {
             let segment_prover = ProverContext::new_cuda(po2)?;
+        } else if #[cfg(feature = "metal")] {
+            let segment_prover = ProverContext::new_metal(po2)?;
         } else {
             let segment_prover = ProverContext::new_cpu(po2)?;
         }

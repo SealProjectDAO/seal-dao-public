@@ -1,0 +1,19 @@
+[package]
+name = "seal-faucet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "seal-faucet"
+path = "src/main.rs"
+
+[dependencies]
+seal-crypto = { path = "../../crates/seal-crypto" }
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = "0.3"

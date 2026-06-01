@@ -105,8 +105,11 @@ NoEquivocation         ↔        Test: each validator signs at most once per sl
 Progress               ↔        Test: chain height increases over time
 ```
 
-**Trace conformance** (TODO): Run the Rust consensus, log each action as a
-TLA+ trace event, then verify the trace is a valid execution of this spec.
+**Trace conformance** (Done — `crates/seal-consensus/src/trace.rs`,
+10 unit tests): the Rust consensus emits `TraceEvent`s for each state
+transition; `TlaTraceChecker` validates Agreement / NoEquivocation /
+MonotonicHeight against the recorded log. Wired into `scripts/ci.sh`
+via the consensus test suite.
 
 ---
 

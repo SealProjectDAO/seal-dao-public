@@ -14,8 +14,8 @@
 
 use seal_crypto::kem::KemKeypair;
 use seal_forms::{
-    decrypt_answer, encrypt_answer, genesis_trace, verify_trace, FormRecord, ResponseRecord,
-    SCHEMA_DDL,
+    decrypt_answer, encrypt_answer, genesis_trace, schema_hash, verify_trace, AnswerContext,
+    FormRecord, ResponseRecord, SCHEMA_DDL,
 };
 use seal_wallet::Wallet;
 
@@ -29,7 +29,9 @@ fn main() {
     let owner_addr = owner_wallet.address().to_string();
     let form_kp = KemKeypair::generate();
     let form_id: u64 = 1;
-    let schema_json = r#"{"questions":[{"id":"q1","prompt":"Are PQC signatures fast enough?","type":"text"}]}"#;
+    let schema_json =
+        r#"{"questions":[{"id":"q1","prompt":"Are PQC signatures fast enough?","type":"text"}]}"#;
+    let schema_h = schema_hash(schema_json);
     let genesis = genesis_trace(form_id, &owner_addr, schema_json);
 
     let form = FormRecord {
@@ -53,7 +55,13 @@ fn main() {
     let mut responses: Vec<ResponseRecord> = Vec::new();
 
     for (i, (addr, ans)) in respondents.iter().zip(answers.iter()).enumerate() {
-        let enc = encrypt_answer(&form_kp.public, &prev_trace, ans.as_bytes());
+        let ctx = AnswerContext {
+            form_id,
+            schema_hash: schema_h,
+            respondent_addr: addr,
+            idx: i as u64,
+        };
+        let enc = encrypt_answer(&form_kp.public, &prev_trace, &ctx, ans.as_bytes());
         let response = ResponseRecord {
             form_id,
             respondent_addr: (*addr).to_string(),
@@ -95,8 +103,14 @@ fn main() {
         let kem_ct_bytes = hex::decode(&r.kem_ct_hex).expect("hex");
         let kem_ct = seal_crypto::kem::KemCiphertext::from_bytes(kem_ct_bytes);
         let answer_ct = hex::decode(&r.answer_ct_hex).expect("hex");
-        let plaintext = decrypt_answer(&form_kp.secret, &kem_ct, &answer_ct)
-            .expect("decapsulate");
+        let ctx = AnswerContext {
+            form_id,
+            schema_hash: schema_h,
+            respondent_addr: &r.respondent_addr,
+            idx: i as u64,
+        };
+        let plaintext =
+            decrypt_answer(&form_kp.secret, &kem_ct, &ctx, &answer_ct).expect("AES-GCM decrypt");
         let s = String::from_utf8_lossy(&plaintext);
         println!("  response {}  → \"{}\"", i + 1, s);
     }

@@ -10,6 +10,9 @@ license.workspace = true
 seal-crypto = { path = "../seal-crypto" }
 serde = { workspace = true }
 thiserror = { workspace = true }
+# bincode 1 — used by `BalanceStore::state_root_hash` to serialize
+# Balance values into the HAMT for the content-addressed root.
+bincode = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

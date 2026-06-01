@@ -34,6 +34,18 @@ pub enum NetworkMessage {
     CommitteeSignature { data: Vec<u8>, source: PeerId },
     /// Epoch transition announcement (new VRF public key, epoch number).
     EpochTransition { data: Vec<u8>, source: PeerId },
+    /// Per-withdrawal Ringtail Round1 commitment from a peer
+    /// validator (P1#5 layer 4). Wraps a serialized
+    /// `BridgeRingtailRound1Envelope`.
+    BridgeRingtailRound1 { data: Vec<u8>, source: PeerId },
+    /// Per-withdrawal Ringtail Round2 partial response from a peer
+    /// validator. Wraps a serialized `BridgeRingtailRound2Envelope`.
+    BridgeRingtailRound2 { data: Vec<u8>, source: PeerId },
+    /// Finalized aggregate Ringtail signature for a withdrawal
+    /// (broadcast so non-aggregating validators can attach it
+    /// without re-running aggregate_responses_full). Wraps a
+    /// serialized `BridgeRingtailAggregateEnvelope`.
+    BridgeRingtailAggregate { data: Vec<u8>, source: PeerId },
     /// A new peer connected.
     PeerConnected(PeerId),
     /// A peer disconnected.
@@ -95,8 +107,43 @@ pub struct SealNode {
     sender_committee_sigs: mpsc::Sender<Vec<u8>>,
     /// Channel to send epoch transition announcements.
     sender_epoch_transition: mpsc::Sender<Vec<u8>>,
+    /// Channel to send per-withdrawal Ringtail Round1 envelopes.
+    sender_bridge_ringtail_round1: mpsc::Sender<Vec<u8>>,
+    /// Channel to send per-withdrawal Ringtail Round2 envelopes.
+    sender_bridge_ringtail_round2: mpsc::Sender<Vec<u8>>,
+    /// Channel to send finalized aggregate Ringtail signature
+    /// envelopes (so non-aggregating validators can attach without
+    /// re-running aggregate_responses_full).
+    sender_bridge_ringtail_sigs: mpsc::Sender<Vec<u8>>,
     /// PQ encryption state (None if pq_encryption disabled).
     pq_state: Option<Arc<Mutex<PeerPqState>>>,
+}
+
+/// Cloneable broadcaster for the three bridge-Ringtail topics.
+/// Returned by `SealNode::ringtail_broadcaster`; the underlying
+/// `mpsc::Sender<Vec<u8>>` clones are `Send + Sync + Clone`, so
+/// callers can drive Ringtail broadcasts from any tokio task
+/// without holding a guard over the parent `SealNode` / `NetworkNode`.
+#[derive(Clone)]
+pub struct BridgeRingtailBroadcaster {
+    round1: mpsc::Sender<Vec<u8>>,
+    round2: mpsc::Sender<Vec<u8>>,
+    aggregate: mpsc::Sender<Vec<u8>>,
+}
+
+impl BridgeRingtailBroadcaster {
+    /// Publish a Round1 commitment envelope on gossipsub.
+    pub async fn round1(&self, data: Vec<u8>) -> Result<(), mpsc::error::SendError<Vec<u8>>> {
+        self.round1.send(data).await
+    }
+    /// Publish a Round2 partial-response envelope on gossipsub.
+    pub async fn round2(&self, data: Vec<u8>) -> Result<(), mpsc::error::SendError<Vec<u8>>> {
+        self.round2.send(data).await
+    }
+    /// Publish the finalized aggregate signature envelope on gossipsub.
+    pub async fn aggregate(&self, data: Vec<u8>) -> Result<(), mpsc::error::SendError<Vec<u8>>> {
+        self.aggregate.send(data).await
+    }
 }
 
 /// GossipSub message prefix for PQ-encrypted payloads.
@@ -181,6 +228,24 @@ impl SealNode {
             .gossipsub
             .subscribe(&crate::topics::epoch_transition_topic())
             .map_err(|e| format!("failed to subscribe to epoch-transition topic: {}", e))?;
+        // P1#5 layer 4 — multi-validator Ringtail signing topics.
+        // Subscribe unconditionally; publishing is gated by whether
+        // the bridge orchestrator is configured (in seal-node).
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&crate::topics::bridge_ringtail_round1_topic())
+            .map_err(|e| format!("failed to subscribe to bridge-ringtail-round1 topic: {}", e))?;
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&crate::topics::bridge_ringtail_round2_topic())
+            .map_err(|e| format!("failed to subscribe to bridge-ringtail-round2 topic: {}", e))?;
+        swarm
+            .behaviour_mut()
+            .gossipsub
+            .subscribe(&crate::topics::bridge_ringtail_sigs_topic())
+            .map_err(|e| format!("failed to subscribe to bridge-ringtail-sigs topic: {}", e))?;
 
         // Listen
         let listen_addr: Multiaddr = format!("/ip4/0.0.0.0/tcp/{}", config.listen_port)
@@ -214,6 +279,9 @@ impl SealNode {
         let (vote_send, mut vote_recv) = mpsc::channel::<Vec<u8>>(256);
         let (sig_send, mut sig_recv) = mpsc::channel::<Vec<u8>>(256);
         let (epoch_send, mut epoch_recv) = mpsc::channel::<Vec<u8>>(256);
+        let (br_round1_send, mut br_round1_recv) = mpsc::channel::<Vec<u8>>(256);
+        let (br_round2_send, mut br_round2_recv) = mpsc::channel::<Vec<u8>>(256);
+        let (br_sigs_send, mut br_sigs_recv) = mpsc::channel::<Vec<u8>>(256);
 
         // Spawn the swarm event loop
         tokio::spawn(async move {
@@ -252,6 +320,27 @@ impl SealNode {
                         let payload = maybe_encrypt_broadcast(&pq_state_loop, &data);
                         if let Err(e) = swarm.behaviour_mut().gossipsub.publish(crate::topics::epoch_transition_topic(), payload) {
                             warn!("Failed to publish epoch transition: {:?}", e);
+                        }
+                    }
+                    // Outbound bridge-ringtail Round1 commitment.
+                    Some(data) = br_round1_recv.recv() => {
+                        let payload = maybe_encrypt_broadcast(&pq_state_loop, &data);
+                        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(crate::topics::bridge_ringtail_round1_topic(), payload) {
+                            warn!("Failed to publish bridge-ringtail round1: {:?}", e);
+                        }
+                    }
+                    // Outbound bridge-ringtail Round2 partial response.
+                    Some(data) = br_round2_recv.recv() => {
+                        let payload = maybe_encrypt_broadcast(&pq_state_loop, &data);
+                        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(crate::topics::bridge_ringtail_round2_topic(), payload) {
+                            warn!("Failed to publish bridge-ringtail round2: {:?}", e);
+                        }
+                    }
+                    // Outbound finalized aggregate Ringtail signature.
+                    Some(data) = br_sigs_recv.recv() => {
+                        let payload = maybe_encrypt_broadcast(&pq_state_loop, &data);
+                        if let Err(e) = swarm.behaviour_mut().gossipsub.publish(crate::topics::bridge_ringtail_sigs_topic(), payload) {
+                            warn!("Failed to publish bridge-ringtail aggregate: {:?}", e);
                         }
                     }
                     // Swarm events
@@ -297,6 +386,21 @@ impl SealNode {
                                     }
                                 } else if topic == crate::topics::epoch_transition_topic().to_string() {
                                     NetworkMessage::EpochTransition {
+                                        data,
+                                        source: propagation_source,
+                                    }
+                                } else if topic == crate::topics::bridge_ringtail_round1_topic().to_string() {
+                                    NetworkMessage::BridgeRingtailRound1 {
+                                        data,
+                                        source: propagation_source,
+                                    }
+                                } else if topic == crate::topics::bridge_ringtail_round2_topic().to_string() {
+                                    NetworkMessage::BridgeRingtailRound2 {
+                                        data,
+                                        source: propagation_source,
+                                    }
+                                } else if topic == crate::topics::bridge_ringtail_sigs_topic().to_string() {
+                                    NetworkMessage::BridgeRingtailAggregate {
                                         data,
                                         source: propagation_source,
                                     }
@@ -375,6 +479,9 @@ impl SealNode {
             sender_committee_votes: vote_send,
             sender_committee_sigs: sig_send,
             sender_epoch_transition: epoch_send,
+            sender_bridge_ringtail_round1: br_round1_send,
+            sender_bridge_ringtail_round2: br_round2_send,
+            sender_bridge_ringtail_sigs: br_sigs_send,
             pq_state,
         };
 
@@ -421,9 +528,53 @@ impl SealNode {
         self.sender_epoch_transition.send(data).await
     }
 
+    /// Broadcast a per-withdrawal Ringtail Round1 commitment
+    /// (P1#5 layer 4). `data` is a serde-encoded
+    /// `BridgeRingtailRound1Envelope`.
+    pub async fn broadcast_bridge_ringtail_round1(
+        &self,
+        data: Vec<u8>,
+    ) -> Result<(), mpsc::error::SendError<Vec<u8>>> {
+        self.sender_bridge_ringtail_round1.send(data).await
+    }
+
+    /// Broadcast a per-withdrawal Ringtail Round2 partial response.
+    pub async fn broadcast_bridge_ringtail_round2(
+        &self,
+        data: Vec<u8>,
+    ) -> Result<(), mpsc::error::SendError<Vec<u8>>> {
+        self.sender_bridge_ringtail_round2.send(data).await
+    }
+
+    /// Broadcast a finalized aggregate Ringtail signature for a
+    /// withdrawal so non-aggregating validators can attach it
+    /// without re-running aggregate_responses_full.
+    pub async fn broadcast_bridge_ringtail_aggregate(
+        &self,
+        data: Vec<u8>,
+    ) -> Result<(), mpsc::error::SendError<Vec<u8>>> {
+        self.sender_bridge_ringtail_sigs.send(data).await
+    }
+
     /// Whether PQ double-encryption is enabled.
     pub fn pq_encryption_enabled(&self) -> bool {
         self.pq_state.is_some()
+    }
+
+    /// Cloneable broadcaster for the three bridge-Ringtail topics
+    /// (P1#5 layer 4). The returned struct holds only mpsc `Sender`
+    /// clones — they're `Send + Sync + Clone`, so callers can drive
+    /// broadcasts from a `tokio::spawn` task without holding a
+    /// MutexGuard over `NetworkNode` (which is `!Sync` thanks to the
+    /// `Cell<...>` inside `BalanceStore` and would therefore fail
+    /// `tokio::spawn`'s `Send + 'static` future bound when held across
+    /// an await point).
+    pub fn ringtail_broadcaster(&self) -> BridgeRingtailBroadcaster {
+        BridgeRingtailBroadcaster {
+            round1: self.sender_bridge_ringtail_round1.clone(),
+            round2: self.sender_bridge_ringtail_round2.clone(),
+            aggregate: self.sender_bridge_ringtail_sigs.clone(),
+        }
     }
 
     /// Number of peers with established PQ channels.
@@ -451,9 +602,7 @@ fn maybe_encrypt_broadcast(pq_state: &Option<Arc<Mutex<PeerPqState>>>, data: &[u
             };
             // Use SHA3(our_pk) as a broadcast encryption key.
             // Peers who have our public key can derive the same key.
-            let broadcast_key = seal_crypto::hash::sha3_256(
-                &guard.our_keypair.public.to_bytes(),
-            ).0;
+            let broadcast_key = seal_crypto::hash::sha3_256(&guard.our_keypair.public.to_bytes()).0;
             let encrypted = crate::pq_encrypt::encrypt_with_key(data, &broadcast_key);
             let mut msg = PQ_ENCRYPTED_PREFIX.to_vec();
             msg.extend_from_slice(&encrypted);

@@ -25,8 +25,8 @@ structure Trade where
 -- equals the sum of original quantities.
 theorem conservation_of_quantity
     (bid_qty ask_qty : Nat)
-    (h_bid : bid_qty > 0)
-    (h_ask : ask_qty > 0) :
+    (_h_bid : bid_qty > 0)
+    (_h_ask : ask_qty > 0) :
     let trade_qty := min bid_qty ask_qty
     let bid_remaining := bid_qty - trade_qty
     let ask_remaining := ask_qty - trade_qty

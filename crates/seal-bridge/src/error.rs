@@ -37,4 +37,7 @@ pub enum BridgeError {
 
     #[error("chain {0} is not paused")]
     ChainNotPaused(String),
+
+    #[error("invalid destination address: {0}")]
+    InvalidDestAddress(String),
 }

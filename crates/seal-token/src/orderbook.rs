@@ -62,6 +62,13 @@ pub struct TradingPair {
     pub trade_count: u64,
 }
 
+/// Maximum number of trades retained per book. Older trades are
+/// dropped from the front of `trades` after every match. Picked so a
+/// pair averaging 1 trade/sec keeps roughly 2.7 hours of history; for
+/// quieter pairs, weeks. Larger horizons go through the per-block
+/// `TxType::DexMatch` payloads recorded in the chain itself.
+pub const MAX_TRADE_HISTORY: usize = 10_000;
+
 /// Order book for a single trading pair.
 pub struct OrderBook {
     pub pair: TradingPair,
@@ -75,7 +82,9 @@ pub struct OrderBook {
     next_order_id: u64,
     /// Next trade ID.
     next_trade_id: u64,
-    /// Trade history.
+    /// Trade history. Oldest at index 0, newest at the back. Bounded
+    /// to `MAX_TRADE_HISTORY`; entries beyond that are dropped after
+    /// each match round (FIFO).
     trades: Vec<Trade>,
 }
 
@@ -182,14 +191,8 @@ impl OrderBook {
 
         loop {
             // Get best bid and ask
-            let best_bid_price = self
-                .bids
-                .first_key_value()
-                .map(|(k, _)| k.0);
-            let best_ask_price = self
-                .asks
-                .first_key_value()
-                .map(|(k, _)| *k);
+            let best_bid_price = self.bids.first_key_value().map(|(k, _)| k.0);
+            let best_ask_price = self.asks.first_key_value().map(|(k, _)| *k);
 
             match (best_bid_price, best_ask_price) {
                 (Some(bid), Some(ask)) if bid >= ask => {
@@ -253,10 +256,21 @@ impl OrderBook {
         }
 
         self.trades.extend(trades.clone());
+
+        // Cap the trade history to MAX_TRADE_HISTORY entries (drop
+        // oldest first). For an active pair this caps memory growth
+        // without losing the rolling-window the recent_trades / list
+        // RPCs serve.
+        if self.trades.len() > MAX_TRADE_HISTORY {
+            let drop = self.trades.len() - MAX_TRADE_HISTORY;
+            self.trades.drain(..drop);
+        }
+
         trades
     }
 
     /// Get order book depth (top N levels).
+    #[allow(clippy::type_complexity)]
     pub fn depth(&self, levels: usize) -> (Vec<(u64, u64)>, Vec<(u64, u64)>) {
         let bids: Vec<(u64, u64)> = self
             .bids
@@ -279,6 +293,33 @@ impl OrderBook {
     pub fn recent_trades(&self, limit: usize) -> &[Trade] {
         let start = self.trades.len().saturating_sub(limit);
         &self.trades[start..]
+    }
+
+    /// List trades with `id > since_id`, capped at `limit`. The
+    /// returned slice is the most recent `limit` matching trades
+    /// (i.e. tail-truncated, not head-truncated). Used by the
+    /// `seal_listTrades` RPC. `since_id = 0` returns the rolling
+    /// `MAX_TRADE_HISTORY` window.
+    pub fn list_trades_since(&self, since_id: u64, limit: usize) -> Vec<Trade> {
+        // Trades are appended in id-ascending order, so scanning from
+        // the back lets us bail out as soon as we hit `id <= since_id`.
+        let mut out: Vec<Trade> = self
+            .trades
+            .iter()
+            .rev()
+            .take_while(|t| t.id > since_id)
+            .take(limit)
+            .cloned()
+            .collect();
+        out.reverse(); // chronological (oldest first)
+        out
+    }
+
+    /// Total number of trades currently held in the rolling history.
+    /// Capped by `MAX_TRADE_HISTORY`; the on-chain trade count lives
+    /// in `pair.trade_count` which is unbounded.
+    pub fn trade_history_len(&self) -> usize {
+        self.trades.len()
     }
 
     /// Get orders for a specific owner.
@@ -343,6 +384,55 @@ impl DexManager {
         self.books.values().map(|b| &b.pair).collect()
     }
 
+    /// List recent trades for a pair with id > `since_id`, capped
+    /// at `limit`. Returns `None` if the pair doesn't exist.
+    pub fn list_trades_for(&self, pair: &str, since_id: u64, limit: usize) -> Option<Vec<Trade>> {
+        self.books
+            .get(pair)
+            .map(|b| b.list_trades_since(since_id, limit))
+    }
+
+    /// Aggregate every open order belonging to `owner` across all
+    /// trading pairs. Each result carries the pair name so the
+    /// caller can act on it (cancel via `seal_cancelOrder` needs
+    /// both pair + order_id). Sorted by `(pair, order_id)` so
+    /// polling clients can diff a previous snapshot. Empty Vec
+    /// for unknown owners — no error path.
+    pub fn orders_by_owner(&self, owner: &str) -> Vec<(String, Order)> {
+        let mut out: Vec<(String, Order)> = self
+            .books
+            .iter()
+            .flat_map(|(pair, book)| {
+                book.orders_by_owner(owner)
+                    .into_iter()
+                    .map(move |o| (pair.clone(), o.clone()))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.id.cmp(&b.1.id)));
+        out
+    }
+
+    /// Aggregate every retained trade where `owner` was either
+    /// maker or taker, across all trading pairs. Bounded by each
+    /// pair's `MAX_TRADE_HISTORY` (10 000) — older trades are
+    /// dropped. Sorted by descending timestamp (most recent
+    /// first) so the natural use case ("show my last N trades")
+    /// is the prefix of the result.
+    pub fn trades_by_owner(&self, owner: &str) -> Vec<(String, Trade)> {
+        let mut out: Vec<(String, Trade)> = self
+            .books
+            .iter()
+            .flat_map(|(pair, book)| {
+                book.list_trades_since(0, MAX_TRADE_HISTORY)
+                    .into_iter()
+                    .filter(|t| t.maker == owner || t.taker == owner)
+                    .map(move |t| (pair.clone(), t))
+            })
+            .collect();
+        out.sort_by(|a, b| b.1.timestamp.cmp(&a.1.timestamp));
+        out
+    }
+
     /// Match all order books. Called once per block.
     pub fn match_all(&mut self, timestamp: u64) -> Vec<(String, Vec<Trade>)> {
         let mut all_trades = Vec::new();
@@ -374,7 +464,10 @@ mod kani_proofs {
         let ask_remaining = ask_qty - trade_qty;
 
         // Conservation: input == output
-        assert_eq!(bid_qty + ask_qty, bid_remaining + ask_remaining + trade_qty * 2);
+        assert_eq!(
+            bid_qty + ask_qty,
+            bid_remaining + ask_remaining + trade_qty * 2
+        );
     }
 
     /// Prove: trade price is always between bid and ask.
@@ -432,7 +525,7 @@ mod kani_proofs {
         let best_bid: u64 = kani::any();
         let best_ask: u64 = kani::any();
         kani::assume(best_bid < best_ask); // no crossing
-        // Loop condition: bid >= ask is false → loop exits
+                                           // Loop condition: bid >= ask is false → loop exits
         assert!(!(best_bid >= best_ask));
     }
 }
@@ -540,5 +633,151 @@ mod tests {
         dex.create_pair("GOLD".into(), "SEAL".into()).unwrap();
         assert_eq!(dex.list_pairs().len(), 1);
         assert!(dex.create_pair("GOLD".into(), "SEAL".into()).is_err());
+    }
+
+    #[test]
+    fn test_list_trades_since_returns_only_newer_ids() {
+        let mut book = OrderBook::new("GOLD".into(), "SEAL".into());
+        book.place_order("a".into(), Side::Ask, 100, 10, OrderType::Limit, 1);
+        book.place_order("b".into(), Side::Bid, 100, 10, OrderType::Limit, 2);
+        let t1 = book.match_orders(3);
+        assert_eq!(t1.len(), 1);
+        let first_id = t1[0].id;
+
+        book.place_order("c".into(), Side::Ask, 110, 5, OrderType::Limit, 4);
+        book.place_order("d".into(), Side::Bid, 110, 5, OrderType::Limit, 5);
+        let t2 = book.match_orders(6);
+        assert_eq!(t2.len(), 1);
+        let second_id = t2[0].id;
+
+        // No filter — returns both, oldest first.
+        let all = book.list_trades_since(0, 10);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].id, first_id);
+        assert_eq!(all[1].id, second_id);
+
+        // Since the first id — only the second comes back.
+        let after_first = book.list_trades_since(first_id, 10);
+        assert_eq!(after_first.len(), 1);
+        assert_eq!(after_first[0].id, second_id);
+
+        // Since the last id — empty.
+        assert!(book.list_trades_since(second_id, 10).is_empty());
+    }
+
+    #[test]
+    fn test_list_trades_since_respects_limit() {
+        let mut book = OrderBook::new("GOLD".into(), "SEAL".into());
+        for i in 0..5u64 {
+            book.place_order("a".into(), Side::Ask, 100 + i, 1, OrderType::Limit, i);
+            book.place_order("b".into(), Side::Bid, 100 + i, 1, OrderType::Limit, i);
+            book.match_orders(i);
+        }
+        let trades = book.list_trades_since(0, 3);
+        assert_eq!(trades.len(), 3, "limit must cap returned count");
+        // The most recent 3 are the last placed; chronological order.
+        assert!(trades[0].id < trades[1].id);
+        assert!(trades[1].id < trades[2].id);
+    }
+
+    #[test]
+    fn test_trade_history_capped_at_max() {
+        let mut book = OrderBook::new("GOLD".into(), "SEAL".into());
+        // Push past MAX_TRADE_HISTORY by a small margin.
+        let target = MAX_TRADE_HISTORY + 100;
+        for i in 0..target {
+            let ts = i as u64;
+            book.place_order("a".into(), Side::Ask, 100, 1, OrderType::Limit, ts);
+            book.place_order("b".into(), Side::Bid, 100, 1, OrderType::Limit, ts);
+            book.match_orders(ts);
+        }
+        assert_eq!(book.trade_history_len(), MAX_TRADE_HISTORY);
+        // The on-chain trade count is unbounded.
+        assert_eq!(book.pair.trade_count, target as u64);
+    }
+
+    #[test]
+    fn test_dex_manager_list_trades_for_unknown_pair() {
+        let dex = DexManager::new();
+        assert!(dex.list_trades_for("NOPE/SEAL", 0, 10).is_none());
+    }
+
+    #[test]
+    fn test_dex_manager_list_trades_for_pair() {
+        let mut dex = DexManager::new();
+        dex.create_pair("GOLD".into(), "SEAL".into()).unwrap();
+        let book = dex.get_book_mut("GOLD/SEAL").unwrap();
+        book.place_order("a".into(), Side::Ask, 100, 1, OrderType::Limit, 1);
+        book.place_order("b".into(), Side::Bid, 100, 1, OrderType::Limit, 2);
+        book.match_orders(3);
+        let trades = dex.list_trades_for("GOLD/SEAL", 0, 10).unwrap();
+        assert_eq!(trades.len(), 1);
+    }
+
+    #[test]
+    fn test_dex_manager_trades_by_owner() {
+        let mut dex = DexManager::new();
+        dex.create_pair("GOLD".into(), "SEAL".into()).unwrap();
+        dex.create_pair("SILVER".into(), "SEAL".into()).unwrap();
+        // Empty when no trades.
+        assert!(dex.trades_by_owner("alice").is_empty());
+        // GOLD/SEAL: alice asks, bob bids — both participate in the trade.
+        {
+            let g = dex.get_book_mut("GOLD/SEAL").unwrap();
+            g.place_order("alice".into(), Side::Ask, 100, 5, OrderType::Limit, 1);
+            g.place_order("bob".into(), Side::Bid, 100, 5, OrderType::Limit, 2);
+            g.match_orders(3);
+        }
+        // SILVER/SEAL: carol asks, dave bids — alice not involved.
+        {
+            let s = dex.get_book_mut("SILVER/SEAL").unwrap();
+            s.place_order("carol".into(), Side::Ask, 50, 3, OrderType::Limit, 4);
+            s.place_order("dave".into(), Side::Bid, 50, 3, OrderType::Limit, 5);
+            s.match_orders(6);
+        }
+        // alice sees only the GOLD trade.
+        let alice = dex.trades_by_owner("alice");
+        assert_eq!(alice.len(), 1);
+        assert_eq!(alice[0].0, "GOLD/SEAL");
+        // bob also sees one (he's the taker).
+        assert_eq!(dex.trades_by_owner("bob").len(), 1);
+        // carol sees the SILVER trade.
+        assert_eq!(dex.trades_by_owner("carol").len(), 1);
+        assert_eq!(dex.trades_by_owner("carol")[0].0, "SILVER/SEAL");
+        // Unknown owner: empty.
+        assert!(dex.trades_by_owner("nobody").is_empty());
+    }
+
+    #[test]
+    fn test_dex_manager_orders_by_owner() {
+        let mut dex = DexManager::new();
+        dex.create_pair("GOLD".into(), "SEAL".into()).unwrap();
+        dex.create_pair("SILVER".into(), "SEAL".into()).unwrap();
+        // Unknown owner → empty Vec, no error.
+        assert!(dex.orders_by_owner("nobody").is_empty());
+        // alice has orders on both pairs that don't immediately match
+        // (no opposing side). bob has one on GOLD/SEAL.
+        {
+            let g = dex.get_book_mut("GOLD/SEAL").unwrap();
+            g.place_order("alice".into(), Side::Bid, 100, 5, OrderType::Limit, 1);
+            g.place_order("alice".into(), Side::Ask, 200, 3, OrderType::Limit, 2);
+            g.place_order("bob".into(), Side::Bid, 90, 2, OrderType::Limit, 3);
+        }
+        {
+            let s = dex.get_book_mut("SILVER/SEAL").unwrap();
+            s.place_order("alice".into(), Side::Bid, 50, 10, OrderType::Limit, 4);
+        }
+        let alice_orders = dex.orders_by_owner("alice");
+        assert_eq!(alice_orders.len(), 3);
+        // Sort order: by pair name (GOLD/SEAL < SILVER/SEAL), then order_id.
+        assert_eq!(alice_orders[0].0, "GOLD/SEAL");
+        assert_eq!(alice_orders[1].0, "GOLD/SEAL");
+        assert_eq!(alice_orders[2].0, "SILVER/SEAL");
+        assert!(alice_orders[0].1.id < alice_orders[1].1.id);
+        // bob sees only his order.
+        let bob_orders = dex.orders_by_owner("bob");
+        assert_eq!(bob_orders.len(), 1);
+        assert_eq!(bob_orders[0].0, "GOLD/SEAL");
+        assert_eq!(bob_orders[0].1.owner, "bob");
     }
 }

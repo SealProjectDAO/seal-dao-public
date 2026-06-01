@@ -21,15 +21,15 @@ const MAX_DELEGATE_CAP_BPS: u64 = 400;
 
 /// A single delegation record.
 #[derive(Clone, Debug)]
-struct Delegation {
+pub struct Delegation {
     /// Address of the delegator.
-    delegator: String,
+    pub delegator: String,
     /// Address of the delegate.
-    delegate: String,
+    pub delegate: String,
     /// Proposal track this delegation applies to.
-    track: ProposalTrack,
+    pub track: ProposalTrack,
     /// Weight being delegated (voting power).
-    weight: u64,
+    pub weight: u64,
 }
 
 /// Manages vote delegations across all tracks.
@@ -133,6 +133,35 @@ impl DelegationManager {
             .map(|v| v / 10_000)
             .unwrap_or(u64::MAX);
         total < cap
+    }
+
+    /// All delegations originating from `delegator` (one entry per
+    /// track they've delegated on). Sorted by track for stable
+    /// snapshots. Empty Vec for delegators with no active
+    /// delegations. Backs `seal_govListDelegationsFrom`.
+    pub fn delegations_from(&self, delegator: &str) -> Vec<&Delegation> {
+        let mut out: Vec<&Delegation> = self
+            .delegations
+            .values()
+            .filter(|d| d.delegator == delegator)
+            .collect();
+        out.sort_by_key(|d| format!("{:?}", d.track));
+        out
+    }
+
+    /// All delegations targeting `delegate` (i.e. who delegates
+    /// voting weight to this delegate, on which tracks, with what
+    /// weight). Sorted by (track, delegator) for stable snapshots.
+    /// Empty Vec for delegates with no incoming delegations.
+    /// Backs `seal_govListDelegationsTo`.
+    pub fn delegations_to(&self, delegate: &str) -> Vec<&Delegation> {
+        let mut out: Vec<&Delegation> = self
+            .delegations
+            .values()
+            .filter(|d| d.delegate == delegate)
+            .collect();
+        out.sort_by_key(|d| (format!("{:?}", d.track), d.delegator.clone()));
+        out
     }
 }
 
@@ -327,11 +356,7 @@ mod tests {
         assert_eq!(dm.effective_weight("z", &track, &[]), 100);
 
         // Two of them voted directly
-        let eff = dm.effective_weight(
-            "z",
-            &track,
-            &["a".to_string(), "c".to_string()],
-        );
+        let eff = dm.effective_weight("z", &track, &["a".to_string(), "c".to_string()]);
         assert_eq!(eff, 60); // 20 + 40
     }
 
@@ -342,6 +367,41 @@ mod tests {
 
         // No delegations: effective weight from delegations is 0
         assert_eq!(dm.effective_weight("alice", &track, &[]), 0);
+    }
+
+    #[test]
+    fn test_delegations_from_and_to() {
+        let mut dm = DelegationManager::new();
+        // alice delegates 10 to bob on TreasurySmall, 20 to carol on Emergency.
+        dm.delegate("alice", "bob", &ProposalTrack::TreasurySmall, 10)
+            .unwrap();
+        dm.delegate("alice", "carol", &ProposalTrack::Emergency, 20)
+            .unwrap();
+        // dave delegates 50 to bob on TreasurySmall.
+        dm.delegate("dave", "bob", &ProposalTrack::TreasurySmall, 50)
+            .unwrap();
+
+        // Outgoing from alice: 2 entries.
+        let alice_out = dm.delegations_from("alice");
+        assert_eq!(alice_out.len(), 2);
+        assert!(alice_out.iter().all(|d| d.delegator == "alice"));
+        // Empty for non-delegators.
+        assert!(dm.delegations_from("nobody").is_empty());
+
+        // Incoming to bob: 2 entries (alice + dave on TreasurySmall).
+        let bob_in = dm.delegations_to("bob");
+        assert_eq!(bob_in.len(), 2);
+        assert!(bob_in.iter().all(|d| d.delegate == "bob"));
+        // Sorted by (track, delegator) — both same track, so by delegator
+        // alphabetically: alice < dave.
+        assert_eq!(bob_in[0].delegator, "alice");
+        assert_eq!(bob_in[1].delegator, "dave");
+
+        // carol has only one incoming delegation.
+        assert_eq!(dm.delegations_to("carol").len(), 1);
+
+        // Empty for non-delegates.
+        assert!(dm.delegations_to("nobody").is_empty());
     }
 
     #[test]

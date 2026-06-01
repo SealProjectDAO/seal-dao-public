@@ -81,20 +81,52 @@ noncomputable def MTree.rootHash (t : MTree) : Digest :=
   If we filter a list to keep only entries where (key ≠ k), then
   searching for (key = k) finds nothing.
 -/
--- NOTE: Helper proofs use `sorry` pending Lean 4.8.0 tactic migration.
--- The if_pos/if_neg + decide pattern changed in 4.8.0; theorem statements
--- are correct, only tactic scripts need updating.
+-- Filter excludes entries with key = k; find? for key = k on the
+-- filtered list therefore finds nothing. Discharged 2026-05-08 by
+-- step-wise unfolding of filter / find?; uses `simp only` with a
+-- minimal lemma set so `ne_eq`/`decide_not` don't fire and rewrite
+-- `decide (... ≠ ...)` into a form `ih` doesn't match.
 private theorem filter_find_none (entries : List (Key × Value)) (k : Key) :
     List.find? (fun p => decide (p.1 = k))
       (List.filter (fun p => decide (p.1 ≠ k)) entries) = none := by
-  sorry
+  induction entries with
+  | nil => rfl
+  | cons hd tl ih =>
+    rw [List.filter_cons]
+    by_cases h : hd.1 = k
+    · -- decide (hd.1 ≠ k) = false → filter drops hd
+      have h_drop : decide (hd.1 ≠ k) = false := by
+        apply decide_eq_false; exact fun ne => ne h
+      rw [h_drop]
+      simp only [ite_false, Bool.false_eq_true]
+      exact ih
+    · -- decide (hd.1 ≠ k) = true → filter keeps hd
+      have h_keep : decide (hd.1 ≠ k) = true := decide_eq_true h
+      rw [h_keep]
+      simp only [ite_true, List.find?]
+      have h_skip : decide (hd.1 = k) = false := decide_eq_false h
+      rw [h_skip]
+      simp only [Bool.false_eq_true, ite_false]
+      exact ih
 
 /-
   HELPER: find? distributes over append when the prefix has no match.
+  Discharged 2026-05-08: induction on xs; the cons case uses h to
+  rule out f hd = true and reduce to ih.
 -/
 private theorem find_append_none {α : Type} (f : α → Bool) (xs ys : List α)
     (h : xs.find? f = none) : (xs ++ ys).find? f = ys.find? f := by
-  sorry
+  induction xs with
+  | nil => rfl
+  | cons hd tl ih =>
+    rw [List.cons_append, List.find?]
+    rw [List.find?] at h
+    by_cases hf : f hd
+    · -- f hd = true contradicts h : (hd :: tl).find? f = none
+      simp only [hf, ite_true] at h
+    · -- f hd = false → both find? recurse to tl / (tl ++ ys)
+      simp only [hf, ite_false] at h ⊢
+      exact ih h
 
 /-
   THEOREM: Insert then lookup returns the inserted value.
@@ -151,7 +183,41 @@ private theorem filter_preserves_find (entries : List (Key × Value)) (k1 k2 : K
     List.find? (fun p => decide (p.1 = k2))
       (List.filter (fun p => decide (p.1 ≠ k1)) entries)
     = List.find? (fun p => decide (p.1 = k2)) entries := by
-  sorry
+  induction entries with
+  | nil => rfl
+  | cons hd tl ih =>
+    rw [List.filter_cons]
+    by_cases hk1 : hd.1 = k1
+    · -- hd is filtered out; on the right side, find? skips hd because
+      -- hd.1 = k1 ≠ k2 means decide (hd.1 = k2) = false. Rewrite the
+      -- right side to skip hd, then close with ih.
+      have h_drop : decide (hd.1 ≠ k1) = false :=
+        decide_eq_false (fun ne => ne hk1)
+      rw [h_drop]
+      simp only [Bool.false_eq_true, ite_false]
+      have h_skip : decide (hd.1 = k2) = false := by
+        apply decide_eq_false
+        intro heq
+        exact h (hk1.symm.trans heq)
+      have rhs_eq :
+          (hd :: tl).find? (fun p => decide (p.1 = k2))
+          = tl.find? (fun p => decide (p.1 = k2)) := by
+        rw [List.find?, h_skip]
+      rw [rhs_eq]
+      exact ih
+    · -- hd is kept; both sides see hd first.
+      have h_keep : decide (hd.1 ≠ k1) = true := decide_eq_true hk1
+      rw [h_keep]
+      simp only [ite_true]
+      rw [List.find?, List.find?]
+      by_cases hk2 : hd.1 = k2
+      · -- find? returns some hd on both sides
+        simp only [decide_eq_true_eq.mpr hk2, ite_true]
+      · -- find? skips hd on both sides; recurse via ih
+        have h_skip2 : decide (hd.1 = k2) = false := decide_eq_false hk2
+        rw [h_skip2]
+        simp only [Bool.false_eq_true, ite_false]
+        exact ih
 
 theorem MTree.insert_lookup_other (t : MTree) (k1 k2 : Key) (v : Value)
     (h : k1 ≠ k2) :
@@ -239,12 +305,29 @@ theorem MTree.delete_lookup_other (t : MTree) (k1 k2 : Key)
   Deleting a key that's already been deleted has no effect.
   delete(delete(t, k), k) = delete(t, k)
 -/
--- NOTE: Proof uses `sorry` pending Lean 4.8.0 tactic migration.
--- The filter-idempotence lemma requires Mathlib's List.filter_filter or
--- equivalent tactic scripting not available in Lean 4.8.0 core.
+/-
+  HELPER: filter p (filter p xs) = filter p xs. Lean 4.8.0 core
+  doesn't ship `List.filter_filter`, so we prove it inline by
+  induction on xs.
+-/
+private theorem filter_filter_self {α : Type} (p : α → Bool) (xs : List α) :
+    (xs.filter p).filter p = xs.filter p := by
+  induction xs with
+  | nil => rfl
+  | cons hd tl ih =>
+    rw [List.filter_cons]
+    by_cases h : p hd
+    · rw [if_pos h, List.filter_cons, if_pos h, ih]
+    · rw [if_neg h]
+      exact ih
+
+-- delete is `filter` over a single predicate; idempotence reduces to
+-- `filter_filter_self`. Discharged 2026-05-08.
 theorem MTree.delete_idempotent (t : MTree) (k : Key) :
     (t.delete k).delete k = t.delete k := by
-  sorry
+  simp only [MTree.delete]
+  congr 1
+  exact filter_filter_self _ _
 
 /-
   THEOREM: Insert after delete is the same as insert.
@@ -254,10 +337,14 @@ theorem MTree.delete_idempotent (t : MTree) (k : Key) :
 
   Maps to: test_insert_overwrite behavior in tree.rs
 -/
--- NOTE: Proof uses `sorry` pending Lean 4.8.0 tactic migration.
+-- insert filters its target by `≠ k` before appending [(k, v)]; so
+-- `(delete k).insert k v` filters by `≠ k` *twice*, which equals one
+-- filter by `filter_filter_self`. Discharged 2026-05-08.
 theorem MTree.delete_then_insert (t : MTree) (k : Key) (v : Value) :
     (t.delete k).insert k v = t.insert k v := by
-  sorry
+  simp only [MTree.insert, MTree.delete]
+  congr 1
+  rw [filter_filter_self]
 
 /-
   THEOREM: Root hash changes after delete.
@@ -271,10 +358,27 @@ theorem MTree.delete_then_insert (t : MTree) (k : Key) (v : Value) :
 -/
 /-
   HELPER: If find? returns Some for a key, that entry is in the list.
+  Discharged 2026-05-08 by induction on xs; cons case splits on
+  whether f hd fires.
 -/
 private theorem find_mem {α : Type} (f : α → Bool) (xs : List α) (x : α)
     (h : xs.find? f = some x) : x ∈ xs := by
-  sorry
+  induction xs with
+  | nil =>
+    -- find? on [] is none, contradicts h : none = some x
+    rw [List.find?] at h
+    exact Option.noConfusion h
+  | cons hd tl ih =>
+    rw [List.find?] at h
+    by_cases hf : f hd
+    · -- f hd = true: h : some hd = some x → x = hd ∈ hd :: tl
+      simp only [hf, ite_true] at h
+      have : x = hd := (Option.some.inj h).symm
+      rw [this]
+      exact List.mem_cons_self hd tl
+    · -- f hd = false: recurse on tl
+      simp only [hf, ite_false] at h
+      exact List.mem_cons_of_mem hd (ih h)
 
 /-
   HELPER: An entry where key = k is not in filter(≠k).
@@ -285,9 +389,51 @@ private theorem not_mem_filter_neq (entries : List (Key × Value)) (k : Key) (v 
   rw [List.mem_filter] at h_in
   simp at h_in
 
--- NOTE: Proof uses `sorry` pending Lean 4.8.0 tactic migration.
--- Requires List.find?_some / List.mem_of_find?_eq_some from Mathlib.
+/-
+  HELPER: If find? returns Some x, then x satisfies the predicate.
+  Same structural induction as `find_mem`. Discharged 2026-05-08.
+-/
+private theorem find_pred {α : Type} (f : α → Bool) (xs : List α) (x : α)
+    (h : xs.find? f = some x) : f x = true := by
+  induction xs with
+  | nil => rw [List.find?] at h; exact Option.noConfusion h
+  | cons hd tl ih =>
+    rw [List.find?] at h
+    by_cases hf : f hd
+    · simp only [hf, ite_true] at h
+      have : x = hd := (Option.some.inj h).symm
+      rw [this]; exact hf
+    · simp only [hf, ite_false] at h
+      exact ih h
+
+-- Discharged 2026-05-08: contradiction from the looked-up pair being
+-- in `t.entries` (by `find_mem`) but excluded from
+-- `filter (≠ k) t.entries` (by the filter predicate).
 theorem MTree.delete_changes_root (t : MTree) (k : Key) (v : Value)
     (h : t.lookup k = some v) :
     (t.delete k).entries ≠ t.entries := by
-  sorry
+  intro h_eq
+  simp only [MTree.lookup, MTree.delete] at *
+  -- Pull the matching pair out of `find?`.
+  generalize hf : t.entries.find? (fun p => decide (p.1 = k)) = found
+  rw [hf] at h
+  cases found with
+  | none => exact Option.noConfusion h
+  | some pair =>
+    -- `pair` satisfies decide (pair.1 = k); pair ∈ t.entries; but
+    -- pair ∉ filter (≠ k) t.entries — and by h_eq those two lists
+    -- are equal, contradiction.
+    have h_pred : decide (pair.1 = k) = true :=
+      find_pred (fun p => decide (p.1 = k)) t.entries pair hf
+    have h_pkey : pair.1 = k := decide_eq_true_eq.mp h_pred
+    have h_mem : pair ∈ t.entries :=
+      find_mem (fun p => decide (p.1 = k)) t.entries pair hf
+    have h_notmem :
+        pair ∉ List.filter (fun p => decide (p.1 ≠ k)) t.entries := by
+      intro h_in
+      rw [List.mem_filter] at h_in
+      have h_keep : decide (pair.1 ≠ k) = true := h_in.2
+      have : pair.1 ≠ k := decide_eq_true_eq.mp h_keep
+      exact this h_pkey
+    rw [h_eq] at h_notmem
+    exact h_notmem h_mem

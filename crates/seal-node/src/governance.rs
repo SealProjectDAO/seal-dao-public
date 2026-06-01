@@ -171,7 +171,11 @@ pub fn adaptive_threshold(base_threshold: u64, bias: u64, turnout_pct: u64) -> u
     let turnout = if turnout_pct > 100 { 100 } else { turnout_pct };
     let adjustment = bias.saturating_mul(100u64.saturating_sub(turnout)) / 100;
     let threshold = base_threshold.saturating_add(adjustment);
-    if threshold > 100 { 100 } else { threshold }
+    if threshold > 100 {
+        100
+    } else {
+        threshold
+    }
 }
 
 // ============================================================================
@@ -318,7 +322,9 @@ impl GovernanceModule {
             return Err("proposal is not in voting status".into());
         }
 
-        let vote_end = proposal.start_epoch.saturating_add(proposal.track.vote_period_epochs());
+        let vote_end = proposal
+            .start_epoch
+            .saturating_add(proposal.track.vote_period_epochs());
         let unlock_epoch = vote_end.saturating_add(conviction.lock_epochs());
         let weight = conviction.weighted_stake(stake);
 
@@ -376,11 +382,7 @@ impl GovernanceModule {
     }
 
     /// Withdraw a vote (tokens remain locked for the original conviction period).
-    pub fn withdraw_vote(
-        &mut self,
-        proposal_id: u64,
-        voter: &str,
-    ) -> Result<(), String> {
+    pub fn withdraw_vote(&mut self, proposal_id: u64, voter: &str) -> Result<(), String> {
         let proposal = self
             .proposals
             .get(&proposal_id)
@@ -420,7 +422,9 @@ impl GovernanceModule {
             return Err("proposal is not in voting status".into());
         }
 
-        let vote_end = proposal.start_epoch.saturating_add(proposal.track.vote_period_epochs());
+        let vote_end = proposal
+            .start_epoch
+            .saturating_add(proposal.track.vote_period_epochs());
         if current_epoch < vote_end {
             return Err("voting period not over yet".into());
         }
@@ -548,6 +552,54 @@ impl GovernanceModule {
     /// Get votes for a proposal.
     pub fn get_votes(&self, proposal_id: u64) -> Option<&Vec<Vote>> {
         self.votes.get(&proposal_id)
+    }
+
+    /// All proposals authored by `proposer`. Sorted ascending by
+    /// proposal id (chronological — older first). Empty Vec for
+    /// addresses that haven't proposed anything; not an error.
+    /// Backs `seal_govListProposalsByProposer`.
+    pub fn proposals_by_proposer(&self, proposer: &str) -> Vec<&Proposal> {
+        let mut out: Vec<&Proposal> = self
+            .proposals
+            .values()
+            .filter(|p| p.proposer == proposer)
+            .collect();
+        out.sort_by_key(|p| p.id);
+        out
+    }
+
+    /// All votes cast by `voter` across every proposal. Each result
+    /// carries the proposal id so the caller can dereference it via
+    /// `seal_govGetProposal` for the full title/track. Sorted by
+    /// proposal id ascending. Backs `seal_govListVotesByVoter`.
+    pub fn votes_by_voter(&self, voter: &str) -> Vec<(u64, Vote)> {
+        let mut out: Vec<(u64, Vote)> = self
+            .votes
+            .iter()
+            .flat_map(|(pid, votes)| {
+                votes
+                    .iter()
+                    .filter(|v| v.voter == voter)
+                    .map(move |v| (*pid, v.clone()))
+            })
+            .collect();
+        out.sort_by_key(|(pid, _)| *pid);
+        out
+    }
+
+    /// Active conviction locks for `voter` — tokens currently
+    /// locked through past votes. Useful for "when do my tokens
+    /// unlock?" UX. Sorted by `unlock_epoch` ascending so the
+    /// next-to-unlock is the first entry. Empty for voters with
+    /// no active locks.
+    pub fn locks_by_voter(&self, voter: &str) -> Vec<&ConvictionLock> {
+        let mut out: Vec<&ConvictionLock> = self
+            .conviction_locks
+            .iter()
+            .filter(|l| l.voter == voter)
+            .collect();
+        out.sort_by_key(|l| l.unlock_epoch);
+        out
     }
 }
 
@@ -741,6 +793,27 @@ impl TechnicalCouncil {
         out.sort_by(|a, b| a.pubkey.cmp(&b.pubkey));
         out
     }
+
+    /// Find a council member whose `SHA3-256(hex_decode(pubkey))`
+    /// matches the supplied 32-byte address-hash. Backs the per-
+    /// address council-status lookup (`seal_getCouncilMemberByAddress`):
+    /// like the validator-status surface, an address encodes
+    /// `bech32m(SHA3-256(pubkey))` and is the only on-Seal identifier
+    /// a wallet/UI can hand to an RPC, so the lookup runs in the
+    /// address-hash space rather than the raw-pubkey space. Hex-decode
+    /// errors on a stored member skip that member (returns None for
+    /// the bad entry, continues the scan) — a malformed pubkey can
+    /// only enter via an RPC that itself validates hex, so this is
+    /// belt-and-suspenders. Linear scan is fine: the council caps at
+    /// 11 members.
+    pub fn find_by_address_hash(&self, address_hash: &[u8; 32]) -> Option<&CouncilMember> {
+        self.members
+            .values()
+            .find(|m| match hex::decode(&m.pubkey) {
+                Ok(pk_bytes) => seal_crypto::hash::sha3_256(&pk_bytes).0 == *address_hash,
+                Err(_) => false,
+            })
+    }
 }
 
 // ============================================================================
@@ -900,6 +973,62 @@ mod tests {
     }
 
     #[test]
+    fn test_proposals_by_proposer_and_votes_by_voter() {
+        let mut gov = GovernanceModule::new();
+        // alice authors two proposals; bob authors one; carol none.
+        let p_a1 = gov.create_proposal(
+            ProposalTrack::ParameterChange,
+            "alice 1".into(),
+            "x".into(),
+            "y".into(),
+            "seal1alice".into(),
+            10,
+        );
+        let p_b = gov.create_proposal(
+            ProposalTrack::ParameterChange,
+            "bob".into(),
+            "x".into(),
+            "y".into(),
+            "seal1bob".into(),
+            10,
+        );
+        let p_a2 = gov.create_proposal(
+            ProposalTrack::ParameterChange,
+            "alice 2".into(),
+            "x".into(),
+            "y".into(),
+            "seal1alice".into(),
+            10,
+        );
+        // alice's proposals → 2, sorted ascending by id.
+        let alice_proposals = gov.proposals_by_proposer("seal1alice");
+        assert_eq!(alice_proposals.len(), 2);
+        assert_eq!(alice_proposals[0].id, p_a1);
+        assert_eq!(alice_proposals[1].id, p_a2);
+        // bob → 1.
+        assert_eq!(gov.proposals_by_proposer("seal1bob").len(), 1);
+        // carol → empty (not an error).
+        assert!(gov.proposals_by_proposer("seal1carol").is_empty());
+
+        // Votes: alice votes on bob's proposal; bob votes on both
+        // of alice's. Empty for carol.
+        gov.vote(p_b, "seal1alice".into(), VoteChoice::Yes, 100)
+            .unwrap();
+        gov.vote(p_a1, "seal1bob".into(), VoteChoice::No, 50)
+            .unwrap();
+        gov.vote(p_a2, "seal1bob".into(), VoteChoice::Yes, 200)
+            .unwrap();
+        let alice_votes = gov.votes_by_voter("seal1alice");
+        assert_eq!(alice_votes.len(), 1);
+        assert_eq!(alice_votes[0].0, p_b);
+        let bob_votes = gov.votes_by_voter("seal1bob");
+        assert_eq!(bob_votes.len(), 2);
+        // sorted ascending by proposal id.
+        assert!(bob_votes[0].0 < bob_votes[1].0);
+        assert!(gov.votes_by_voter("seal1carol").is_empty());
+    }
+
+    #[test]
     fn test_tally_passes() {
         let mut gov = GovernanceModule::new();
         let id = gov.create_proposal(
@@ -1020,12 +1149,12 @@ mod tests {
     #[test]
     fn test_conviction_multipliers() {
         assert_eq!(Conviction::None.weighted_stake(1000), 100); // 0.1×
-        assert_eq!(Conviction::X1.weighted_stake(1000), 1000);  // 1×
-        assert_eq!(Conviction::X2.weighted_stake(1000), 2000);  // 2×
-        assert_eq!(Conviction::X3.weighted_stake(1000), 3000);  // 3×
-        assert_eq!(Conviction::X4.weighted_stake(1000), 4000);  // 4×
-        assert_eq!(Conviction::X5.weighted_stake(1000), 5000);  // 5×
-        assert_eq!(Conviction::X6.weighted_stake(1000), 6000);  // 6×
+        assert_eq!(Conviction::X1.weighted_stake(1000), 1000); // 1×
+        assert_eq!(Conviction::X2.weighted_stake(1000), 2000); // 2×
+        assert_eq!(Conviction::X3.weighted_stake(1000), 3000); // 3×
+        assert_eq!(Conviction::X4.weighted_stake(1000), 4000); // 4×
+        assert_eq!(Conviction::X5.weighted_stake(1000), 5000); // 5×
+        assert_eq!(Conviction::X6.weighted_stake(1000), 6000); // 6×
     }
 
     #[test]
@@ -1350,6 +1479,28 @@ mod tests {
     }
 
     #[test]
+    fn test_tc_find_by_address_hash() {
+        let mut tc = TechnicalCouncil::new();
+        // Use a real-ish hex pubkey so the lookup exercises hex_decode
+        // + sha3_256 — not a placeholder string.
+        let pk_bytes = [0x42u8; 32];
+        let pk_hex = hex::encode(pk_bytes);
+        tc.add_member(CouncilMember {
+            pubkey: pk_hex.clone(),
+            name: "Alice".into(),
+            term_start_epoch: 0,
+            term_end_epoch: 26280,
+        })
+        .unwrap();
+        let addr_hash = seal_crypto::hash::sha3_256(&pk_bytes).0;
+        let found = tc.find_by_address_hash(&addr_hash).expect("found");
+        assert_eq!(found.name, "Alice");
+        // An unrelated address-hash returns None.
+        let unrelated = seal_crypto::hash::sha3_256(b"not-a-member-key").0;
+        assert!(tc.find_by_address_hash(&unrelated).is_none());
+    }
+
+    #[test]
     fn test_tc_max_size_enforced() {
         let mut tc = TechnicalCouncil::new();
         for i in 0..11 {
@@ -1393,11 +1544,8 @@ mod tests {
             .is_err());
 
         // 4 approvers → sufficient
-        tc.whitelist_proposal(
-            1,
-            &["m0".into(), "m1".into(), "m2".into(), "m3".into()],
-        )
-        .unwrap();
+        tc.whitelist_proposal(1, &["m0".into(), "m1".into(), "m2".into(), "m3".into()])
+            .unwrap();
         assert!(tc.is_whitelisted(1));
     }
 
@@ -1460,12 +1608,7 @@ mod tests {
             .unwrap();
         }
         // 7 members → 2/3 threshold = ceil(14/3) = 5.
-        assert!(!tc.has_two_thirds_approval(&[
-            "m0".into(),
-            "m1".into(),
-            "m2".into(),
-            "m3".into(),
-        ]));
+        assert!(!tc.has_two_thirds_approval(&["m0".into(), "m1".into(), "m2".into(), "m3".into(),]));
         assert!(tc.has_two_thirds_approval(&[
             "m0".into(),
             "m1".into(),

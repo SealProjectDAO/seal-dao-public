@@ -63,17 +63,15 @@ impl EmissionSchedule {
             let epoch_in_phase = epoch; // epochs from start
             let phase_epochs = 4u64.saturating_mul(EPOCHS_PER_YEAR);
             // rate = 1000 - (epoch_in_phase * 500 / phase_epochs)
-            let decrease = epoch_in_phase
-                .saturating_mul(RATE_YEAR_0_BP - RATE_YEAR_4_BP)
-                / phase_epochs;
+            let decrease =
+                epoch_in_phase.saturating_mul(RATE_YEAR_0_BP - RATE_YEAR_4_BP) / phase_epochs;
             RATE_YEAR_0_BP.saturating_sub(decrease)
         } else if year < 8 {
             // Linear interpolation: 500 → 200 over years 4–8
             let epoch_in_phase = epoch.saturating_sub(4u64.saturating_mul(EPOCHS_PER_YEAR));
             let phase_epochs = 4u64.saturating_mul(EPOCHS_PER_YEAR);
-            let decrease = epoch_in_phase
-                .saturating_mul(RATE_YEAR_4_BP - RATE_YEAR_8_BP)
-                / phase_epochs;
+            let decrease =
+                epoch_in_phase.saturating_mul(RATE_YEAR_4_BP - RATE_YEAR_8_BP) / phase_epochs;
             RATE_YEAR_4_BP.saturating_sub(decrease)
         } else {
             // Floor: 2%
@@ -278,8 +276,14 @@ mod tests {
         let reward_year4 = schedule.block_reward(4 * EPOCHS_PER_YEAR);
         let reward_year8 = schedule.block_reward(8 * EPOCHS_PER_YEAR);
 
-        assert!(reward_year0 > reward_year4, "reward should decrease year 0 → 4");
-        assert!(reward_year4 > reward_year8, "reward should decrease year 4 → 8");
+        assert!(
+            reward_year0 > reward_year4,
+            "reward should decrease year 0 → 4"
+        );
+        assert!(
+            reward_year4 > reward_year8,
+            "reward should decrease year 4 → 8"
+        );
     }
 
     #[test]
@@ -296,7 +300,10 @@ mod tests {
         let schedule = EmissionSchedule::default();
         let emitted_100 = schedule.total_emitted(100);
         let emitted_200 = schedule.total_emitted(200);
-        assert!(emitted_200 > emitted_100, "cumulative emission should increase");
+        assert!(
+            emitted_200 > emitted_100,
+            "cumulative emission should increase"
+        );
     }
 
     #[test]

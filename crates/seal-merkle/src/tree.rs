@@ -123,7 +123,10 @@ impl<S: NodeStore> MerkleTree<S> {
         key: Vec<u8>,
         value: Vec<u8>,
     ) -> Result<Hash256, MerkleError> {
-        let node = self.store.get(&node_hash).ok_or(MerkleError::NodeNotFound)?;
+        let node = self
+            .store
+            .get(&node_hash)
+            .ok_or(MerkleError::NodeNotFound)?;
 
         if node.is_leaf() {
             let mut new_node = node.clone();
@@ -151,7 +154,10 @@ impl<S: NodeStore> MerkleTree<S> {
 
             // Check if child is full
             let child_hash = node.children[idx].hash().ok_or(MerkleError::EmptyNodeRef)?;
-            let child = self.store.get(child_hash).ok_or(MerkleError::NodeNotFound)?;
+            let child = self
+                .store
+                .get(child_hash)
+                .ok_or(MerkleError::NodeNotFound)?;
 
             if child.is_full() {
                 // Split the child
@@ -170,7 +176,10 @@ impl<S: NodeStore> MerkleTree<S> {
                 let new_node_hash = self.store.put(&new_node);
 
                 // Decide which child to recurse into
-                let new_node = self.store.get(&new_node_hash).ok_or(MerkleError::NodeNotFound)?;
+                let new_node = self
+                    .store
+                    .get(&new_node_hash)
+                    .ok_or(MerkleError::NodeNotFound)?;
                 let new_idx = if key > new_node.entries[idx].key {
                     idx + 1
                 } else {
@@ -236,7 +245,10 @@ impl<S: NodeStore> MerkleTree<S> {
         node_hash: Hash256,
         key: &[u8],
     ) -> Result<(Option<Hash256>, bool), MerkleError> {
-        let node = self.store.get(&node_hash).ok_or(MerkleError::NodeNotFound)?;
+        let node = self
+            .store
+            .get(&node_hash)
+            .ok_or(MerkleError::NodeNotFound)?;
 
         if node.is_leaf() {
             match node.find_key_pos(key) {
@@ -255,9 +267,8 @@ impl<S: NodeStore> MerkleTree<S> {
             match node.find_key_pos(key) {
                 Ok(idx) => {
                     // Key is in this internal node — replace with predecessor
-                    let left_child_hash = *node.children[idx]
-                        .hash()
-                        .ok_or(MerkleError::EmptyNodeRef)?;
+                    let left_child_hash =
+                        *node.children[idx].hash().ok_or(MerkleError::EmptyNodeRef)?;
                     let (pred_key, pred_val, new_left_hash) = self.remove_max(left_child_hash)?;
                     let mut new_node = node.clone();
                     new_node.entries[idx] = Entry {
@@ -269,22 +280,20 @@ impl<S: NodeStore> MerkleTree<S> {
                         None => {
                             // Left child became empty — merge: remove it and the
                             // entry collapses to be owned by the right child.
-                            self.merge_empty_child(&mut new_node,idx);
+                            self.merge_empty_child(&mut new_node, idx);
                         }
                     }
                     self.finalize_internal(new_node)
                 }
                 Err(idx) => {
-                    let child_hash = *node.children[idx]
-                        .hash()
-                        .ok_or(MerkleError::EmptyNodeRef)?;
+                    let child_hash = *node.children[idx].hash().ok_or(MerkleError::EmptyNodeRef)?;
                     let (new_child_hash, found) = self.delete_recursive(child_hash, key)?;
                     if found {
                         let mut new_node = node.clone();
                         match new_child_hash {
                             Some(h) => new_node.children[idx] = NodeRef::Hash(h),
                             None => {
-                                self.merge_empty_child(&mut new_node,idx);
+                                self.merge_empty_child(&mut new_node, idx);
                             }
                         }
                         self.finalize_internal(new_node)
@@ -299,11 +308,7 @@ impl<S: NodeStore> MerkleTree<S> {
     /// When `children[child_idx]` became empty after deletion, merge the
     /// corresponding separator entry into the adjacent sibling so no data is lost,
     /// then remove the empty child slot.
-    fn merge_empty_child(
-        &mut self,
-        node: &mut Node,
-        child_idx: usize,
-    ) {
+    fn merge_empty_child(&mut self, node: &mut Node, child_idx: usize) {
         // Pick the separator entry adjacent to the empty child and the sibling
         // on the other side. Push the separator into the sibling.
         if child_idx < node.entries.len() {
@@ -311,7 +316,7 @@ impl<S: NodeStore> MerkleTree<S> {
             // Sibling is children[child_idx + 1] (the right sibling).
             let separator = node.entries.remove(child_idx);
             node.children.remove(child_idx); // remove the empty slot
-            // Merge separator into the right sibling (now at child_idx).
+                                             // Merge separator into the right sibling (now at child_idx).
             if let Some(hash) = node.children[child_idx].hash() {
                 if let Some(sibling) = self.store.get(hash) {
                     let mut merged = sibling.clone();
@@ -326,7 +331,7 @@ impl<S: NodeStore> MerkleTree<S> {
             let entry_idx = node.entries.len().saturating_sub(1);
             let separator = node.entries.remove(entry_idx);
             node.children.remove(child_idx); // remove the empty slot
-            // Merge separator into the left sibling (now the last child).
+                                             // Merge separator into the left sibling (now the last child).
             let sib_idx = node.children.len().saturating_sub(1);
             if let Some(hash) = node.children[sib_idx].hash() {
                 if let Some(sibling) = self.store.get(hash) {
@@ -342,10 +347,7 @@ impl<S: NodeStore> MerkleTree<S> {
 
     /// Finalize an internal node after deletion: if it has become entry-less
     /// but still has one child, promote that child (shrink the tree height).
-    fn finalize_internal(
-        &mut self,
-        node: Node,
-    ) -> Result<(Option<Hash256>, bool), MerkleError> {
+    fn finalize_internal(&mut self, node: Node) -> Result<(Option<Hash256>, bool), MerkleError> {
         if node.entries.is_empty() {
             if node.children.len() == 1 {
                 match &node.children[0] {
@@ -363,11 +365,15 @@ impl<S: NodeStore> MerkleTree<S> {
     }
 
     /// Remove and return the maximum key-value from a subtree.
+    #[allow(clippy::type_complexity)]
     fn remove_max(
         &mut self,
         node_hash: Hash256,
     ) -> Result<(Vec<u8>, Vec<u8>, Option<Hash256>), MerkleError> {
-        let node = self.store.get(&node_hash).ok_or(MerkleError::NodeNotFound)?;
+        let node = self
+            .store
+            .get(&node_hash)
+            .ok_or(MerkleError::NodeNotFound)?;
 
         if node.is_leaf() {
             let mut new_node = node.clone();
@@ -388,7 +394,7 @@ impl<S: NodeStore> MerkleTree<S> {
             match new_child_hash {
                 Some(h) => new_node.children[last_child_idx] = NodeRef::Hash(h),
                 None => {
-                    self.merge_empty_child(&mut new_node,last_child_idx);
+                    self.merge_empty_child(&mut new_node, last_child_idx);
                 }
             }
             // If internal node collapsed to a single child, promote it
@@ -670,7 +676,12 @@ mod tests {
             // All remaining keys must still be reachable
             for k2 in &keys {
                 if k2 > k {
-                    assert!(tree.get(k2).is_some(), "key {:?} lost after deleting {:?}", k2, k);
+                    assert!(
+                        tree.get(k2).is_some(),
+                        "key {:?} lost after deleting {:?}",
+                        k2,
+                        k
+                    );
                 }
             }
         }
@@ -747,38 +758,54 @@ mod tests {
         let ops: Vec<(u8, Vec<u8>, Vec<u8>)> = vec![
             // (0=insert, 1=get, 2=delete, 3=tovec), key, value
             (0, vec![0], vec![42]),
-            (2, vec![42,42,42], vec![]), (2, vec![61,42,42], vec![]), (2, vec![0], vec![]),
+            (2, vec![42, 42, 42], vec![]),
+            (2, vec![61, 42, 42], vec![]),
+            (2, vec![0], vec![]),
             (0, vec![185], vec![42]),
-            (2, vec![42,42,42], vec![]), (2, vec![61,42,42], vec![]), (2, vec![42,0,42], vec![]),
-            (0, vec![42,42,42], vec![42]),
-            (2, vec![42,42,42], vec![]), (2, vec![0,0,42], vec![]), (2, vec![0], vec![]),
+            (2, vec![42, 42, 42], vec![]),
+            (2, vec![61, 42, 42], vec![]),
+            (2, vec![42, 0, 42], vec![]),
+            (0, vec![42, 42, 42], vec![42]),
+            (2, vec![42, 42, 42], vec![]),
+            (2, vec![0, 0, 42], vec![]),
+            (2, vec![0], vec![]),
             (0, vec![0], vec![42]),
             (2, vec![0], vec![]),
             (0, vec![0], vec![0]),
             (3, vec![], vec![]),
-            (0, vec![42,42,42], vec![42]),
-            (2, vec![61,42,42], vec![]), (2, vec![42], vec![]),
-            (2, vec![42,42,42], vec![]), (2, vec![61,42,42], vec![]), (2, vec![42,0,42], vec![]),
-            (0, vec![42,42,42], vec![42]),
+            (0, vec![42, 42, 42], vec![42]),
+            (2, vec![61, 42, 42], vec![]),
+            (2, vec![42], vec![]),
+            (2, vec![42, 42, 42], vec![]),
+            (2, vec![61, 42, 42], vec![]),
+            (2, vec![42, 0, 42], vec![]),
+            (0, vec![42, 42, 42], vec![42]),
             (2, vec![16], vec![]),
-            (0, vec![16], vec![16]), (0, vec![16], vec![16]), (0, vec![16], vec![16]),
-            (0, vec![16], vec![16]), (0, vec![16], vec![16]), (0, vec![16], vec![16]),
+            (0, vec![16], vec![16]),
+            (0, vec![16], vec![16]),
+            (0, vec![16], vec![16]),
+            (0, vec![16], vec![16]),
+            (0, vec![16], vec![16]),
+            (0, vec![16], vec![16]),
             (0, vec![16], vec![16]),
             (0, vec![99], vec![99]),
             (3, vec![], vec![]),
-            (0, vec![156,156,156,156,156], vec![42]),
-            (2, vec![42,42,42], vec![]),
+            (0, vec![156, 156, 156, 156, 156], vec![42]),
+            (2, vec![42, 42, 42], vec![]),
             (0, vec![42], vec![42]),
             (0, vec![0], vec![0]),
-            (0, vec![42,0,0], vec![0]),
+            (0, vec![42, 0, 0], vec![0]),
             (0, vec![0], vec![87]),
-            (2, vec![0,42,0], vec![]), (2, vec![42,42,42], vec![]),
-            (2, vec![42,144,42], vec![]), (2, vec![42,0,0], vec![]),
-            (2, vec![0,0,0], vec![]),
+            (2, vec![0, 42, 0], vec![]),
+            (2, vec![42, 42, 42], vec![]),
+            (2, vec![42, 144, 42], vec![]),
+            (2, vec![42, 0, 0], vec![]),
+            (2, vec![0, 0, 0], vec![]),
             (0, vec![42], vec![42]),
             (0, vec![42], vec![42]),
             (2, vec![42], vec![]),
-            (2, vec![42,0,0], vec![]), (2, vec![0,0,0], vec![]),
+            (2, vec![42, 0, 0], vec![]),
+            (2, vec![0, 0, 0], vec![]),
             (0, vec![0], vec![42]),
             (2, vec![0], vec![]),
             (0, vec![0], vec![87]),
@@ -788,18 +815,29 @@ mod tests {
                 0 => {
                     tree.insert(key.clone(), val.clone()).unwrap();
                     assert_eq!(
-                        tree.get(key), Some(val.clone()),
-                        "insert-get roundtrip failed at op {}: key={:?}", i, key
+                        tree.get(key),
+                        Some(val.clone()),
+                        "insert-get roundtrip failed at op {}: key={:?}",
+                        i,
+                        key
                     );
                 }
-                2 => { let _ = tree.delete(key); }
+                2 => {
+                    let _ = tree.delete(key);
+                }
                 3 => {
                     let entries = tree.to_vec();
                     for j in 1..entries.len() {
-                        assert!(entries[j-1].0 < entries[j].0, "to_vec not sorted at {}", j);
+                        assert!(
+                            entries[j - 1].0 < entries[j].0,
+                            "to_vec not sorted at {}",
+                            j
+                        );
                     }
                 }
-                _ => { let _ = tree.get(key); }
+                _ => {
+                    let _ = tree.get(key);
+                }
             }
         }
     }

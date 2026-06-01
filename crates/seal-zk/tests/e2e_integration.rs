@@ -5,10 +5,10 @@
 //! for both RISC Zero and SP1 backends (in simulation mode).
 
 use seal_crypto::hash::sha3_256;
+use seal_zk::batch::{BatchProver, BatchTransition, BatchVerifier};
 use seal_zk::risc0::{RiscZeroProver, RiscZeroVerifier};
 use seal_zk::risc0_guest::{self, GuestInput, GuestTransaction};
 use seal_zk::sp1::{Sp1Prover, Sp1Verifier};
-use seal_zk::batch::{BatchProver, BatchTransition, BatchVerifier};
 use seal_zk::stub::{StubProver, StubVerifier};
 use seal_zk::traits::{StateTransition, ZkProver, ZkVerifier};
 
@@ -141,11 +141,17 @@ fn test_batch_proof_e2e() {
 
     // Prove with each backend
     let stub_proof = BatchProver::new(StubProver).prove_batch(&batch).unwrap();
-    let risc0_proof = BatchProver::new(RiscZeroProver::new()).prove_batch(&batch).unwrap();
+    let risc0_proof = BatchProver::new(RiscZeroProver::new())
+        .prove_batch(&batch)
+        .unwrap();
 
     // Verify
-    BatchVerifier::new(StubVerifier).verify_batch(&stub_proof).unwrap();
-    BatchVerifier::new(RiscZeroVerifier::new()).verify_batch(&risc0_proof).unwrap();
+    BatchVerifier::new(StubVerifier)
+        .verify_batch(&stub_proof)
+        .unwrap();
+    BatchVerifier::new(RiscZeroVerifier::new())
+        .verify_batch(&risc0_proof)
+        .unwrap();
 
     // Both cover height 0-4
     assert_eq!(stub_proof.public_inputs.block_height, 0);
@@ -161,8 +167,12 @@ fn test_batch_proof_10_blocks() {
     assert_eq!(batch.height_range().unwrap(), (0, 9));
     assert_eq!(batch.total_tx_count(), 30);
 
-    let proof = BatchProver::new(RiscZeroProver::new()).prove_batch(&batch).unwrap();
-    BatchVerifier::new(RiscZeroVerifier::new()).verify_batch(&proof).unwrap();
+    let proof = BatchProver::new(RiscZeroProver::new())
+        .prove_batch(&batch)
+        .unwrap();
+    BatchVerifier::new(RiscZeroVerifier::new())
+        .verify_batch(&proof)
+        .unwrap();
 }
 
 // ========================================================================

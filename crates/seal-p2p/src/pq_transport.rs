@@ -209,8 +209,8 @@ impl PqTransportResponder {
             ));
         }
 
-        let initiator_pk = KemPublicKey::from_bytes(msg1)
-            .map_err(|e| format!("invalid initiator pk: {}", e))?;
+        let initiator_pk =
+            KemPublicKey::from_bytes(msg1).map_err(|e| format!("invalid initiator pk: {}", e))?;
 
         // Encapsulate with initiator's pk → (ss1, ct1)
         let (ss1, ct1) = initiator_pk.encapsulate();
@@ -219,7 +219,7 @@ impl PqTransportResponder {
         // msg2 = our_pk || ct1
         let mut msg2 = Vec::with_capacity(KEM_PK_SIZE + KEM_CT_SIZE);
         msg2.extend_from_slice(&self.keypair.public.to_bytes());
-        msg2.extend_from_slice(&ct1.to_bytes());
+        msg2.extend_from_slice(ct1.to_bytes());
         Ok(msg2)
     }
 

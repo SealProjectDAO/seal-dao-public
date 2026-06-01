@@ -1,14 +1,18 @@
 # P2P Transport — PQC Migration Plan
 
-## Priority TODO: Vendorize libp2p with Full PQC
+## Status
 
-Fork libp2p into `vendor/` and modify for complete PQC:
-- **Peer IDs**: ML-DSA-65 public keys (replace Ed25519)
-- **Key exchange**: ML-KEM-768 (replace X25519 in Noise)
-- **Handshake signatures**: ML-DSA-65 (replace Ed25519 in Noise XX)
-- **Transport encryption**: symmetric key from ML-KEM shared secret
+ML-KEM-768 native transport is **shipped** (`pq_transport.rs`,
+`PqTransportSession`): we wrap libp2p's transport with our own
+ML-KEM handshake + symmetric-frame layer instead of patching
+Noise. Application-level identity uses `SealAddress` (bech32m over
+`SHA3-256(ML-DSA pk)`), so we don't depend on libp2p peer-id types
+for authentication.
 
-This is a mainnet requirement. Track upstream libp2p for native PQ support.
+**Remaining (mainnet-tracking, not blocking)**: native libp2p PQC
+peer-IDs would let us drop the wrapping layer and route directly
+on PQ peer-IDs. Track upstream libp2p for native ML-DSA + ML-KEM
+support; revisit when an LTS release lands.
 
 ## Current State
 

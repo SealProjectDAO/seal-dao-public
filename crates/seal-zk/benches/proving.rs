@@ -132,14 +132,12 @@ fn bench_batch_prove_5_blocks(b: &mut Bencher) {
 
     b.iter(|| {
         let transitions: Vec<StateTransition> = (0..5)
-            .map(|i| {
-                StateTransition {
-                    pre_state_root: sha3_256(format!("state-{}", i).as_bytes()),
-                    post_state_root: sha3_256(format!("state-{}", i + 1).as_bytes()),
-                    block_height: i as u64,
-                    tx_count: 50,
-                    tx_hash: sha3_256(format!("txs-{}", i).as_bytes()),
-                }
+            .map(|i| StateTransition {
+                pre_state_root: sha3_256(format!("state-{}", i).as_bytes()),
+                post_state_root: sha3_256(format!("state-{}", i + 1).as_bytes()),
+                block_height: i as u64,
+                tx_count: 50,
+                tx_hash: sha3_256(format!("txs-{}", i).as_bytes()),
             })
             .collect();
         let batch = BatchTransition::new(transitions).unwrap();
@@ -154,14 +152,12 @@ fn bench_batch_prove_20_blocks(b: &mut Bencher) {
 
     b.iter(|| {
         let transitions: Vec<StateTransition> = (0..20)
-            .map(|i| {
-                StateTransition {
-                    pre_state_root: sha3_256(format!("state-{}", i).as_bytes()),
-                    post_state_root: sha3_256(format!("state-{}", i + 1).as_bytes()),
-                    block_height: i as u64,
-                    tx_count: 100,
-                    tx_hash: sha3_256(format!("txs-{}", i).as_bytes()),
-                }
+            .map(|i| StateTransition {
+                pre_state_root: sha3_256(format!("state-{}", i).as_bytes()),
+                post_state_root: sha3_256(format!("state-{}", i + 1).as_bytes()),
+                block_height: i as u64,
+                tx_count: 100,
+                tx_hash: sha3_256(format!("txs-{}", i).as_bytes()),
             })
             .collect();
         let batch = BatchTransition::new(transitions).unwrap();

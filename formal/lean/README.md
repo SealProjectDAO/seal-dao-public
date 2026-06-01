@@ -20,7 +20,7 @@ machine", no "we tested it with 1000 inputs".
 | File | Property | Why it matters | Status |
 |------|----------|----------------|--------|
 | `Hash.lean` | Hash collision resistance (axiom) + determinism | Foundation for Merkle tree integrity | Axioms defined |
-| `MerkleTree.lean` | Insert-lookup roundtrip, root hash uniqueness | State integrity: same root = same data | Theorems stated, proofs TODO |
+| `MerkleTree.lean` | Insert/delete/root-hash invariants | State integrity: same root = same data | **Proven** (0 sorries since 2026-05-08 commit `58102e9fc`) |
 | `VRF.lean` | Uniqueness, correctness, soundness | Leader election can't be forged | Axioms + specs defined |
 
 ## How proofs work (by example)
@@ -95,10 +95,14 @@ Install extension: "lean4" by leanprover
 - **`MTree.insert`**: Insert operation (filter duplicates, append, sort)
 - **`MTree.lookup`**: Lookup by key
 - **`MTree.rootHash`**: Compute hash of all entries (Merkle root)
-- **`insert_lookup`**: THEOREM (TODO proof) — insert then lookup = value
-- **`insert_lookup_other`**: THEOREM (TODO proof) — insert doesn't corrupt other keys
+- **`insert_lookup`**: THEOREM (proven) — insert then lookup = value
+- **`insert_lookup_other`**: THEOREM (proven) — insert doesn't corrupt other keys
 - **`rootHash_deterministic`**: THEOREM (proven) — same entries = same root
 - **`rootHash_injective`**: THEOREM (proven) — different root = different entries
+- **`delete_idempotent`**: THEOREM (proven) — deleting twice = deleting once
+- **`delete_then_insert`**: THEOREM (proven) — delete-then-insert = insert
+- **`delete_changes_root`**: THEOREM (proven) — deleting a present key changes the root
+- Helper lemmas: `filter_find_none`, `find_append_none`, `filter_preserves_find`, `find_mem`, `find_pred`, `filter_filter_self` (all proven, no Mathlib dependency)
 
 ### `VRF.lean`
 - **`VRF.eval`**: AXIOM — VRF evaluation function exists

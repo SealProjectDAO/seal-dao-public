@@ -2,6 +2,12 @@ global:
   scrape_interval: 5s
   evaluation_interval: 5s
 
+# Bridge state alerting — see alert.rules.yml for the rule bodies.
+# Each rule's `summary` and `description` annotation explains the
+# operator action.
+rule_files:
+  - /etc/prometheus/alert.rules.yml
+
 scrape_configs:
   - job_name: 'seal-node'
     metrics_path: '/metrics'
@@ -9,6 +15,24 @@ scrape_configs:
       - targets: ['host.docker.internal:8545']
         labels:
           instance: 'local-node'
+
+  # Testnet support services on the same host. Each runs its own
+  # /metrics endpoint with the seal_faucet_* / seal_registration_*
+  # gauges + counters. Comment out the job if the service isn't
+  # running locally.
+  - job_name: 'seal-faucet'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['host.docker.internal:8546']
+        labels:
+          instance: 'local-faucet'
+
+  - job_name: 'seal-registration'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['host.docker.internal:8547']
+        labels:
+          instance: 'local-registration'
 
   # Add more nodes for testnet:
   # - job_name: 'seal-testnet'

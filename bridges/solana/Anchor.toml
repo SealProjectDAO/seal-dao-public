@@ -3,10 +3,10 @@ seeds = false
 skip-lint = false
 
 [programs.localnet]
-seal_bridge = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
+seal_bridge = "FaYr7yXwC3QnZapqTKkYU1Fgy6zwGUzoFjvyKQVXypyD"
 
 [programs.devnet]
-seal_bridge = "Fg6PaFpoGXkYsidMpWTK6W2BeZ7FEfcYkg476zPFsLnS"
+seal_bridge = "FaYr7yXwC3QnZapqTKkYU1Fgy6zwGUzoFjvyKQVXypyD"
 
 [registry]
 url = "https://api.apr.dev"
@@ -16,4 +16,22 @@ cluster = "Localnet"
 wallet = "~/.config/solana/id.json"
 
 [scripts]
-test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
+test = "NODE_OPTIONS='--import tsx' npx mocha --timeout 1000000 'tests/**/*.ts'"
+# Parametric lock driver. Drives `.lockTokens(amount, seal_recipient)`
+# against a deployed mint. See docs/BRIDGE-TESTNET.md §2.1.
+# Usage: anchor run lock-sol -- --amount 1000000 --seal-recipient <hex> \
+#                                --mint <pk> --sender-ata <pk> --vault-ata <pk>
+lock-sol = "NODE_OPTIONS='--import tsx' npx tsx scripts/lock-sol.ts"
+# Parametric unlock-tokens claim driver. Takes the
+# (amount, nonce, committee_signature_hex) tuple from
+# `seal bridge-get-withdrawal` and submits the on-chain claim.
+# Usage: anchor run unlock-tokens -- --amount 1000000 --nonce 0 \
+#                                     --signature <64-hex> \
+#                                     --recipient <pk> --recipient-ata <pk> \
+#                                     --vault-ata <pk> --authority <pk>
+unlock-tokens = "NODE_OPTIONS='--import tsx' npx tsx scripts/unlock-tokens.ts"
+# Derive (and optionally initialize) the bridge vault ATA for a
+# given SPL mint. Required before the first `lock-sol` / lock-usdc
+# call against a new mint. See docs/BRIDGE-TESTNET.md §2.1.
+# Usage: anchor run derive-vault-ata -- --mint <pk> [--init]
+derive-vault-ata = "NODE_OPTIONS='--import tsx' npx tsx scripts/derive-vault-ata.ts"

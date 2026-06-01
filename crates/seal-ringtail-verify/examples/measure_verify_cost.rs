@@ -33,9 +33,7 @@ fn main() {
     use seal_ringtail_verify::ntt::NttCtx;
     use seal_ringtail_verify::{verify, PublicParams, Signature, RING_N};
     use seal_threshold::ntt::HandRolledOps;
-    use seal_threshold::ringtail::{
-        generate_public_params_no_error, sign_single_full, MODULE_K,
-    };
+    use seal_threshold::ringtail::{generate_public_params_no_error, sign_single_full, MODULE_K};
     use std::time::Instant;
 
     println!("=== seal-ringtail-verify host-cost measurement ===");
@@ -63,7 +61,10 @@ fn main() {
         public_key_t[i] = &public_key_t_bytes[i];
     }
 
-    let pp = PublicParams { matrix_a, public_key_t };
+    let pp = PublicParams {
+        matrix_a,
+        public_key_t,
+    };
     let sig = Signature {
         z: &sig_full.z,
         challenge: &sig_full.challenge,
@@ -87,7 +88,10 @@ fn main() {
     println!("RING_N      : {RING_N}");
     println!("MODULE_K    : {MODULE_K}");
     println!("z size      : {} bytes", sig.z.len());
-    println!("matrix bytes: {} bytes", matrix_a_bytes.iter().map(|r| r.len()).sum::<usize>());
+    println!(
+        "matrix bytes: {} bytes",
+        matrix_a_bytes.iter().map(|r| r.len()).sum::<usize>()
+    );
     println!("Iterations  : {N}");
     println!(
         "Total       : {:.3} ms ({:.2} µs/call)",

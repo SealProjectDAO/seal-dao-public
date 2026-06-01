@@ -19,6 +19,11 @@
 //! - Convolution theorem: NTT(a*b) = NTT(a)·NTT(b)
 //! - Modular arithmetic safety (no overflow in u128 intermediates)
 
+// Math-heavy code: range-indexed loops match the algebraic formulas they
+// implement (Cooley-Tukey butterflies, Lagrange interpolation, schoolbook
+// convolution) and are clearer than iterator chains for the reader.
+#![allow(clippy::needless_range_loop)]
+
 use crate::ringtail::{RingOps, RING_N, RING_Q};
 use subtle::{ConditionallySelectable, ConstantTimeGreater};
 
@@ -189,11 +194,7 @@ pub fn shamir_share(
 
 /// Reconstruct the secret from `t` shares using Lagrange interpolation.
 /// Evaluates the interpolating polynomial at x=0 to recover the secret.
-pub fn shamir_reconstruct(
-    shares: &[(usize, Vec<u64>)],
-    q: u64,
-    ring_n: usize,
-) -> Vec<u64> {
+pub fn shamir_reconstruct(shares: &[(usize, Vec<u64>)], q: u64, ring_n: usize) -> Vec<u64> {
     let t = shares.len();
     let mut secret = vec![0u64; ring_n];
 
@@ -889,7 +890,8 @@ mod tests {
         }
 
         assert_eq!(
-            ntt_result, schoolbook_result,
+            ntt_result,
+            schoolbook_result,
             "Hand-rolled NTT mul differs from schoolbook at {} positions",
             diffs.len()
         );
@@ -912,14 +914,18 @@ mod tests {
         }
 
         if !diffs.is_empty() {
-            println!("Lattigo-port NTT vs schoolbook: {} differences", diffs.len());
+            println!(
+                "Lattigo-port NTT vs schoolbook: {} differences",
+                diffs.len()
+            );
             for (i, ntt, school) in diffs.iter().take(5) {
                 println!("  [{}]: NTT={}, schoolbook={}", i, ntt, school);
             }
         }
 
         assert_eq!(
-            ntt_result, schoolbook_result,
+            ntt_result,
+            schoolbook_result,
             "Lattigo-port NTT mul differs from schoolbook at {} positions",
             diffs.len()
         );
@@ -951,18 +957,13 @@ mod tests {
             let schoolbook = schoolbook_mul(&a, &b, RING_Q, RING_N);
             let hand_matches_school = hand_result == schoolbook;
             let latt_matches_school = latt_result == schoolbook;
-            println!(
-                "  Hand-rolled matches schoolbook: {}",
-                hand_matches_school
-            );
-            println!(
-                "  Lattigo-port matches schoolbook: {}",
-                latt_matches_school
-            );
+            println!("  Hand-rolled matches schoolbook: {}", hand_matches_school);
+            println!("  Lattigo-port matches schoolbook: {}", latt_matches_school);
         }
 
         assert_eq!(
-            hand_result, latt_result,
+            hand_result,
+            latt_result,
             "Hand-rolled and Lattigo-port produce different results ({} diffs)",
             diffs.len()
         );

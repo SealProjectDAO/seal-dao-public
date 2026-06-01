@@ -1,6 +1,6 @@
 /// Full BIP-39 English wordlist (2048 words).
 /// Source: https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt
-pub const BIP39_ENGLISH: [&str; 2048] = [
+pub static BIP39_ENGLISH: [&str; 2048] = [
     "abandon",
     "ability",
     "able",

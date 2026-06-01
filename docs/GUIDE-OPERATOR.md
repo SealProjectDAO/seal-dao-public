@@ -99,6 +99,31 @@ This starts the node in indefinite mode with the JSON-RPC server on port 8545.
 ./target/release/seal-node --slots 0 --rpc-port 8545 --data-dir /var/seal/data
 ```
 
+### With persistent validator identity
+
+For a production / testnet operator setup, pass `--validator-key`
+so restarts keep the same on-chain ML-DSA address (otherwise the
+node generates a fresh keypair every start — fine for dev, broken
+for any flow that depends on stable identity like portal
+registration or on-chain reward accrual):
+
+```bash
+# Generate once, back it up offline:
+./target/release/seal keygen --output /etc/seal/validator-keys.json
+chmod 600 /etc/seal/validator-keys.json
+
+./target/release/seal-node \
+  --slots 0 \
+  --port 4001 \
+  --rpc-port 8545 \
+  --data-dir /var/seal/data \
+  --validator-key /etc/seal/validator-keys.json
+```
+
+`network` field in the keyfile is cross-checked against the running
+node's HRP mode — running a `testnet` keyfile under `--mainnet` (or
+vice versa) refuses at startup with a clear error.
+
 ### Verify the node is running
 
 ```bash
@@ -481,3 +506,50 @@ Slashing is enforced by the consensus protocol and results in stake reduction.
 ufw allow from 10.0.0.0/24 to any port 4001 proto tcp
 ufw deny 8545
 ```
+
+## Bridge Unlock Relayer
+
+For the **complete end-to-end testnet bring-up** (public-chain
+deploy, flip to Ringtail mode, fund per-validator relayers,
+multi-validator smoke, verify), see
+[`docs/RUNBOOK-TESTNET-OPERATOR.md`](RUNBOOK-TESTNET-OPERATOR.md).
+For 3 / 5 / 7-validator + variable bridge-committee sizing recipes,
+see [`docs/TESTNET-VALIDATOR-SIZES.md`](TESTNET-VALIDATOR-SIZES.md).
+
+If your validator handles bridge unlock submissions (the per-validator
+custody model — every validator runs its own relayer + funded
+destination-chain keys), see
+[`apps/seal-relayer/README.md`](../apps/seal-relayer/README.md) for
+the full bring-up checklist. Quick summary:
+
+1. **Generate destination-chain wallets** (one per chain you'll relay):
+   ```bash
+   solana-keygen new -o /var/lib/seal/keys/solana-relayer.json
+   stellar keys generate seal-relayer
+   ```
+
+2. **Fund each wallet** before pointing the relayer at a node — the
+   relayer pays gas for every unlock it submits:
+   ```bash
+   ./scripts/bridge-faucet.sh sol $(solana address -k /var/lib/seal/keys/solana-relayer.json)
+   ./scripts/bridge-faucet.sh xlm $(stellar keys address seal-relayer)
+   ```
+   Estimated funding for an 8-week testnet run: ~5 SOL devnet + ~100
+   XLM testnet per validator. Public airdrops are rate-limited; top up
+   gradually rather than in one shot.
+
+3. **Configure + enable** the systemd unit:
+   ```bash
+   sudo install -m 600 apps/seal-relayer/relayer.env.example /etc/seal/relayer.env
+   sudo $EDITOR /etc/seal/relayer.env  # set RPC URL, contract IDs, mint pubkeys, vault ATAs
+   sudo install -m 644 apps/seal-relayer/seal-relayer.service /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now seal-relayer
+   ```
+
+4. **Verify** with `--dry-run` first if you want to confirm the relayer
+   sees the right withdrawals before flipping on real submission.
+
+You can opt out of either chain (omit the matching `--solana-*` or
+`--stellar-*` flags entirely); other validators handle that chain
+instead.

@@ -28,7 +28,8 @@ impl ThresholdScheme for SimpleThreshold {
     ) -> Result<PartialSignature, ThresholdError> {
         let sk = SigningKey::from_bytes(secret_key)
             .map_err(|_| ThresholdError::InvalidPartialSignature(signer_index))?;
-        let sig = sk.sign(message)
+        let sig = sk
+            .sign(message)
             .map_err(|_| ThresholdError::InvalidPartialSignature(signer_index))?;
         Ok(PartialSignature {
             signer_index,

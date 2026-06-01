@@ -23,7 +23,7 @@ const MAX_PO2: usize = 23;
 
 const PLATFORM_CPU: Platform = Platform::new("cpu", "cpp", "hal/cpu");
 const PLATFORM_CUDA: Platform = Platform::new("cuda", "cu", "hal/cuda/kernels");
-// const PLATFORM_METAL: Platform = Platform::new("metal", "metal", "hal/metal/kernels");
+const PLATFORM_METAL: Platform = Platform::new("metal", "metal", "hal/metal/kernels");
 
 fn main() {
     let output = "risc0_rv32im_m3";
@@ -41,11 +41,9 @@ fn main() {
     rerun_if_changed("cxx/zkp");
     rerun_if_changed("vendor");
 
-    let platform =
-    // if is_metal() {
-    //     PLATFORM_METAL
-    // } else
-    if is_cuda() {
+    let platform = if is_metal() {
+        PLATFORM_METAL
+    } else if is_cuda() {
         PLATFORM_CUDA
     } else {
         PLATFORM_CPU
@@ -90,12 +88,25 @@ fn main() {
 
     // println!("cargo:rustc-link-lib=asan");
 
-    // if is_metal() {
-    //     build
-    //         .file("cxx/hal/metal/hal.cpp")
-    //         .files(glob_paths("cxx/hal/metal/kernel/*.metal"));
-    // } else
-    if is_cuda() {
+    if is_metal() {
+        // Metal kernels (.metal files) are compiled separately into a
+        // .metallib by the Xcode `MetalToolchain`; see cxx/hal/metal/
+        // BUILD.bazel for the upstream pattern. For our cc-based
+        // Cargo build we only compile the C++ HAL (`hal.cpp` includes
+        // <Metal/Metal.h> and orchestrates kernel dispatch), and the
+        // pre-built metal_kernels_*.metallib that risc0-sys ships
+        // gets loaded at runtime via Bundle.main.
+        build
+            .file("cxx/hal/metal/hal.cpp")
+            .flag("-x")
+            .flag("objective-c++")
+            .flag("-fobjc-arc");
+        // Link the Metal + Foundation frameworks. cc::Build doesn't
+        // do this directly, so emit cargo link directives.
+        println!("cargo:rustc-link-lib=framework=Metal");
+        println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=MetalPerformanceShaders");
+    } else if is_cuda() {
         build
             .cuda(true)
             .cudart("static")
@@ -235,6 +246,12 @@ fn is_cuda() -> bool {
     env::var("CARGO_FEATURE_CUDA").is_ok()
 }
 
-// fn is_metal() -> bool {
-//     env::var("CARGO_CFG_TARGET_OS").is_ok_and(|os| os == "macos" || os == "ios")
-// }
+fn is_metal() -> bool {
+    // Only fire on Apple platforms AND when the consumer asked for
+    // the `metal` feature explicitly — we don't want a default
+    // macOS build to start pulling in Metal frameworks unless the
+    // GPU path was opted into.
+    env::var("CARGO_FEATURE_METAL").is_ok()
+        && env::var("CARGO_CFG_TARGET_OS")
+            .is_ok_and(|os| os == "macos" || os == "ios")
+}

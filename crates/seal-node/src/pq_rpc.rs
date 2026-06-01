@@ -72,6 +72,12 @@ pub struct EncryptedRpcResponse {
     pub nonce: u64,
 }
 
+impl Default for PqRpcManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PqRpcManager {
     /// Create a new PQ RPC manager with a fresh ML-KEM keypair.
     pub fn new() -> Self {

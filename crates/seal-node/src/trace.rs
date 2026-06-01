@@ -55,15 +55,9 @@ pub enum TraceEvent {
         vote_count: usize,
     },
     /// A slot was skipped (no block produced).
-    SkipSlot {
-        slot: u64,
-        epoch: u64,
-    },
+    SkipSlot { slot: u64, epoch: u64 },
     /// Epoch transition.
-    EpochTransition {
-        from_epoch: u64,
-        to_epoch: u64,
-    },
+    EpochTransition { from_epoch: u64, to_epoch: u64 },
 }
 
 /// Records a sequence of consensus events for conformance testing.
@@ -189,9 +183,7 @@ impl TraceRecorder {
                 }
 
                 TraceEvent::Finalize {
-                    height,
-                    block_hash,
-                    ..
+                    height, block_hash, ..
                 } => {
                     finalize_count += 1;
 

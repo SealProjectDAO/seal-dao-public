@@ -171,7 +171,7 @@ Is the code pure arithmetic / small state machine?
 | Consensus safety | **TLA+** | ✅ 3/3 verified | Agreement, no equivocation, monotonic |
 | Composite proof | **TLA+** | ✅ 3/3 verified | Soundness, completeness, independence |
 | Hash properties | **Lean 4** | ✅ 4/4 | Determinism, injectivity, incremental |
-| Merkle invariants | **Lean 4** | 1/4 (3 sorry) | Root determinism (rest TODO) |
+| Merkle invariants | **Lean 4** | ✅ 4/4 | Root determinism + delete idempotence + delete-then-insert + delete-changes-root (0 sorries since commit `58102e9fc`) |
 | VRF properties | **Lean 4** | Axiomatized | Uniqueness, correctness, soundness |
 | ML-DSA correctness | **hax+F*** | ✅ (Cryspen) | Panic freedom, FIPS 204, secret indep |
 | ML-KEM correctness | **hax+F*** | ✅ (Cryspen) | Panic freedom, FIPS 203, secret indep |

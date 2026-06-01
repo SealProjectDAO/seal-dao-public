@@ -1059,13 +1059,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "chacha20"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6f8d983286843e49675a4b7a2d174efe136dc93a18d69130dd18198a6c167601"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "chacha20poly1305"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "10cd79432192d1c0f4e1a0fef9527696cc039165d729fb41b3f4f4f354c2dc35"
 dependencies = [
  "aead",
- "chacha20",
+ "chacha20 0.9.1",
  "cipher",
  "poly1305",
  "zeroize",
@@ -1256,6 +1267,17 @@ dependencies = [
  "hax-lib",
  "pastey",
  "rand 0.9.2",
+]
+
+[[package]]
+name = "core-models"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c406a8d3cdec6393dc8975b623d806ce2d586653c620f86f7fab2e043df1cb2"
+dependencies = [
+ "hax-lib",
+ "pastey",
+ "rand 0.10.1",
 ]
 
 [[package]]
@@ -1600,7 +1622,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ab67060fc6b8ef687992d439ca0fa36e7ed17e9a0b16b25b601e8757df720de"
 dependencies = [
  "data-encoding",
- "syn 1.0.109",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2510,6 +2532,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
+ "rand_core 0.10.1",
  "wasip2",
  "wasip3",
 ]
@@ -3414,7 +3437,17 @@ version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1b5db005ff8001e026b73a6842ee81bbef8ec5ff0e1915a67ae65fd2a9fafa5"
 dependencies = [
- "core-models",
+ "core-models 0.0.5",
+ "hax-lib",
+]
+
+[[package]]
+name = "libcrux-intrinsics"
+version = "0.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "95b254f1797aecd888f76e9647e6bec7b4c26fb6d60a73fd9856e4a1e535c704"
+dependencies = [
+ "core-models 0.0.6",
  "hax-lib",
 ]
 
@@ -3430,16 +3463,16 @@ dependencies = [
 
 [[package]]
 name = "libcrux-ml-dsa"
-version = "0.0.8"
+version = "0.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a72929ed421cc3bf16a946b3e7d2a58d215b0b5c2a12be26b53629f081bf49b2"
+checksum = "b067d3ea26eea867aad034b4567f7410ddf1807cab36aa82d3d610a18a06e70e"
 dependencies = [
- "core-models",
+ "core-models 0.0.6",
  "hax-lib",
- "libcrux-intrinsics",
+ "libcrux-intrinsics 0.0.7",
  "libcrux-macros",
  "libcrux-platform",
- "libcrux-sha3",
+ "libcrux-sha3 0.0.9",
 ]
 
 [[package]]
@@ -3449,11 +3482,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a14ab3e477de9df6ee1273a114018ff62c4996ca9220070c4e5cb1743f94a67d"
 dependencies = [
  "hax-lib",
- "libcrux-intrinsics",
+ "libcrux-intrinsics 0.0.6",
  "libcrux-platform",
  "libcrux-secrets",
- "libcrux-sha3",
- "libcrux-traits",
+ "libcrux-sha3 0.0.8",
+ "libcrux-traits 0.0.6",
  "rand 0.9.2",
  "tls_codec",
 ]
@@ -3483,9 +3516,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1ae0b7d0e1cc4793a609fd0ff2ca3b3a3fabae523770c619a3d4bc86417b0d7"
 dependencies = [
  "hax-lib",
- "libcrux-intrinsics",
+ "libcrux-intrinsics 0.0.6",
  "libcrux-platform",
- "libcrux-traits",
+ "libcrux-traits 0.0.6",
+]
+
+[[package]]
+name = "libcrux-sha3"
+version = "0.0.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f314521d5115afff6466e35e82cecd3b3bdf1dbed80d69285769a0f51c74fcc7"
+dependencies = [
+ "hax-lib",
+ "libcrux-intrinsics 0.0.7",
+ "libcrux-platform",
+ "libcrux-traits 0.0.7",
 ]
 
 [[package]]
@@ -3496,6 +3541,16 @@ checksum = "812e4fa89f3f5e34b47f928b22b1b78395a0d4ec23b1f583db635f128159d65f"
 dependencies = [
  "libcrux-secrets",
  "rand 0.9.2",
+]
+
+[[package]]
+name = "libcrux-traits"
+version = "0.0.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2613bf3dbf3670777bd6ecc3bcdd2d7a642663656b35ed2823529c4f1db0c9e9"
+dependencies = [
+ "libcrux-secrets",
+ "rand 0.10.1",
 ]
 
 [[package]]
@@ -5515,6 +5570,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rand"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
+dependencies = [
+ "chacha20 0.10.0",
+ "getrandom 0.4.2",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "rand_chacha"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5551,6 +5617,12 @@ checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
 ]
+
+[[package]]
+name = "rand_core"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rand_xorshift"
@@ -6339,9 +6411,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.12"
+version = "0.103.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8279bb85272c9f10811ae6a6c547ff594d6a7f3c6c6b02ee9726d1d0dcfcdd06"
+checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -6519,19 +6591,28 @@ name = "seal-bridge"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "data-encoding",
+ "hex",
+ "hmac",
  "proptest",
  "reqwest",
  "seal-crypto",
+ "seal-ringtail-verify",
+ "seal-threshold",
  "seal-token",
  "serde",
  "serde_json",
+ "sha2",
+ "subtle",
  "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
 name = "seal-cli"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "hex",
  "seal-consensus",
  "seal-crypto",
@@ -6591,15 +6672,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "seal-faucet"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "hex",
+ "seal-crypto",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
 name = "seal-forms"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "hex",
+ "hkdf",
  "seal-crypto",
  "seal-sql",
  "seal-wallet",
  "serde",
  "serde_json",
+ "sha3",
 ]
 
 [[package]]
@@ -6663,6 +6761,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "axum",
+ "base64",
  "bincode",
  "hex",
  "libp2p",
@@ -6726,6 +6825,34 @@ dependencies = [
  "sha3",
  "thiserror 2.0.18",
  "wasmparser",
+]
+
+[[package]]
+name = "seal-registration"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "hex",
+ "seal-crypto",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+]
+
+[[package]]
+name = "seal-relayer"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "seal-crypto",
+ "serde",
+ "serde_json",
+ "sha3",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
 ]
 
 [[package]]
@@ -6804,6 +6931,7 @@ dependencies = [
 name = "seal-token"
 version = "0.1.0"
 dependencies = [
+ "bincode",
  "proptest",
  "seal-crypto",
  "serde",

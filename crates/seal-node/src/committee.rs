@@ -176,8 +176,7 @@ impl CommitteeManager {
             self.collectors.remove(&min_height);
         }
 
-        let threshold = ((committee_size as u64)
-            .saturating_mul(self.finality_threshold_percent)
+        let threshold = ((committee_size as u64).saturating_mul(self.finality_threshold_percent)
             / 100) as usize;
         let threshold = threshold.max(1);
 
@@ -188,9 +187,7 @@ impl CommitteeManager {
 
         debug!(
             height,
-            threshold,
-            committee_size,
-            "Started vote collection for block"
+            threshold, committee_size, "Started vote collection for block"
         );
     }
 
@@ -404,7 +401,13 @@ impl CommitteeManagerFull {
         block_hash: [u8; 32],
         signer_index: usize,
         mac_key: &[u8],
-    ) -> Result<(CommitteeVoteFull, seal_threshold::ringtail::RingtailParty<seal_threshold::ntt::HandRolledOps>), ThresholdError> {
+    ) -> Result<
+        (
+            CommitteeVoteFull,
+            seal_threshold::ringtail::RingtailParty<seal_threshold::ntt::HandRolledOps>,
+        ),
+        ThresholdError,
+    > {
         use seal_threshold::ntt::HandRolledOps;
         use seal_threshold::ringtail::{RingOps, RingtailParty};
         let ring = HandRolledOps::new();
@@ -670,10 +673,12 @@ mod tests {
         let block_hash = sha3_256(b"test block at height 42").0;
 
         // Create 3 committee members
-        let keys: Vec<Vec<u8>> = (0..3).map(|_| {
-            let sk = ring.sample_gaussian(6.108);
-            ring.to_bytes(&sk)
-        }).collect();
+        let keys: Vec<Vec<u8>> = (0..3)
+            .map(|_| {
+                let sk = ring.sample_gaussian(6.108);
+                ring.to_bytes(&sk)
+            })
+            .collect();
 
         let mut mgr = CommitteeManager::new(keys[0].clone(), 67);
 
@@ -682,8 +687,8 @@ mod tests {
 
         // Each member produces a vote
         let mut result = None;
-        for i in 0..3 {
-            let mut voter = CommitteeManager::new(keys[i].clone(), 67);
+        for (i, key) in keys.iter().enumerate().take(3) {
+            let mut voter = CommitteeManager::new(key.clone(), 67);
             voter.set_committee_index(Some(i));
             let vote = voter.produce_vote(42, block_hash, vec![i as u8]).unwrap();
 
@@ -784,9 +789,7 @@ mod tests {
     #[test]
     fn test_committee_manager_full_single_signer_byte_exact() {
         use seal_threshold::ntt::HandRolledOps;
-        use seal_threshold::ringtail::{
-            generate_public_params_no_error, verify_signature_full,
-        };
+        use seal_threshold::ringtail::{generate_public_params_no_error, verify_signature_full};
 
         let ring = HandRolledOps::new();
         let (params, sk_bytes) = generate_public_params_no_error(&ring);

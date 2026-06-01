@@ -36,6 +36,10 @@ use soroban_sdk::xdr::ToXdr;
 /// asset it's the contract ID returned by `stellar contract asset
 /// deploy --asset <code:issuer>`.
 #[allow(dead_code)] const XLM_SAC_KEY: &str = "xlm_sac";
+/// In-contract pause flag. When set to `true`, `lock_xlm` and
+/// `unlock_xlm` both reject with `Paused`. Toggled by the admin via
+/// `set_pause`.
+#[allow(dead_code)] const PAUSED_KEY: &str = "paused";
 
 /// Storage key prefix for processed nonces.
 /// Each processed nonce is stored as "done:{nonce}" -> true.
@@ -83,6 +87,8 @@ pub enum BridgeError {
     InvalidProof = 6,
     /// Amount must be positive
     InvalidAmount = 7,
+    /// Bridge is paused; lock and unlock are temporarily disabled
+    Paused = 8,
 }
 
 // ---------------------------------------------------------------------------
@@ -136,9 +142,38 @@ impl SealBridgeContract {
         env.storage()
             .instance()
             .set(&symbol_short!("nonce"), &0u64);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("paused"), &false);
 
         log!(&env, "Seal bridge initialized. Admin: {}", admin);
 
+        Ok(())
+    }
+
+    /// Toggle the in-contract pause flag. Admin-only. While paused,
+    /// `lock_xlm` and `unlock_xlm` both reject with `Paused`. This
+    /// is a defence-in-depth control on top of the Seal-side
+    /// `seal_bridgePauseChain` (Technical Council 2/3 supermajority);
+    /// even if the host-side relayer is compromised or stops checking
+    /// the global pause state, this contract-level switch keeps the
+    /// asset locked in the vault.
+    pub fn set_pause(env: Env, paused: bool) -> Result<(), BridgeError> {
+        if !env.storage().instance().has(&symbol_short!("admin")) {
+            return Err(BridgeError::NotInitialized);
+        }
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .ok_or(BridgeError::NotInitialized)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&symbol_short!("paused"), &paused);
+        env.events()
+            .publish((symbol_short!("pause"),), (admin, paused));
+        log!(&env, "Pause flag set to {}", paused);
         Ok(())
     }
 
@@ -161,6 +196,17 @@ impl SealBridgeContract {
         // Verify the contract is initialized
         if !env.storage().instance().has(&symbol_short!("admin")) {
             return Err(BridgeError::NotInitialized);
+        }
+
+        // Reject when paused. Read before sender.require_auth() so a
+        // paused contract never even prompts for sender auth.
+        if env
+            .storage()
+            .instance()
+            .get(&symbol_short!("paused"))
+            .unwrap_or(false)
+        {
+            return Err(BridgeError::Paused);
         }
 
         // Require sender authorization
@@ -253,6 +299,16 @@ impl SealBridgeContract {
         // Verify the contract is initialized
         if !env.storage().instance().has(&symbol_short!("admin")) {
             return Err(BridgeError::NotInitialized);
+        }
+
+        // Reject when paused. Same defence-in-depth as lock_xlm.
+        if env
+            .storage()
+            .instance()
+            .get(&symbol_short!("paused"))
+            .unwrap_or(false)
+        {
+            return Err(BridgeError::Paused);
         }
 
         // Validate amount
@@ -354,6 +410,190 @@ impl SealBridgeContract {
     }
 
     // -----------------------------------------------------------------------
+    // USDC bridge — parallel to lock_xlm / unlock_xlm but operates on
+    // a separate Stellar Asset Contract address (the USDC SAC, which
+    // on testnet is `USDC:GBBD47IF…` issued by the Stellar Foundation).
+    // -----------------------------------------------------------------------
+
+    /// Install / rotate the USDC SAC address. Admin-only.
+    /// MUST be called once before `lock_usdc` works — `initialize`
+    /// doesn't take this argument so existing bridge deployments don't
+    /// need a contract upgrade to start handling USDC. Subsequent calls
+    /// replace the prior value (no-op for testnet if you only deploy
+    /// the bridge once per network).
+    pub fn set_usdc_sac(env: Env, usdc_sac: Address) -> Result<(), BridgeError> {
+        if !env.storage().instance().has(&symbol_short!("admin")) {
+            return Err(BridgeError::NotInitialized);
+        }
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("admin"))
+            .ok_or(BridgeError::NotInitialized)?;
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&symbol_short!("usdc_sac"), &usdc_sac);
+        env.events()
+            .publish((symbol_short!("usdcset"),), usdc_sac);
+        log!(&env, "USDC SAC installed");
+        Ok(())
+    }
+
+    /// Lock USDC in the bridge contract. Mirror of `lock_xlm` but uses
+    /// the `usdc_sac` storage slot rather than `xlm_sac`. Emits an
+    /// `lockusdc` event so the Seal observer can distinguish the asset
+    /// at parse time.
+    pub fn lock_usdc(
+        env: Env,
+        sender: Address,
+        amount: i128,
+        seal_address: BytesN<32>,
+    ) -> Result<(), BridgeError> {
+        if !env.storage().instance().has(&symbol_short!("admin")) {
+            return Err(BridgeError::NotInitialized);
+        }
+        if env
+            .storage()
+            .instance()
+            .get(&symbol_short!("paused"))
+            .unwrap_or(false)
+        {
+            return Err(BridgeError::Paused);
+        }
+        sender.require_auth();
+        if amount <= 0 {
+            return Err(BridgeError::InvalidAmount);
+        }
+
+        let usdc_sac: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("usdc_sac"))
+            .ok_or(BridgeError::NotInitialized)?;
+        let usdc = token::Client::new(&env, &usdc_sac);
+        usdc.transfer(&sender, &env.current_contract_address(), &amount);
+
+        // Track USDC-specific total in its own slot so the XLM-side
+        // accounting isn't disturbed. Shared `nonce` keeps withdrawal
+        // ids globally unique.
+        let total: i128 = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("usdclock"))
+            .unwrap_or(0);
+        let new_total = total
+            .checked_add(amount)
+            .ok_or(BridgeError::InsufficientBalance)?;
+        env.storage()
+            .instance()
+            .set(&symbol_short!("usdclock"), &new_total);
+
+        let nonce: u64 = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("nonce"))
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&symbol_short!("nonce"), &(nonce + 1));
+
+        env.events().publish(
+            (symbol_short!("lockusdc"),),
+            LockInfo {
+                sender: sender.clone(),
+                amount,
+                seal_address,
+                timestamp: env.ledger().timestamp(),
+                nonce,
+            },
+        );
+        log!(
+            &env,
+            "Locked {} USDC base units. Nonce: {}. Sender: {}",
+            amount,
+            nonce,
+            sender
+        );
+        Ok(())
+    }
+
+    /// Unlock USDC. Same shape as `unlock_xlm`; the on-host committee
+    /// MAC binds (recipient, amount, nonce, BRIDGE_DOMAIN_TAG), so the
+    /// same per-chain domain tag covers both XLM and USDC unlocks —
+    /// reproducible from the seal-bridge host code (see
+    /// `compute_committee_mac` Stellar branch).
+    pub fn unlock_usdc(
+        env: Env,
+        recipient: Address,
+        amount: i128,
+        nonce: u64,
+        proof: Bytes,
+    ) -> Result<(), BridgeError> {
+        if !env.storage().instance().has(&symbol_short!("admin")) {
+            return Err(BridgeError::NotInitialized);
+        }
+        if env
+            .storage()
+            .instance()
+            .get(&symbol_short!("paused"))
+            .unwrap_or(false)
+        {
+            return Err(BridgeError::Paused);
+        }
+        if amount <= 0 {
+            return Err(BridgeError::InvalidAmount);
+        }
+        let nonce_key = nonce_storage_key(&env, nonce);
+        if env.storage().persistent().has(&nonce_key) {
+            return Err(BridgeError::AlreadyProcessed);
+        }
+        verify_proof(&env, &recipient, amount, nonce, &proof)?;
+
+        let total: i128 = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("usdclock"))
+            .unwrap_or(0);
+        let new_total = total
+            .checked_sub(amount)
+            .ok_or(BridgeError::InsufficientBalance)?;
+        env.storage()
+            .instance()
+            .set(&symbol_short!("usdclock"), &new_total);
+
+        let usdc_sac: Address = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("usdc_sac"))
+            .ok_or(BridgeError::NotInitialized)?;
+        let usdc = token::Client::new(&env, &usdc_sac);
+        usdc.transfer(&env.current_contract_address(), &recipient, &amount);
+
+        env.storage().persistent().set(&nonce_key, &true);
+        env.events().publish(
+            (symbol_short!("unlockusd"),),
+            (recipient.clone(), amount, nonce),
+        );
+        log!(
+            &env,
+            "Unlocked {} USDC to {}. Nonce: {}",
+            amount,
+            recipient,
+            nonce
+        );
+        Ok(())
+    }
+
+    /// Total USDC currently locked in the bridge vault.
+    pub fn get_total_usdc_locked(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("usdclock"))
+            .unwrap_or(0)
+    }
+
+    // -----------------------------------------------------------------------
     // View functions
     // -----------------------------------------------------------------------
 
@@ -377,6 +617,40 @@ impl SealBridgeContract {
     pub fn is_nonce_processed(env: Env, nonce: u64) -> bool {
         let nonce_key = nonce_storage_key(&env, nonce);
         env.storage().persistent().has(&nonce_key)
+    }
+
+    /// Returns the current pause state. `false` until `set_pause(true)`
+    /// is invoked by the admin (and pre-init, returns false).
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&symbol_short!("paused"))
+            .unwrap_or(false)
+    }
+
+    /// SHA-256 fingerprint over the stored committee verification key.
+    /// Used by Seal-side operator dashboards to cross-check that the
+    /// host's `committee_key_fingerprint_sha256` (returned by
+    /// `seal_bridgeGetCommitteeKeyStatus`) matches what's actually
+    /// installed on-chain — drift between the two is the typical
+    /// failure mode after a partial `rotate_committee_key` call where
+    /// the on-chain ix landed but the Seal-side `seal_bridgeRotate
+    /// CommitteeKey` did not (or vice versa).
+    ///
+    /// Returns `[0u8; 32]` pre-init (no committee key stored) so the
+    /// view is callable during the bootstrap window without an
+    /// `NotInitialized` error trip — dashboards can detect "not yet
+    /// initialized" by the all-zero return.
+    pub fn committee_key_hash(env: Env) -> BytesN<32> {
+        let key: Option<BytesN<32>> =
+            env.storage().instance().get(&symbol_short!("brkey"));
+        match key {
+            Some(k) => {
+                let bytes: Bytes = k.into();
+                env.crypto().sha256(&bytes).into()
+            }
+            None => BytesN::from_array(&env, &[0u8; 32]),
+        }
     }
 }
 
@@ -403,7 +677,9 @@ const COMMITTEE_SIG_LEN: u32 = 32;
 ///
 /// The `seal_bridge_key` is the 32-byte shared verification key stored
 /// at `initialize` time. It rotates per Seal epoch via an admin
-/// action (rotate_committee_key, TODO).
+/// action (`rotate_committee_key`); dashboards detect drift via
+/// `committee_key_hash()` vs the Seal-side
+/// `seal_bridgeGetCommitteeKeyStatus.fingerprint_sha2_hex`.
 ///
 /// # What this does NOT check
 ///
@@ -686,6 +962,71 @@ mod test {
     }
 
     #[test]
+    fn test_lock_usdc_round_trip() {
+        // Mirror of test_lock_xlm_moves_tokens_into_vault + the unlock
+        // happy path. Asserts that:
+        //   - set_usdc_sac stores the USDC SAC address
+        //   - lock_usdc transfers from sender to the contract vault
+        //   - the shared nonce counter advances
+        //   - unlock_usdc with a valid committee MAC releases the funds
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SealBridgeContract);
+        let client = SealBridgeContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let seal_address = BytesN::from_array(&env, &[0xCDu8; 32]);
+
+        // Set up two separate SACs — one for XLM (passed to initialize),
+        // one for USDC (installed via set_usdc_sac after init). The
+        // contract has to track them in distinct storage slots.
+        let (xlm_sac, _) = setup_sac(&env);
+        let (usdc_sac, _) = setup_sac(&env);
+
+        client.initialize(&admin, &bridge_key, &xlm_sac);
+        client.set_usdc_sac(&usdc_sac);
+
+        StellarAssetClient::new(&env, &usdc_sac).mint(&sender, &10_000_000);
+        let usdc = TokenClient::new(&env, &usdc_sac);
+        assert_eq!(usdc.balance(&sender), 10_000_000);
+        assert_eq!(usdc.balance(&client.address), 0);
+
+        client.lock_usdc(&sender, &2_000_000, &seal_address);
+
+        assert_eq!(usdc.balance(&sender), 8_000_000);
+        assert_eq!(usdc.balance(&client.address), 2_000_000);
+        assert_eq!(client.get_total_usdc_locked(), 2_000_000);
+        assert_eq!(client.get_nonce(), 1, "shared nonce advanced");
+
+        // Unlock half to a recipient via the committee MAC.
+        let proof = make_committee_sig(&env, &recipient, 1_000_000, 0);
+        client.unlock_usdc(&recipient, &1_000_000, &0, &proof);
+        assert_eq!(usdc.balance(&recipient), 1_000_000);
+        assert_eq!(usdc.balance(&client.address), 1_000_000);
+        assert_eq!(client.get_total_usdc_locked(), 1_000_000);
+    }
+
+    #[test]
+    fn test_lock_usdc_without_sac_set_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SealBridgeContract);
+        let client = SealBridgeContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let seal_address = BytesN::from_array(&env, &[0xEEu8; 32]);
+        let (xlm_sac, _) = setup_sac(&env);
+
+        client.initialize(&admin, &bridge_key, &xlm_sac);
+        // No `set_usdc_sac` call → lock_usdc rejects.
+        let result = client.try_lock_usdc(&sender, &1_000_000, &seal_address);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn test_lock_xlm_moves_tokens_into_vault() {
         let env = Env::default();
         env.mock_all_auths();
@@ -758,7 +1099,7 @@ mod test {
         // Compute a MAC with a wrong key — must be rejected.
         let wrong_key = Bytes::from_slice(&env, &[0x22u8; 32]);
         let mut msg = Bytes::new(&env);
-        msg.append(&recipient.to_xdr(&env));
+        msg.append(&recipient.clone().to_xdr(&env));
         for byte in 500_000i128.to_be_bytes() {
             msg.push_back(byte);
         }
@@ -847,6 +1188,121 @@ mod test {
     }
 
     #[test]
+    fn test_pause_defaults_to_false_after_initialize() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SealBridgeContract);
+        let client = SealBridgeContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let (sac, _) = setup_sac(&env);
+
+        client.initialize(&admin, &bridge_key, &sac);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn test_set_pause_toggles_flag() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SealBridgeContract);
+        let client = SealBridgeContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let (sac, _) = setup_sac(&env);
+
+        client.initialize(&admin, &bridge_key, &sac);
+        client.set_pause(&true);
+        assert!(client.is_paused());
+        client.set_pause(&false);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn test_lock_xlm_rejected_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SealBridgeContract);
+        let client = SealBridgeContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let seal_address = BytesN::from_array(&env, &[0xABu8; 32]);
+        let (sac, _) = setup_sac(&env);
+
+        StellarAssetClient::new(&env, &sac).mint(&sender, &10_000_000);
+        client.initialize(&admin, &bridge_key, &sac);
+        client.set_pause(&true);
+
+        let result = client.try_lock_xlm(&sender, &1_000_000, &seal_address);
+        assert!(result.is_err(), "lock_xlm must reject while paused");
+
+        // Vault balance and counters unchanged.
+        let token = TokenClient::new(&env, &sac);
+        assert_eq!(token.balance(&sender), 10_000_000);
+        assert_eq!(token.balance(&client.address), 0);
+        assert_eq!(client.get_total_locked(), 0);
+        assert_eq!(client.get_nonce(), 0);
+    }
+
+    #[test]
+    fn test_unlock_xlm_rejected_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SealBridgeContract);
+        let client = SealBridgeContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let seal_address = BytesN::from_array(&env, &[0xABu8; 32]);
+        let (sac, _) = setup_sac(&env);
+
+        StellarAssetClient::new(&env, &sac).mint(&sender, &10_000_000);
+        client.initialize(&admin, &bridge_key, &sac);
+        client.lock_xlm(&sender, &1_000_000, &seal_address);
+
+        // Pause AFTER lock so the vault has 1_000_000 to unlock.
+        client.set_pause(&true);
+        let proof = make_committee_sig(&env, &recipient, 500_000, 0);
+        let result = client.try_unlock_xlm(&recipient, &500_000, &0, &proof);
+        assert!(result.is_err(), "unlock_xlm must reject while paused");
+
+        // Nonce not consumed; vault still holds the locked balance.
+        assert!(!client.is_nonce_processed(&0));
+        assert_eq!(client.get_total_locked(), 1_000_000);
+    }
+
+    #[test]
+    fn test_unlock_xlm_succeeds_after_unpause() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SealBridgeContract);
+        let client = SealBridgeContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let sender = Address::generate(&env);
+        let recipient = Address::generate(&env);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let seal_address = BytesN::from_array(&env, &[0xABu8; 32]);
+        let (sac, _) = setup_sac(&env);
+
+        StellarAssetClient::new(&env, &sac).mint(&sender, &10_000_000);
+        client.initialize(&admin, &bridge_key, &sac);
+        client.lock_xlm(&sender, &1_000_000, &seal_address);
+
+        // Pause, fail, unpause, succeed — verifies the flag is the
+        // only gate (no leftover state from the failed attempt).
+        client.set_pause(&true);
+        let proof = make_committee_sig(&env, &recipient, 500_000, 0);
+        let _ = client.try_unlock_xlm(&recipient, &500_000, &0, &proof);
+        client.set_pause(&false);
+        client.unlock_xlm(&recipient, &500_000, &0, &proof);
+
+        assert!(client.is_nonce_processed(&0));
+        assert_eq!(client.get_total_locked(), 500_000);
+    }
+
+    #[test]
     fn test_rotate_committee_key_changes_verification() {
         let env = Env::default();
         env.mock_all_auths();
@@ -873,5 +1329,45 @@ mod test {
         // Same proof should now be rejected — keyed by the OLD key.
         let result = client.try_unlock_xlm(&recipient, &500_000, &0, &old_proof);
         assert!(result.is_err(), "proof under old key must fail after rotation");
+    }
+
+    #[test]
+    fn test_committee_key_hash_view() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, SealBridgeContract);
+        let client = SealBridgeContractClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let bridge_key = BytesN::from_array(&env, &TEST_COMMITTEE_KEY);
+        let (sac, _) = setup_sac(&env);
+
+        // Pre-init: returns all-zero (sentinel for "not yet ready").
+        let pre_init_hash = client.committee_key_hash();
+        assert_eq!(pre_init_hash, BytesN::from_array(&env, &[0u8; 32]));
+
+        // After initialize: matches env.crypto().sha256(committee_key)
+        // — same as host-side seal_bridgeGetCommitteeKeyStatus
+        // .fingerprint_sha2_hex.
+        client.initialize(&admin, &bridge_key, &sac);
+        let post_init_hash = client.committee_key_hash();
+        let expected: BytesN<32> = env
+            .crypto()
+            .sha256(&Bytes::from_slice(&env, &TEST_COMMITTEE_KEY))
+            .into();
+        assert_eq!(post_init_hash, expected,
+            "committee_key_hash must equal SHA-256(committee_key) post-init");
+
+        // After rotation: hash updates to the new key's SHA-256.
+        let new_key = [0x33u8; 32];
+        client.rotate_committee_key(&BytesN::from_array(&env, &new_key));
+        let rotated_hash = client.committee_key_hash();
+        let new_expected: BytesN<32> = env
+            .crypto()
+            .sha256(&Bytes::from_slice(&env, &new_key))
+            .into();
+        assert_eq!(rotated_hash, new_expected,
+            "committee_key_hash must reflect the rotated key");
+        assert_ne!(rotated_hash, post_init_hash,
+            "rotated hash must differ from pre-rotation hash");
     }
 }

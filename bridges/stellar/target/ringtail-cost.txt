@@ -1,6 +1,0 @@
-# Soroban WASM build size (ringtail-verify feature ON)
-seal_bridge_stellar.wasm: 18760 bytes
-
-# Note: full instruction-count measurement requires
-# running against a local stellar-core + invoking
-# unlock_xlm with --cost. This script only builds.

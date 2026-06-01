@@ -45,8 +45,8 @@ pub struct PruningConfig {
 impl Default for PruningConfig {
     fn default() -> Self {
         Self {
-            retain_count: 256,    // keep last 256 state snapshots (~1 epoch)
-            prune_interval: 64,   // prune every 64 blocks
+            retain_count: 256,  // keep last 256 state snapshots (~1 epoch)
+            prune_interval: 64, // prune every 64 blocks
             archive_mode: false,
         }
     }

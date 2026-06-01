@@ -60,15 +60,30 @@ anchor test --skip-local-validator
 Anchor captures the deployed program ID in `target/idl/seal_bridge.json`;
 our `SolanaObserver::new(rpc_url, program_id)` picks that up.
 
-### Stellar — `stellar/quickstart` docker
+### Stellar — `stellar/quickstart` docker (protocol-22 pinned)
 
 Stellar's official all-in-one container: Horizon + Stellar Core +
 friendbot + Postgres, all-in-one.
 
+We pin **two** things to defend against the Stellar protocol drift
+that broke `stellar contract install` in Q1 2026 (`:latest` rolled
+from protocol 22 → 25 mid-quarter):
+
+1. **Image tag** — a dated nightly (`vNNN-bMMMM.M-nightly`),
+   currently `v637-b1047.1-nightly`. The plain `:latest` /
+   `:nightly` floating tags are off-limits because the binary
+   changes under our feet.
+2. **Protocol version** — `--protocol-version 22` on the
+   `/start` command line. The pinned image still ships a
+   stellar-core that supports protocols up through 25 by
+   default; without the explicit flag, `--local` upgrades the
+   network to its newest, which mismatches our 22.x WASM ABI
+   in `bridges/stellar/Cargo.toml` (`soroban-sdk = "22"`).
+
 ```bash
-# Run each time
-docker run --rm -d --name stellar -p 8000:8000 \
-    stellar/quickstart:latest --local --enable-horizon --enable-core
+# Run each time (matches what bridges/docker-compose.testnet.yml does)
+docker run --rm -d --name stellar -p 8000:8000 -p 8003:8003 \
+    stellar/quickstart:v637-b1047.1-nightly --local --protocol-version 22
 
 # Wait for sync (~30s first time), then:
 curl localhost:8000/friendbot?addr=<OUR_TESTNET_ACCOUNT>   # free funding
@@ -83,6 +98,17 @@ stellar contract deploy \
 
 Local Horizon listens on `:8000`, matching
 `StellarObserver::new("http://localhost:8000", contract_id)`.
+
+**Pin expiry risk:** Stellar nightlies stop building after ~6
+months. If a `docker pull` 404s the tag above, bump to a fresher
+`vNNN-bMMMM.M-nightly` from
+[hub.docker.com/r/stellar/quickstart/tags](https://hub.docker.com/r/stellar/quickstart/tags)
+that still serves protocol 22 (Stellar Core supports the previous
+N protocols, so the freshest dated nightly almost always still
+accepts `--protocol-version 22`). The migration path to drop
+the `--protocol-version` pin entirely lives in `TODOS.md` Tier-1
+#2 option (b): coordinated bump of `bridges/stellar/Cargo.toml`
+to `soroban-sdk = "25"`.
 
 ### One-shot docker-compose for the full stack
 
@@ -114,18 +140,21 @@ services:
       retries: 30
 
   stellar:
-    image: stellar/quickstart:latest
-    command: --local --enable-horizon --enable-core
-    ports: ["8000:8000", "11626:11626"]
+    image: stellar/quickstart:v637-b1047.1-nightly
+    command: ["--local", "--protocol-version", "22"]
+    ports: ["8000:8000", "8003:8003", "11626:11626"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000"]
       interval: 5s
       retries: 30
 
+  # Bridge stack host ports are offset from the validator stack
+  # (../docker-compose.yml owns 4001-4005/8545); see
+  # MANUAL-TESTING.md §7.6 for the full port-allocation map.
   seal-node-1:
     build: ../
     command: seal-node --slots 0 --rpc-port 8545 --port 4001
-    ports: ["8545:8545"]
+    ports: ["8645:8545", "4101:4001"]
     depends_on:
       solana: { condition: service_healthy }
       stellar: { condition: service_healthy }
@@ -133,15 +162,17 @@ services:
   seal-node-2:
     build: ../
     command: >
-      seal-node --slots 1 --rpc-port 8546 --port 4002
+      seal-node --slots 1 --rpc-port 8545 --port 4001
       --bootstrap-peers /ip4/seal-node-1/tcp/4001
+    ports: ["8646:8545"]
     depends_on: [seal-node-1]
 
   seal-node-3:
     build: ../
     command: >
-      seal-node --slots 2 --rpc-port 8547 --port 4003
+      seal-node --slots 2 --rpc-port 8545 --port 4001
       --bootstrap-peers /ip4/seal-node-1/tcp/4001
+    ports: ["8647:8545"]
     depends_on: [seal-node-1]
 ```
 

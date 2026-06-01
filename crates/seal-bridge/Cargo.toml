@@ -18,6 +18,47 @@ reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
 ] }
 base64 = "0.22"
+# Committee-MAC computation for the unlock path. The on-chain bridge
+# programs verify `HMAC-SHA-256(committee_key, payload)` (Solana +
+# Stellar both — see `verify_committee_sig` in bridges/solana/programs/
+# seal-bridge/src/lib.rs and `verify_proof` in bridges/stellar/src/lib.rs).
+# Classical SHA-2 is acceptable here per CLAUDE.md ("classical crypto
+# only in bridge modules"); both crates are RustCrypto, vendored.
+sha2 = "0.10"
+hmac = "0.12"
+hex = "0.4"
+# Constant-time equality for committee-key comparison
+# (`committee_key_eq`). The host-side persistence-detection path
+# calls this once per /metrics scrape; using `==` would leak timing
+# on a side-channel-aware attacker scraping aggressively.
+subtle = { workspace = true }
+# Stellar StrKey base32 decode (G… / C… → 32-byte payload). The
+# canonical XDR Address serialization the Soroban bridge contract
+# hashes is built from the decoded payload + the SCV_ADDRESS
+# discriminant; see `compute_committee_mac` (Chain::Stellar branch).
+data-encoding = "2"
+
+# Ringtail (PQ threshold) signing — only pulled in when the
+# `ringtail-singleton` feature is enabled. Opt-in to keep the bridge
+# crate's default dep graph lean (the threshold crate brings NTT,
+# rand, zeroize, and ~thousands of lines of ring arithmetic that the
+# HMAC-SHA-256 default committee-of-1 path doesn't need).
+seal-threshold = { path = "../seal-threshold", optional = true }
+seal-ringtail-verify = { path = "../seal-ringtail-verify", optional = true }
+# tokio::sync::mpsc::Sender for the optional signing-signal channel
+# (P1#5 layer 4 trigger — see ADR-002). Kept under the same feature
+# so the default-feature build stays tokio-free.
+tokio = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enables the host-side helper that produces a 1-of-1 Ringtail
+# signature shaped to match what the on-chain `ringtail-verify`
+# feature expects in `bridges/solana/programs/seal-bridge` and
+# `bridges/stellar`. Singleton is the foundational building block
+# for the multi-validator path; multi-signer + P2P round 1 / round 2
+# coordination is the next layer.
+ringtail-singleton = ["dep:seal-threshold", "dep:seal-ringtail-verify", "dep:tokio"]
 
 [dev-dependencies]
 proptest = { workspace = true }

@@ -1,0 +1,17 @@
+[
+  {
+    "validator": "seal-1",
+    "sol_pubkey": "REPLACE_WITH_SOLANA_DEVNET_PUBKEY_1",
+    "xlm_account": "REPLACE_WITH_STELLAR_TESTNET_G_ACCOUNT_1"
+  },
+  {
+    "validator": "seal-2",
+    "sol_pubkey": "REPLACE_WITH_SOLANA_DEVNET_PUBKEY_2",
+    "xlm_account": "REPLACE_WITH_STELLAR_TESTNET_G_ACCOUNT_2"
+  },
+  {
+    "validator": "seal-3",
+    "sol_pubkey": "REPLACE_WITH_SOLANA_DEVNET_PUBKEY_3",
+    "xlm_account": "REPLACE_WITH_STELLAR_TESTNET_G_ACCOUNT_3"
+  }
+]

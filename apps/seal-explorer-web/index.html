@@ -71,6 +71,438 @@
       <div id="namespace-list" class="tag-list"></div>
     </section>
 
+    <!-- State-sync snapshots roster -->
+    <section id="snapshots">
+      <h2>State Snapshots <span id="snapshot-count" class="dim" style="font-size:0.85rem;font-weight:normal;"></span></h2>
+      <p class="dim" style="font-size:0.85rem;">
+        Captured at every epoch boundary. Late-joining validators
+        bootstrap from the freshest entry via
+        <code>seal-node --bootstrap-from-snapshot</code>.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Height</th>
+            <th>Epoch</th>
+            <th>State Root</th>
+            <th>Captured (UTC)</th>
+          </tr>
+        </thead>
+        <tbody id="snapshot-list"></tbody>
+      </table>
+    </section>
+
+    <!-- Bridge state -->
+    <section id="bridge">
+      <h2>Bridge <span id="bridge-status-badge" class="dim" style="font-size:0.85rem;font-weight:normal;"></span></h2>
+      <p class="dim" style="font-size:0.85rem;">
+        Aggregate cross-chain state from <code>seal_getBridgeStatus</code>
+        + <code>seal_bridgeGetCommitteeKeyStatus</code>. Locked/minted
+        per wrapped token; the invariant
+        <code>total_minted &le; total_locked</code> must always hold.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Token</th>
+            <th>Locked (source)</th>
+            <th>Minted (Seal)</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="bridge-per-token"></tbody>
+      </table>
+      <div style="margin-top:0.6rem;font-size:0.85rem;">
+        Committee key:
+        <code id="bridge-committee-key-status">unset</code>
+        &nbsp;•&nbsp;
+        Paused chains:
+        <code id="bridge-paused-chains">0</code>
+        &nbsp;•&nbsp;
+        Invariant:
+        <code id="bridge-invariant">unknown</code>
+        &nbsp;•&nbsp;
+        Withdrawal fee:
+        <code id="bridge-withdrawal-fee" title="P8/§4.2 — configurable via --bridge-withdrawal-fee">unknown</code>
+      </div>
+    </section>
+
+    <!-- Tokens -->
+    <section id="tokens">
+      <h2>Tokens</h2>
+      <table>
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Name</th>
+            <th>Supply</th>
+            <th>Fee (bps)</th>
+            <th>Frozen</th>
+            <th>Mint authority</th>
+            <th>Freeze authority</th>
+            <th>Fee authority</th>
+          </tr>
+        </thead>
+        <tbody id="token-list"></tbody>
+      </table>
+    </section>
+
+    <!-- Markets / DEX trade tape -->
+    <section id="markets">
+      <h2>Markets</h2>
+      <div id="markets-controls">
+        <label for="market-pair">Pair</label>
+        <select id="market-pair">
+          <option value="">Select a pair…</option>
+        </select>
+        <span id="market-summary" class="dim"></span>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Side</th>
+            <th>Price</th>
+            <th>Qty</th>
+            <th>Maker</th>
+            <th>Taker</th>
+          </tr>
+        </thead>
+        <tbody id="trade-list"></tbody>
+      </table>
+    </section>
+
+    <!-- Account lookup -->
+    <section id="account">
+      <h2>Account Lookup</h2>
+      <div id="account-controls">
+        <input id="account-input" type="text" placeholder="seal1… / sealt1…" size="60">
+        <button onclick="lookupAccount()">Lookup</button>
+        <button onclick="clearAccount()" style="margin-left:0.5em">Clear</button>
+        <span id="account-error" class="dim"></span>
+      </div>
+      <div id="account-result" style="display:none">
+        <div class="grid">
+          <div class="card">
+            <label>SEAL balance</label>
+            <span id="account-seal" class="mono">-</span>
+          </div>
+          <div class="card">
+            <label>Custom token rows</label>
+            <span id="account-tokens-count">-</span>
+          </div>
+          <div class="card">
+            <label>Open orders</label>
+            <span id="account-orders-count">-</span>
+          </div>
+          <div class="card">
+            <label>Recent trades</label>
+            <span id="account-trades-count">-</span>
+          </div>
+          <div class="card">
+            <label>Wrapped tokens</label>
+            <span id="account-wrapped-count">-</span>
+          </div>
+          <div class="card">
+            <label>Proposals authored</label>
+            <span id="account-proposals-count">-</span>
+          </div>
+          <div class="card">
+            <label>Votes cast</label>
+            <span id="account-votes-count">-</span>
+          </div>
+          <div class="card">
+            <label>Active locks</label>
+            <span id="account-locks-count">-</span>
+          </div>
+          <div class="card">
+            <label>Frozen on</label>
+            <span id="account-frozen-count">-</span>
+          </div>
+          <div class="card">
+            <label>Delegations out / in</label>
+            <span id="account-delegations-count">-</span>
+          </div>
+          <div class="card">
+            <label>Tokens created</label>
+            <span id="account-created-count">-</span>
+          </div>
+          <div class="card">
+            <label>Private tables</label>
+            <span id="account-priv-tables-count">-</span>
+          </div>
+          <div class="card">
+            <label>Storage leases</label>
+            <span id="account-leases-count">-</span>
+          </div>
+          <div class="card">
+            <label>Namespaces</label>
+            <span id="account-namespaces-count">-</span>
+          </div>
+          <div class="card">
+            <label>Bridge deposits</label>
+            <span id="account-bridge-deposits-count">-</span>
+          </div>
+          <div class="card">
+            <label>Bridge withdrawals</label>
+            <span id="account-bridge-withdrawals-count">-</span>
+          </div>
+          <div class="card">
+            <label>Validator status</label>
+            <span id="account-validator-status">-</span>
+          </div>
+          <div class="card">
+            <label>Tech Council</label>
+            <span id="account-council-status">-</span>
+          </div>
+          <div class="card">
+            <label>Mint authority</label>
+            <span id="account-mint-auth-count">-</span>
+          </div>
+          <div class="card">
+            <label>Freeze authority</label>
+            <span id="account-freeze-auth-count">-</span>
+          </div>
+          <div class="card">
+            <label>Fee authority</label>
+            <span id="account-fee-auth-count">-</span>
+          </div>
+        </div>
+        <p id="account-validator-detail" class="dim" style="margin-top:-0.5rem"></p>
+        <p id="account-council-detail" class="dim" style="margin-top:-0.5rem"></p>
+        <h3>Token balances</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Balance</th>
+              <th>Decimals</th>
+              <th>Frozen</th>
+            </tr>
+          </thead>
+          <tbody id="account-tokens-body"></tbody>
+        </table>
+        <h3>Tokens created by this address</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Name</th>
+              <th>Decimals</th>
+              <th>Total supply</th>
+              <th>Mint authority</th>
+            </tr>
+          </thead>
+          <tbody id="account-created-body"></tbody>
+        </table>
+        <h3>Tokens this address can currently mint</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Name</th>
+              <th>Decimals</th>
+              <th>Total supply</th>
+              <th>Creator</th>
+            </tr>
+          </thead>
+          <tbody id="account-mint-auth-body"></tbody>
+        </table>
+        <h3>Tokens this address can currently freeze</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Name</th>
+              <th>Decimals</th>
+              <th>Total supply</th>
+              <th>Globally frozen</th>
+              <th>Creator</th>
+            </tr>
+          </thead>
+          <tbody id="account-freeze-auth-body"></tbody>
+        </table>
+        <h3>Tokens whose transfer fee this address can edit</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Name</th>
+              <th>Decimals</th>
+              <th>Total supply</th>
+              <th>Transfer fee (bps)</th>
+              <th>Creator</th>
+            </tr>
+          </thead>
+          <tbody id="account-fee-auth-body"></tbody>
+        </table>
+        <h3>Private tables owned by this address</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Type</th>
+              <th>Row count</th>
+            </tr>
+          </thead>
+          <tbody id="account-priv-tables-body"></tbody>
+        </table>
+        <h3>Storage leases owned by this address</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Table</th>
+              <th>Rows</th>
+              <th>Bytes</th>
+              <th>Paid through (us)</th>
+              <th>Expired</th>
+            </tr>
+          </thead>
+          <tbody id="account-leases-body"></tbody>
+        </table>
+        <h3>Namespaces deployed by this address</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Visibility</th>
+              <th>Replication</th>
+              <th>Schema hash</th>
+            </tr>
+          </thead>
+          <tbody id="account-namespaces-body"></tbody>
+        </table>
+        <h3>Bridge deposits to this address</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Deposit ID</th>
+              <th>Source chain</th>
+              <th>Token</th>
+              <th>Amount</th>
+              <th>Conf</th>
+              <th>Processed</th>
+            </tr>
+          </thead>
+          <tbody id="account-bridge-deposits-body"></tbody>
+        </table>
+        <h3>Bridge withdrawals initiated by this address</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Withdrawal ID</th>
+              <th>Dest chain</th>
+              <th>Token</th>
+              <th>Amount</th>
+              <th>Dest address</th>
+              <th>Executed</th>
+            </tr>
+          </thead>
+          <tbody id="account-bridge-withdrawals-body"></tbody>
+        </table>
+        <h3>Frozen-account status (token symbols this address is frozen on)</h3>
+        <div id="account-frozen-list" class="tag-list dim"></div>
+        <h3>Bridge wrapped balances</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Token</th>
+              <th>Source chain</th>
+              <th>Balance</th>
+            </tr>
+          </thead>
+          <tbody id="account-wrapped-body"></tbody>
+        </table>
+        <h3>Open orders</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Pair</th>
+              <th>ID</th>
+              <th>Side</th>
+              <th>Price</th>
+              <th>Quantity</th>
+              <th>Remaining</th>
+            </tr>
+          </thead>
+          <tbody id="account-orders-body"></tbody>
+        </table>
+        <h3>Governance — proposals authored</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Track</th>
+              <th>Status</th>
+              <th>Title</th>
+            </tr>
+          </thead>
+          <tbody id="account-proposals-body"></tbody>
+        </table>
+        <h3>Governance — votes cast</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Proposal</th>
+              <th>Choice</th>
+              <th>Stake</th>
+              <th>Conviction</th>
+              <th>Weight</th>
+              <th>Unlock epoch</th>
+            </tr>
+          </thead>
+          <tbody id="account-govvotes-body"></tbody>
+        </table>
+        <h3>Governance — active conviction locks</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Proposal</th>
+              <th>Amount</th>
+              <th>Unlock epoch</th>
+            </tr>
+          </thead>
+          <tbody id="account-locks-body"></tbody>
+        </table>
+        <h3>Governance — outgoing delegations (from this address)</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Track</th>
+              <th>Delegate</th>
+              <th>Weight</th>
+            </tr>
+          </thead>
+          <tbody id="account-delegations-out-body"></tbody>
+        </table>
+        <h3>Governance — incoming delegations (to this address)</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Track</th>
+              <th>Delegator</th>
+              <th>Weight</th>
+            </tr>
+          </thead>
+          <tbody id="account-delegations-in-body"></tbody>
+        </table>
+        <h3>Recent trades (newest first, capped at 100)</h3>
+        <table>
+          <thead>
+            <tr>
+              <th>Pair</th>
+              <th>ID</th>
+              <th>Role</th>
+              <th>Price</th>
+              <th>Quantity</th>
+              <th>Timestamp</th>
+            </tr>
+          </thead>
+          <tbody id="account-trades-body"></tbody>
+        </table>
+      </div>
+    </section>
+
     <!-- Block Detail -->
     <section id="block-detail" style="display:none">
       <h2>Block #<span id="detail-height"></span></h2>

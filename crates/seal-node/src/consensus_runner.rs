@@ -96,6 +96,12 @@ pub struct ConsensusRunner {
     /// Per-track vote delegation. Mutated via `seal_govDelegate` /
     /// `seal_govRevokeDelegation` JSON-RPC methods.
     pub delegation: crate::delegation::DelegationManager,
+    /// Bounded roster of recent state snapshots, captured at every
+    /// epoch boundary. Surfaced via `seal_listSnapshots` (A2a) and
+    /// the to-come `seal_getSnapshotManifest` / `seal_getSnapshotChunk`
+    /// (A2b / A2c). Default cap = 32 ≈ a rolling few-hour window;
+    /// callers can override via `SnapshotIndex::with_cap`.
+    pub snapshots: seal_storage::SnapshotIndex,
 }
 
 /// Available ZK prover backends.
@@ -108,18 +114,37 @@ pub enum ProverBackend {
 }
 
 impl ConsensusRunner {
-    /// Create a new consensus runner for a single validator.
+    /// Create a new consensus runner for a single validator with a
+    /// fresh ML-DSA identity. The keypair is regenerated on every
+    /// call; for persistent validator identity across restarts use
+    /// [`Self::new_with_keypair`].
     pub fn new(config: ConsensusConfig) -> Self {
         let (signing_key, verifying_key) = SigningKey::generate();
+        Self::new_with_keypair(config, signing_key, verifying_key)
+    }
 
-        // Derive VRF seed from signing key for deterministic recovery
+    /// Create a consensus runner using a caller-supplied validator
+    /// identity. The VRF seed is derived deterministically from the
+    /// signing key (`SHA3-256(signing_key[..32])`), so loading the
+    /// same key on a fresh node reconstructs the same VRF state — the
+    /// exact knob `seal-node --validator-key <path>` uses to keep a
+    /// stable on-chain identity across restarts.
+    ///
+    /// Stake defaults to 1 SEAL; multi-node setups should swap to
+    /// [`Self::with_validator_set`] with a pre-built [`ValidatorSet`].
+    pub fn new_with_keypair(
+        config: ConsensusConfig,
+        signing_key: SigningKey,
+        verifying_key: VerifyingKey,
+    ) -> Self {
+        // Derive VRF seed from signing key for deterministic recovery.
         let vrf_seed = sha3_256(&signing_key.to_bytes()[..32]).0;
         let vrf_manager = VrfKeyManager::new(vrf_seed);
 
         let validator = ValidatorInfo {
             public_key: verifying_key.to_bytes(),
             vrf_public_key: vrf_manager.secret_key().to_vec(), // VRF eval uses secret key
-            stake: 1_000_000_000, // 1 SEAL
+            stake: 1_000_000_000,                              // 1 SEAL
             active: true,
         };
 
@@ -148,6 +173,7 @@ impl ConsensusRunner {
             balance_mirror: Arc::new(RwLock::new(HashMap::new())),
             governance: crate::governance::GovernanceModule::new(),
             delegation: crate::delegation::DelegationManager::new(),
+            snapshots: seal_storage::SnapshotIndex::new(),
         }
     }
 
@@ -196,6 +222,7 @@ impl ConsensusRunner {
             balance_mirror: Arc::new(RwLock::new(HashMap::new())),
             governance: crate::governance::GovernanceModule::new(),
             delegation: crate::delegation::DelegationManager::new(),
+            snapshots: seal_storage::SnapshotIndex::new(),
         }
     }
 
@@ -274,12 +301,7 @@ impl ConsensusRunner {
     /// Refresh the per-block read-only balance snapshot consumed by
     /// namespace RLS token checkers. Called after every block.
     fn refresh_balance_mirror(&self) {
-        let snapshot: HashMap<String, u64> = self
-            .balances
-            .all_accounts()
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
+        let snapshot: HashMap<String, u64> = self.balances.all_accounts().into_iter().collect();
         if let Ok(mut m) = self.balance_mirror.write() {
             *m = snapshot;
         }
@@ -352,7 +374,11 @@ impl ConsensusRunner {
     }
 
     /// Submit a transaction to the pending pool.
-    pub fn submit_transaction(&mut self, tx_type: TxType, payload: Vec<u8>) -> Result<(), seal_crypto::CryptoError> {
+    pub fn submit_transaction(
+        &mut self,
+        tx_type: TxType,
+        payload: Vec<u8>,
+    ) -> Result<(), seal_crypto::CryptoError> {
         let signature = self.signing_key.sign(&payload)?;
         self.pending_txs.push(Transaction {
             tx_type,
@@ -424,26 +450,29 @@ impl ConsensusRunner {
             return Err("epoch transition data too short".into());
         }
         let new_epoch = u64::from_le_bytes(data[..8].try_into().unwrap());
-        tracing::info!(
-            new_epoch,
-            "Processing epoch transition"
-        );
+        tracing::info!(new_epoch, "Processing epoch transition");
         // Advance epoch
         self.current_epoch = seal_consensus::epoch::Epoch {
             number: new_epoch,
-            seed: seal_crypto::hash::sha3_256(&data),
+            seed: seal_crypto::hash::sha3_256(data),
         };
         // In production: rotate VRF keys, update validator set weights
         Ok(())
     }
 
     /// Submit a governance proposal as a transaction.
-    pub fn submit_governance_proposal(&mut self, proposal_json: &str) -> Result<(), seal_crypto::CryptoError> {
+    pub fn submit_governance_proposal(
+        &mut self,
+        proposal_json: &str,
+    ) -> Result<(), seal_crypto::CryptoError> {
         self.submit_transaction(TxType::GovPropose, proposal_json.as_bytes().to_vec())
     }
 
     /// Submit a governance vote as a transaction.
-    pub fn submit_governance_vote(&mut self, vote_json: &str) -> Result<(), seal_crypto::CryptoError> {
+    pub fn submit_governance_vote(
+        &mut self,
+        vote_json: &str,
+    ) -> Result<(), seal_crypto::CryptoError> {
         self.submit_transaction(TxType::GovVote, vote_json.as_bytes().to_vec())
     }
 
@@ -482,6 +511,47 @@ impl ConsensusRunner {
                 epoch_reward = epoch_reward,
                 "New epoch started, VRF key rotated, emission applied"
             );
+
+            // Capture a snapshot at every epoch boundary so late-joining
+            // validators (and `seal_listSnapshots` callers) can pick a
+            // recent state root to bootstrap from. We use the chain
+            // tip's height + state_root rather than the in-progress
+            // slot's because the tip is what's actually been
+            // finalized; the new epoch's first block hasn't been
+            // produced yet at this point in `advance_slot`. If the
+            // chain is empty (genesis epoch transition), skip — there
+            // is nothing to snapshot until the first block lands.
+            if let Some(tip) = self.chain.last() {
+                let now_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                // `tip_aggregate` fingerprints the tip block's
+                // committee threshold signature. Single-node /
+                // pre-Ringtail nodes still produce a `SimpleThreshold`
+                // signature; we hash its bytes so the manifest
+                // emitted by A2b has *something* attestation-shaped
+                // to commit to. Once Ringtail aggregation lands, the
+                // same field carries the real algebraic aggregate.
+                let tip_aggregate = tip
+                    .threshold_signature
+                    .as_ref()
+                    .map(|sig| sha3_256(&sig.signature));
+                let recorded = self.snapshots.record(seal_storage::SnapshotMeta {
+                    height: tip.block.header.height,
+                    epoch: self.current_epoch.number,
+                    state_root: tip.block.header.state_root,
+                    captured_at_unix_secs: now_secs,
+                    tip_aggregate,
+                });
+                if recorded {
+                    debug!(
+                        height = tip.block.header.height,
+                        epoch = self.current_epoch.number,
+                        "Captured epoch-boundary snapshot"
+                    );
+                }
+            }
         }
 
         // Run VRF election
@@ -518,7 +588,9 @@ impl ConsensusRunner {
                 // In multi-node: would wait for proposer's block and vote.
                 // In single-node: produce block anyway (we're the only validator).
                 if self.validator_set.active_count() == 1 {
-                    match self.produce_block_with_vrf(vrf_output.0.to_vec(), vrf_proof.bytes.clone()) {
+                    match self
+                        .produce_block_with_vrf(vrf_output.0.to_vec(), vrf_proof.bytes.clone())
+                    {
                         Ok(block) => Some(block),
                         Err(e) => {
                             tracing::error!(slot = self.current_slot.number, error = %e, "Failed to produce block as committee");
@@ -537,7 +609,11 @@ impl ConsensusRunner {
     }
 
     /// Produce a block with VRF proof, ZK proof, and self-sign.
-    fn produce_block_with_vrf(&mut self, vrf_output: Vec<u8>, vrf_proof: Vec<u8>) -> Result<FinalizedBlock, String> {
+    fn produce_block_with_vrf(
+        &mut self,
+        vrf_output: Vec<u8>,
+        vrf_proof: Vec<u8>,
+    ) -> Result<FinalizedBlock, String> {
         let height = self.chain.len() as u64 + 1;
         let parent_hash = match self.chain.last() {
             Some(b) => {
@@ -570,7 +646,10 @@ impl ConsensusRunner {
 
         // Storage invoicing (#STORAGE-FORGET): charge per-byte for SQL writes
         for tx in &txs {
-            if matches!(tx.tx_type, TxType::SqlExec | TxType::CreateApp | TxType::AlterSchema) {
+            if matches!(
+                tx.tx_type,
+                TxType::SqlExec | TxType::CreateApp | TxType::AlterSchema
+            ) {
                 let sender_addr = hex::encode(&tx.sender[..16.min(tx.sender.len())]);
                 // Estimate storage cost: payload size * storage rate
                 let storage_cost = (tx.payload.len() as u64).saturating_mul(1); // 1 micro-SEAL per byte
@@ -580,9 +659,22 @@ impl ConsensusRunner {
             }
         }
 
-        // Compute state root from Merkle-backed SQL engine
+        // Compute combined state root: SHA3(sql_root || balance_root).
+        // Block headers now commit to BOTH the SQL tables AND the
+        // native SEAL ledger, so a validator that disagrees on any
+        // balance produces a different state_root and the
+        // disagreement surfaces in consensus.
+        //
+        // Future work: also fold in `TokenManager::state_root_hash`
+        // and the bridge wrapped-balance set when those are owned by
+        // the runner (today they live in RpcState).
         let pre_state = self.state_root;
-        self.state_root = self.sql_engine.state_root();
+        let sql_root = self.sql_engine.state_root();
+        let balance_root = self.balances.state_root_hash();
+        let mut combine = Vec::with_capacity(64);
+        combine.extend_from_slice(sql_root.0.as_ref());
+        combine.extend_from_slice(balance_root.0.as_ref());
+        self.state_root = sha3_256(&combine);
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -608,9 +700,7 @@ impl ConsensusRunner {
                     let trade_count: usize = trades.iter().map(|(_, t)| t.len()).sum();
                     info!(
                         height,
-                        pair_count,
-                        trade_count,
-                        "DEX matched orders this block"
+                        pair_count, trade_count, "DEX matched orders this block"
                     );
 
                     // Emit a TxType::DexMatch transaction so the trades
@@ -619,8 +709,7 @@ impl ConsensusRunner {
                     // Vec<Trade>)>`. Sender = proposer pubkey, signature
                     // empty (consensus-emitted; verifier checks `tx_type
                     // == DexMatch && sender == block.proposer`).
-                    let payload =
-                        bincode::serialize(&trades).unwrap_or_default();
+                    let payload = bincode::serialize(&trades).unwrap_or_default();
                     if !payload.is_empty() {
                         txs.push(seal_storage::block_store::Transaction {
                             tx_type: seal_storage::block_store::TxType::DexMatch,
@@ -709,7 +798,7 @@ impl ConsensusRunner {
 
         // ── Storage lease management (#STORAGE-FORGET) ──
         // 1. Auto-register leases for new tables (from WriteLog)
-        if let Some(ref log) = self.sql_engine.last_write_log() {
+        if let Some(log) = self.sql_engine.last_write_log() {
             if log.schema_changed {
                 // A CREATE TABLE was executed — register a lease for the new table
                 let table = &log.table;
@@ -721,8 +810,7 @@ impl ConsensusRunner {
                         1, // default rate (governance-adjustable)
                     );
                     // Grant initial lease (1 epoch = ~4 hours by default)
-                    lease.paid_through = finalized.block.header.timestamp
-                        .saturating_add(4 * 3600); // 4 hours
+                    lease.paid_through = finalized.block.header.timestamp.saturating_add(4 * 3600); // 4 hours
                     lease.update_size(
                         self.sql_engine.row_count(table).unwrap_or(0) as u64,
                         byte_size,
@@ -791,7 +879,8 @@ impl ConsensusRunner {
     /// Returns the resulting state root (should match block.header.state_root).
     pub fn replay_block(&mut self, block: &Block) -> Result<Hash256, String> {
         // Set deterministic block seed so salts match the producer (#STORAGE-FORGET)
-        self.sql_engine.set_block_seed(block.header.height.to_le_bytes().to_vec());
+        self.sql_engine
+            .set_block_seed(block.header.height.to_le_bytes().to_vec());
         for tx in &block.transactions {
             match tx.tx_type {
                 TxType::SqlExec => {
@@ -822,8 +911,15 @@ impl ConsensusRunner {
             }
         }
 
-        let state_root = self.sql_engine.state_root();
-        self.state_root = state_root;
+        // Mirror the produce_block_with_vrf path: combine SQL root +
+        // balance root so replay reaches the same `state_root` the
+        // proposer published in the block header.
+        let sql_root = self.sql_engine.state_root();
+        let balance_root = self.balances.state_root_hash();
+        let mut combine = Vec::with_capacity(64);
+        combine.extend_from_slice(sql_root.0.as_ref());
+        combine.extend_from_slice(balance_root.0.as_ref());
+        self.state_root = sha3_256(&combine);
 
         // Track the replayed block in the chain (for height tracking)
         self.chain.push(FinalizedBlock {
@@ -832,7 +928,7 @@ impl ConsensusRunner {
                 bytes: vec![], // No proof for replayed blocks
                 public_inputs: seal_zk::StateTransition {
                     pre_state_root: Hash256::ZERO,
-                    post_state_root: state_root,
+                    post_state_root: self.state_root,
                     block_height: block.header.height,
                     tx_count: block.transactions.len() as u32,
                     tx_hash: Hash256::ZERO,
@@ -841,7 +937,7 @@ impl ConsensusRunner {
             threshold_signature: None,
         });
 
-        Ok(state_root)
+        Ok(self.state_root)
     }
 
     /// Replay a sequence of blocks from genesis to reconstruct full state.
@@ -874,8 +970,12 @@ mod tests {
         let mut runner = ConsensusRunner::new(ConsensusConfig::default());
 
         // Submit some transactions
-        runner.submit_transaction(TxType::SqlExec, b"CREATE TABLE t (id INT)".to_vec()).unwrap();
-        runner.submit_transaction(TxType::SqlExec, b"INSERT INTO t VALUES (1)".to_vec()).unwrap();
+        runner
+            .submit_transaction(TxType::SqlExec, b"CREATE TABLE t (id INT)".to_vec())
+            .unwrap();
+        runner
+            .submit_transaction(TxType::SqlExec, b"INSERT INTO t VALUES (1)".to_vec())
+            .unwrap();
 
         // Advance slots until a block is produced
         let mut blocks_produced = 0;
@@ -895,7 +995,9 @@ mod tests {
     #[test]
     fn test_block_has_zk_proof() {
         let mut runner = ConsensusRunner::new(ConsensusConfig::default());
-        runner.submit_transaction(TxType::Transfer, b"transfer".to_vec()).unwrap();
+        runner
+            .submit_transaction(TxType::Transfer, b"transfer".to_vec())
+            .unwrap();
 
         for _ in 0..100 {
             if let Some(block) = runner.advance_slot() {
@@ -913,17 +1015,26 @@ mod tests {
     #[test]
     fn test_block_has_vrf_proof() {
         let mut runner = ConsensusRunner::new(ConsensusConfig::default());
-        runner.submit_transaction(TxType::Transfer, b"transfer".to_vec()).unwrap();
+        runner
+            .submit_transaction(TxType::Transfer, b"transfer".to_vec())
+            .unwrap();
 
         for _ in 0..100 {
             if let Some(block) = runner.advance_slot() {
                 // Block should contain VRF output and proof from election
-                assert!(!block.block.header.vrf_output.is_empty(),
-                    "block should have VRF output");
-                assert!(!block.block.header.vrf_proof.is_empty(),
-                    "block should have VRF proof");
-                assert_eq!(block.block.header.vrf_output.len(), 32,
-                    "VRF output should be 32 bytes (SHA3-256)");
+                assert!(
+                    !block.block.header.vrf_output.is_empty(),
+                    "block should have VRF output"
+                );
+                assert!(
+                    !block.block.header.vrf_proof.is_empty(),
+                    "block should have VRF proof"
+                );
+                assert_eq!(
+                    block.block.header.vrf_output.len(),
+                    32,
+                    "VRF output should be 32 bytes (SHA3-256)"
+                );
                 return;
             }
         }
@@ -1019,7 +1130,10 @@ mod tests {
             bincode::deserialize(&dex_match_tx.payload)
                 .expect("DexMatch payload must be a bincode trade list");
         let total_trades: usize = trades.iter().map(|(_, t)| t.len()).sum();
-        assert!(total_trades >= 1, "at least one trade must appear in payload");
+        assert!(
+            total_trades >= 1,
+            "at least one trade must appear in payload"
+        );
         let (pair, ts) = &trades[0];
         assert_eq!(pair, "GOLD/SEAL");
         assert_eq!(ts[0].quantity, 3);
@@ -1135,8 +1249,8 @@ mod tests {
         // eve has only 5 SEAL → policy denies; rows filtered to empty.
         // (No `owner` column on the table, so the manager applies the
         // table-level deny path.)
-        let eve_result = runner
-            .submit_sql_in_namespace("vault.seal", "SELECT * FROM secrets", "eve");
+        let eve_result =
+            runner.submit_sql_in_namespace("vault.seal", "SELECT * FROM secrets", "eve");
         match eve_result {
             Err(SqlError::Execution(msg)) => {
                 assert!(
@@ -1266,7 +1380,10 @@ mod tests {
 
         let vote_end = start_epoch + ProposalTrack::TreasurySmall.vote_period_epochs();
         let status = runner.governance.tally(id, vote_end).unwrap();
-        assert!(matches!(status, crate::governance::ProposalStatus::Rejected));
+        assert!(matches!(
+            status,
+            crate::governance::ProposalStatus::Rejected
+        ));
     }
 
     /// Delegation: alice delegates 200 SEAL on TreasurySmall to bob.
@@ -1317,7 +1434,10 @@ mod tests {
         let revoke_err = runner.delegation.revoke("alice", &track);
         assert!(revoke_err.is_err(), "revoking absent delegation must error");
 
-        runner.delegation.delegate("alice", "bob", &track, 50).unwrap();
+        runner
+            .delegation
+            .delegate("alice", "bob", &track, 50)
+            .unwrap();
         runner.delegation.revoke("alice", &track).unwrap();
     }
 
@@ -1457,8 +1577,12 @@ mod tests {
     #[test]
     fn test_pending_txs_cleared_after_block() {
         let mut runner = ConsensusRunner::new(ConsensusConfig::default());
-        runner.submit_transaction(TxType::SqlExec, b"tx1".to_vec()).unwrap();
-        runner.submit_transaction(TxType::SqlExec, b"tx2".to_vec()).unwrap();
+        runner
+            .submit_transaction(TxType::SqlExec, b"tx1".to_vec())
+            .unwrap();
+        runner
+            .submit_transaction(TxType::SqlExec, b"tx2".to_vec())
+            .unwrap();
         assert_eq!(runner.pending_tx_count(), 2);
 
         for _ in 0..100 {
@@ -1679,8 +1803,63 @@ mod tests {
 
         let mut replayer = ConsensusRunner::new(ConsensusConfig::default());
         let root = replayer.replay_block(&block.block).unwrap();
-        // Empty block → state root is ZERO (no tables)
-        assert_eq!(root, Hash256::ZERO);
+        // Empty block → state root is the deterministic combined hash
+        // SHA3(sql_root_zero || balance_root_empty). Block headers
+        // now commit to BOTH the SQL Merkle root AND the native SEAL
+        // ledger HAMT root, so this isn't ZERO anymore.
+        // Important: it must equal what `produce_block_with_vrf`
+        // computed in the proposer path (mirror logic).
+        let sql_root = Hash256::ZERO;
+        let balance_root = replayer.balances.state_root_hash();
+        let mut combined = Vec::with_capacity(64);
+        combined.extend_from_slice(sql_root.0.as_ref());
+        combined.extend_from_slice(balance_root.0.as_ref());
+        let expected = sha3_256(&combined);
+        assert_eq!(root, expected);
+        // Sanity: differs from ZERO so any test that asserted ZERO
+        // would have caught the wiring change.
+        assert_ne!(root, Hash256::ZERO);
+    }
+
+    #[test]
+    fn test_state_root_includes_balance_changes() {
+        // The combined-state-root commitment means a balance change
+        // must produce a different state root, even if the SQL
+        // engine's table state is identical. This is the key
+        // property that prevents a malicious validator from agreeing
+        // on SQL state but disagreeing on native balances.
+        let mut runner_a = ConsensusRunner::new(ConsensusConfig::default());
+        let runner_b = ConsensusRunner::new(ConsensusConfig::default());
+
+        // Same setup on both: empty SQL, empty balances.
+        let sql_root_a = runner_a.sql_engine.state_root();
+        let sql_root_b = runner_b.sql_engine.state_root();
+        assert_eq!(sql_root_a, sql_root_b);
+
+        // Mint to A only.
+        runner_a.balances.mint("seal1alice", 1_000).unwrap();
+
+        // Same SQL state, different balance state → different
+        // state_root_hash on the underlying balances.
+        assert_ne!(
+            runner_a.balances.state_root_hash(),
+            runner_b.balances.state_root_hash()
+        );
+
+        // The combined roots (what the block header commits to)
+        // differ for the same reason.
+        fn combined_state_root(r: &ConsensusRunner) -> Hash256 {
+            let sql_root = r.sql_engine.state_root();
+            let balance_root = r.balances.state_root_hash();
+            let mut combine = Vec::with_capacity(64);
+            combine.extend_from_slice(sql_root.0.as_ref());
+            combine.extend_from_slice(balance_root.0.as_ref());
+            sha3_256(&combine)
+        }
+        assert_ne!(
+            combined_state_root(&runner_a),
+            combined_state_root(&runner_b)
+        );
     }
 
     #[test]
@@ -1734,10 +1913,7 @@ mod tests {
     #[test]
     fn test_apply_genesis_credits_runner_balances() {
         let mut runner = ConsensusRunner::new(ConsensusConfig::default());
-        let genesis = seal_consensus::genesis::GenesisConfig::testnet(
-            3,
-            10_000_000_000,
-        );
+        let genesis = seal_consensus::genesis::GenesisConfig::testnet(3, 10_000_000_000);
 
         // Precondition: new runner has an empty balance store.
         assert_eq!(runner.balances.total_supply(), 0);
@@ -1751,5 +1927,107 @@ mod tests {
         // Spot-check: first testnet allocation lands under its address.
         let first = &genesis.allocations[0];
         assert_eq!(runner.balances.available(&first.address), first.amount);
+    }
+
+    /// New runners start with an empty snapshot roster — there's
+    /// nothing to record before the first epoch boundary fires.
+    #[test]
+    fn test_snapshot_roster_starts_empty() {
+        let runner = ConsensusRunner::new(ConsensusConfig::default());
+        assert!(runner.snapshots.is_empty());
+        assert!(runner.snapshots.latest().is_none());
+    }
+
+    /// Crossing an epoch boundary must add at most one snapshot per
+    /// boundary, and the recorded `(height, epoch, state_root)` must
+    /// match the chain tip at the moment of capture. Uses a tiny
+    /// 4-slot epoch so the test crosses two boundaries in <30 slot
+    /// advances without burning CPU on default 256-slot epochs.
+    #[test]
+    fn test_snapshot_captured_at_epoch_boundary() {
+        let config = ConsensusConfig {
+            slots_per_epoch: 4,
+            ..ConsensusConfig::default()
+        };
+        let mut runner = ConsensusRunner::new(config);
+
+        // Submit a couple of txs so blocks have something to commit.
+        runner
+            .submit_transaction(TxType::SqlExec, b"CREATE TABLE t (id INT)".to_vec())
+            .unwrap();
+        runner
+            .submit_transaction(TxType::SqlExec, b"INSERT INTO t VALUES (1)".to_vec())
+            .unwrap();
+
+        // Advance 12 slots = 3 epoch boundaries (slots 4, 8, 12).
+        // Genesis (slot 0) is intentionally skipped by
+        // `advance_slot`'s `current_slot.number > 0` guard. The first
+        // captured snapshot lands at slot 4 with height >= 1.
+        for _ in 0..12 {
+            runner.advance_slot();
+        }
+
+        let captured = runner.snapshots.list().to_vec();
+        assert!(
+            !captured.is_empty(),
+            "at least one snapshot should land after 3 epoch boundaries"
+        );
+        // Heights must be strictly monotonic.
+        for window in captured.windows(2) {
+            assert!(
+                window[0].height < window[1].height,
+                "snapshot heights must be strictly monotonic"
+            );
+        }
+        // Each snapshot's state_root must match a real block in the
+        // chain (we capture from the live tip, not synthesized).
+        let chain_roots: std::collections::HashSet<Hash256> = runner
+            .chain
+            .iter()
+            .map(|b| b.block.header.state_root)
+            .collect();
+        for s in &captured {
+            assert!(
+                chain_roots.contains(&s.state_root),
+                "snapshot state_root must match an in-chain block"
+            );
+        }
+        // tip_aggregate carries a SHA3 fingerprint of the tip
+        // block's threshold signature when available. In single-node
+        // mode, the SimpleThreshold scheme always produces a
+        // signature, so the fingerprint is `Some`. The actual hash
+        // value is opaque to this test — we only check presence.
+        for s in &captured {
+            assert!(
+                s.tip_aggregate.is_some(),
+                "single-node tips always have a threshold signature, so tip_aggregate must be Some"
+            );
+        }
+    }
+
+    /// The roster's cap is enforced — once we cross more boundaries
+    /// than the cap allows, the oldest entries are evicted.
+    #[test]
+    fn test_snapshot_roster_respects_cap() {
+        let config = ConsensusConfig {
+            slots_per_epoch: 2,
+            ..ConsensusConfig::default()
+        };
+        let mut runner = ConsensusRunner::new(config);
+        // Override the runner's snapshot cap to a small value so we
+        // can hit eviction without grinding through 33 epoch
+        // boundaries' worth of slots.
+        runner.snapshots = seal_storage::SnapshotIndex::with_cap(3);
+
+        runner
+            .submit_transaction(TxType::SqlExec, b"CREATE TABLE t (id INT)".to_vec())
+            .unwrap();
+
+        // 20 slots @ 2 slots/epoch = ~10 epoch boundaries crossed
+        // (well above the cap of 3).
+        for _ in 0..20 {
+            runner.advance_slot();
+        }
+        assert!(runner.snapshots.len() <= 3, "cap must be enforced");
     }
 }

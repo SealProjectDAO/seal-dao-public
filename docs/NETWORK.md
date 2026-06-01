@@ -44,23 +44,32 @@ Validator C ──┘
 A bootstrap node is the same binary as any validator — no special build needed.
 
 ```bash
-# On a VPS with public IP (e.g., 203.0.113.50)
-seal-node --p2p-port 4001
+# On a VPS with public IP (e.g., 203.0.113.50). `--slots 0` runs forever
+# (default is 10 = demo mode → exits). `--rpc-external` binds the JSON-
+# RPC server on 0.0.0.0 rather than 127.0.0.1; omit on a privacy-
+# sensitive host.
+seal-node --slots 0 --port 4001 --rpc-port 8545 --rpc-external
 
-# Or with Docker
-docker run -d -p 4001:4001 ghcr.io/seal-dao/seal-node:latest
+# Or with Docker (replace <tag> with a release version from
+# scripts/release.sh — see docs/RELEASE.md):
+docker run -d -p 4001:4001 -p 8545:8545 \
+  ghcr.io/seal-dao/seal-node:<tag> \
+  --slots 0 --port 4001 --rpc-port 8545 --rpc-external
 ```
 
 ### Connecting validators to the bootstrap
 
 ```bash
-# Other validators connect via the bootstrap peer's multiaddr
-seal-node \
+# Other validators dial the bootstrap peer's multiaddr. Pass
+# --validator-key for a persistent on-chain identity (see TESTNET.md
+# "Identity persistence" for the keyfile format).
+seal-node --slots 0 --port 4001 \
   --validator-key validator-keys.json \
   --bootstrap-peers /ip4/203.0.113.50/tcp/4001
 
 # For DNS-based (if you have a domain)
-seal-node \
+seal-node --slots 0 --port 4001 \
+  --validator-key validator-keys.json \
   --bootstrap-peers /dns4/boot1.testnet.seal-dao.org/tcp/4001
 ```
 
@@ -75,23 +84,43 @@ seal-node \
   --bootstrap-peers /ip4/192.0.2.30/tcp/4001
 ```
 
+When the seed list is long or rotates often, point at a file
+instead. One multiaddr per line; `#` comments and blank lines are
+skipped; bad lines log a warning but don't fail startup.
+
+```bash
+# /etc/seal/testnet-seeds.txt
+# Updated 2026-05-15 — see https://testnet.seal-dao.org/seeds
+/dns4/boot1.testnet.seal-dao.org/tcp/4001
+/dns4/boot2.testnet.seal-dao.org/tcp/4001
+/dns4/boot3.testnet.seal-dao.org/tcp/4001
+
+# Then start seal-node with:
+seal-node --bootstrap-peers-file /etc/seal/testnet-seeds.txt
+```
+
+The `--bootstrap-peers-file` entries are appended to whatever
+`--bootstrap-peers` flags were also passed, so you can mix a
+local override with the public seed file.
+
 ### Local development (no VPS needed)
 
 On a local network (LAN/VPN), mDNS handles discovery automatically:
 
 ```bash
 # Machine 1
-seal-node --p2p-port 4001
+seal-node --slots 0 --port 4001
 
 # Machine 2 (same LAN/VPN) — discovers Machine 1 via mDNS
-seal-node --p2p-port 4002
+seal-node --slots 0 --port 4002
 ```
 
 For machines on a VPN (e.g., WireGuard, Tailscale), use the VPN IP:
 
 ```bash
 # Machine 2 connects to Machine 1's VPN IP
-seal-node --bootstrap-peers /ip4/10.0.0.1/tcp/4001
+seal-node --slots 0 --port 4001 \
+  --bootstrap-peers /ip4/10.0.0.1/tcp/4001
 ```
 
 ---
@@ -121,16 +150,21 @@ For testing across multiple physical machines on a VPN:
 
 ```bash
 # Machine 1 (bootstrap + validator)
-seal-node --p2p-port 4001 --validator-index 0
+seal-node --slots 0 --port 4001 --rpc-port 8545 --rpc-external
 
 # Machine 2
-seal-node --p2p-port 4001 --validator-index 1 \
+seal-node --slots 0 --port 4001 \
   --bootstrap-peers /ip4/<machine1-vpn-ip>/tcp/4001
 
 # Machine 3
-seal-node --p2p-port 4001 --validator-index 2 \
+seal-node --slots 0 --port 4001 \
   --bootstrap-peers /ip4/<machine1-vpn-ip>/tcp/4001
 ```
+
+There is no `--validator-index` flag; each node has its own ML-DSA
+identity. Pass `--validator-key <path>` on each machine to pin
+identities across restarts (see TESTNET.md "Identity persistence"
+for the keyfile format).
 
 ### 4. Public testnet (VPS)
 
@@ -139,10 +173,12 @@ Validators connect from anywhere.
 
 ```bash
 # VPS (bootstrap)
-seal-node --p2p-port 4001
+seal-node --slots 0 --port 4001 --rpc-port 8545 --rpc-external
 
 # Validators (anywhere with internet)
-seal-node --bootstrap-peers /ip4/<vps-public-ip>/tcp/4001
+seal-node --slots 0 --port 4001 \
+  --validator-key validator-keys.json \
+  --bootstrap-peers /ip4/<vps-public-ip>/tcp/4001
 ```
 
 ---

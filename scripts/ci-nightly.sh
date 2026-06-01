@@ -55,7 +55,8 @@ if [ -n "$NIGHTLY_BIN" ] && PATH="$NIGHTLY_BIN:$PATH" cargo fuzz --version > /de
     FUZZ_TARGETS=(
         fuzz_sql_parser fuzz_vrf_verify fuzz_pqvrf_verify
         fuzz_address_parse fuzz_block_deserialize fuzz_tx_deserialize
-        fuzz_merkle_ops fuzz_ringtail_verify fuzz_committee_vote
+        fuzz_merkle_ops fuzz_ringtail_verify fuzz_ringtail_sign
+        fuzz_committee_vote
     )
     FUZZ_CRASHES=0
     TOTAL=${#FUZZ_TARGETS[@]}

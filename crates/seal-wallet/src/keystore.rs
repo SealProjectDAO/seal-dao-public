@@ -120,7 +120,10 @@ impl Wallet {
     }
 
     /// Sign a message with the SEAL (ML-DSA) key.
-    pub fn sign(&self, message: &[u8]) -> Result<seal_crypto::signature::Signature, seal_crypto::CryptoError> {
+    pub fn sign(
+        &self,
+        message: &[u8],
+    ) -> Result<seal_crypto::signature::Signature, seal_crypto::CryptoError> {
         self.seal_signing_key.sign(message)
     }
 

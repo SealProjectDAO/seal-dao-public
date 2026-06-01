@@ -1,0 +1,318 @@
+# Ringtail 7-validator override — layers Ringtail flags on the
+# 3-validator bridge testnet stack and adds 4 more validators
+# (seal-4 … seal-7) to reach **Variant A (5-of-7 full committee)**
+# from `docs/TESTNET-VALIDATOR-SIZES.md` §3.2.
+#
+# This is the recommended pre-mainnet shape: 7 consensus
+# validators, all 7 in the bridge committee, threshold 5
+# (tolerates 2 simultaneous Byzantine faults).
+#
+# Apply with:
+#   cd bridges
+#   docker compose -f docker-compose.testnet.yml \
+#                  -f docker-compose.ringtail-7.override.yml \
+#                  up -d
+#
+# Prereqs:
+#   * 7 Ringtail keypair files at `bridges/ringtail-keys/validator-1.json`
+#     … `validator-7.json`. Generate via:
+#       cargo run --release -p seal-bridge --features ringtail-singleton \
+#           --example bridge-ringtail-keygen \
+#           -- bridges/ringtail-keys/shared.json
+#       for i in 1 2 3 4 5 6 7; do
+#           cp bridges/ringtail-keys/shared.json \
+#              bridges/ringtail-keys/validator-$i.json
+#       done
+#   * The Solana + Stellar local validators come from the base
+#     `bridges/docker-compose.testnet.yml` (this override only
+#     adjusts seal-* services).
+#
+# Host RPC mappings (all 7 reachable for smoke polling). Bridge
+# stack lives in the 86xx range so it coexists with the validator
+# stack (8545+) — see MANUAL-TESTING.md §7.6:
+#   seal-1 → :8645  (base)
+#   seal-2 → :8646  (base)
+#   seal-3 → :8647  (base)
+#   seal-4 → :8648  (new in this override)
+#   seal-5 → :8649  (new)
+#   seal-6 → :8650  (new)
+#   seal-7 → :8651  (new)
+
+x-ringtail-common-cmd: &ringtail-cmd
+  - "--slots"
+  - "0"
+  - "--port"
+  - "4001"
+  - "--rpc-port"
+  - "8545"
+  - "--rpc-external"
+  - "--data-dir"
+  - "/data"
+  - "--allow-new-recipients"
+  - "--bridge-ringtail-keypair-file"
+  - "/ringtail-keypair.json"
+  - "--bridge-ringtail-mac-key-hex"
+  - "2222222222222222222222222222222222222222222222222222222222222222"
+  - "--bridge-ringtail-threshold"
+  - "5"
+  - "--bridge-ringtail-committee-size"
+  - "7"
+  - "--bridge-poll-interval-secs"
+  - "10"
+
+services:
+  # Override the 3 base seal-* services: swap HMAC committee key
+  # for Ringtail flags + party-id, mount per-validator keypair.
+  seal-1:
+    volumes:
+      - ./ringtail-keys/validator-1.json:/ringtail-keypair.json:ro
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      - "--bridge-ringtail-keypair-file"
+      - "/ringtail-keypair.json"
+      - "--bridge-ringtail-mac-key-hex"
+      - "2222222222222222222222222222222222222222222222222222222222222222"
+      - "--bridge-ringtail-party-id"
+      - "0"
+      - "--bridge-ringtail-threshold"
+      - "5"
+      - "--bridge-ringtail-committee-size"
+      - "7"
+      - "--bridge-poll-interval-secs"
+      - "10"
+  seal-2:
+    volumes:
+      - ./ringtail-keys/validator-2.json:/ringtail-keypair.json:ro
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      - "--bootstrap-peers"
+      - "/dns4/seal-1/tcp/4001"
+      - "--bridge-ringtail-keypair-file"
+      - "/ringtail-keypair.json"
+      - "--bridge-ringtail-mac-key-hex"
+      - "2222222222222222222222222222222222222222222222222222222222222222"
+      - "--bridge-ringtail-party-id"
+      - "1"
+      - "--bridge-ringtail-threshold"
+      - "5"
+      - "--bridge-ringtail-committee-size"
+      - "7"
+      - "--bridge-poll-interval-secs"
+      - "10"
+  seal-3:
+    volumes:
+      - ./ringtail-keys/validator-3.json:/ringtail-keypair.json:ro
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      - "--bootstrap-peers"
+      - "/dns4/seal-1/tcp/4001"
+      - "--bridge-ringtail-keypair-file"
+      - "/ringtail-keypair.json"
+      - "--bridge-ringtail-mac-key-hex"
+      - "2222222222222222222222222222222222222222222222222222222222222222"
+      - "--bridge-ringtail-party-id"
+      - "2"
+      - "--bridge-ringtail-threshold"
+      - "5"
+      - "--bridge-ringtail-committee-size"
+      - "7"
+      - "--bridge-poll-interval-secs"
+      - "10"
+
+  # Net-new validators for the 7-validator topology.
+  seal-4:
+    build: ..
+    container_name: seal-bridge-node-4
+    volumes:
+      - ./ringtail-keys/validator-4.json:/ringtail-keypair.json:ro
+      - seal-4-data:/data
+    environment:
+      RUST_LOG: "seal_node=info,seal_bridge=debug"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
+    ports:
+      - "8648:8545"
+    depends_on:
+      - seal-1
+    networks:
+      - seal-bridge-net
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      - "--bootstrap-peers"
+      - "/dns4/seal-1/tcp/4001"
+      - "--bridge-ringtail-keypair-file"
+      - "/ringtail-keypair.json"
+      - "--bridge-ringtail-mac-key-hex"
+      - "2222222222222222222222222222222222222222222222222222222222222222"
+      - "--bridge-ringtail-party-id"
+      - "3"
+      - "--bridge-ringtail-threshold"
+      - "5"
+      - "--bridge-ringtail-committee-size"
+      - "7"
+      - "--bridge-poll-interval-secs"
+      - "10"
+
+  seal-5:
+    build: ..
+    container_name: seal-bridge-node-5
+    volumes:
+      - ./ringtail-keys/validator-5.json:/ringtail-keypair.json:ro
+      - seal-5-data:/data
+    environment:
+      RUST_LOG: "seal_node=info,seal_bridge=debug"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
+    ports:
+      - "8649:8545"
+    depends_on:
+      - seal-1
+    networks:
+      - seal-bridge-net
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      - "--bootstrap-peers"
+      - "/dns4/seal-1/tcp/4001"
+      - "--bridge-ringtail-keypair-file"
+      - "/ringtail-keypair.json"
+      - "--bridge-ringtail-mac-key-hex"
+      - "2222222222222222222222222222222222222222222222222222222222222222"
+      - "--bridge-ringtail-party-id"
+      - "4"
+      - "--bridge-ringtail-threshold"
+      - "5"
+      - "--bridge-ringtail-committee-size"
+      - "7"
+      - "--bridge-poll-interval-secs"
+      - "10"
+
+  seal-6:
+    build: ..
+    container_name: seal-bridge-node-6
+    volumes:
+      - ./ringtail-keys/validator-6.json:/ringtail-keypair.json:ro
+      - seal-6-data:/data
+    environment:
+      RUST_LOG: "seal_node=info,seal_bridge=debug"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
+    ports:
+      - "8650:8545"
+    depends_on:
+      - seal-1
+    networks:
+      - seal-bridge-net
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      - "--bootstrap-peers"
+      - "/dns4/seal-1/tcp/4001"
+      - "--bridge-ringtail-keypair-file"
+      - "/ringtail-keypair.json"
+      - "--bridge-ringtail-mac-key-hex"
+      - "2222222222222222222222222222222222222222222222222222222222222222"
+      - "--bridge-ringtail-party-id"
+      - "5"
+      - "--bridge-ringtail-threshold"
+      - "5"
+      - "--bridge-ringtail-committee-size"
+      - "7"
+      - "--bridge-poll-interval-secs"
+      - "10"
+
+  seal-7:
+    build: ..
+    container_name: seal-bridge-node-7
+    volumes:
+      - ./ringtail-keys/validator-7.json:/ringtail-keypair.json:ro
+      - seal-7-data:/data
+    environment:
+      RUST_LOG: "seal_node=info,seal_bridge=debug"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
+    ports:
+      - "8651:8545"
+    depends_on:
+      - seal-1
+    networks:
+      - seal-bridge-net
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      - "--bootstrap-peers"
+      - "/dns4/seal-1/tcp/4001"
+      - "--bridge-ringtail-keypair-file"
+      - "/ringtail-keypair.json"
+      - "--bridge-ringtail-mac-key-hex"
+      - "2222222222222222222222222222222222222222222222222222222222222222"
+      - "--bridge-ringtail-party-id"
+      - "6"
+      - "--bridge-ringtail-threshold"
+      - "5"
+      - "--bridge-ringtail-committee-size"
+      - "7"
+      - "--bridge-poll-interval-secs"
+      - "10"
+
+volumes:
+  seal-4-data:
+  seal-5-data:
+  seal-6-data:
+  seal-7-data:

@@ -245,14 +245,14 @@ impl LavVrf {
 fn hash_to_ring(ring: &HandRolledOps, input: &[u8]) -> <HandRolledOps as RingOps>::Poly {
     let mut coeffs = vec![0u64; RING_N];
 
-    for i in 0..RING_N {
+    for (i, slot) in coeffs.iter_mut().enumerate() {
         let mut hash_input = Vec::with_capacity(HASH_TO_RING_DOMAIN.len() + input.len() + 8);
         hash_input.extend_from_slice(HASH_TO_RING_DOMAIN);
         hash_input.extend_from_slice(input);
         hash_input.extend_from_slice(&(i as u64).to_le_bytes());
         let hash = sha3_256(&hash_input);
         let raw = u64::from_le_bytes(hash.0[..8].try_into().unwrap());
-        coeffs[i] = raw % RING_Q;
+        *slot = raw % RING_Q;
     }
 
     ring.from_bytes(&coeffs_to_bytes(&coeffs))
@@ -266,7 +266,7 @@ fn sample_deterministic_gaussian(
 ) -> <HandRolledOps as RingOps>::Poly {
     let mut coeffs = vec![0u64; RING_N];
 
-    for i in 0..RING_N {
+    for (i, slot) in coeffs.iter_mut().enumerate() {
         let mut hash_input = Vec::with_capacity(seed.len() + 12);
         hash_input.extend_from_slice(seed);
         hash_input.extend_from_slice(b"gauss");
@@ -279,7 +279,7 @@ fn sample_deterministic_gaussian(
         // Using hash output modulo a small range centered at 0
         let range = (MASK_SIGMA * 6.0) as u64;
         let centered = (raw % range) as i64 - (range / 2) as i64;
-        coeffs[i] = if centered >= 0 {
+        *slot = if centered >= 0 {
             centered as u64 % RING_Q
         } else {
             RING_Q - ((-centered) as u64 % RING_Q)

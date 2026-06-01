@@ -1,23 +1,36 @@
 // Seal Wallet — MV3 background service worker.
 //
 // Runs in a non-DOM context. Holds NO secret material in memory: the
-// encrypted vault lives in `chrome.storage.local`, decryption only
-// happens in the popup right before signing. The service worker's job
-// is purely message routing between the in-page provider and the
-// popup, plus persisting connection-approved origins.
+// encrypted vault lives in `browserApi.storage.local`, decryption
+// only happens in the popup right before signing. The service
+// worker's job is purely message routing between the in-page
+// provider and the popup, plus persisting connection-approved
+// origins.
 //
-// Message protocol (all `chrome.runtime.sendMessage` payloads):
+// Message protocol (all `browserApi.runtime.sendMessage` payloads):
 //   { type: "seal:getAccounts" }          → ["seal1...", ...]
 //   { type: "seal:requestAccounts", origin } → opens popup if not approved
 //   { type: "seal:signMessage", origin, message_hex } → opens popup, returns sig
 //   { type: "seal:rpc", method, params }  → forwarded to configured RPC URL
+//
+// `browserApi` is a cross-browser alias for `chrome`/`browser`.
+// Inlined for both module + classic contexts; the same logic also
+// lives in `browser-polyfill.js` (loaded as a content_script).
+// On Chromium browsers `browserApi === chrome`; on Firefox/Safari
+// it's `browser` (Promise-native). Chromium MV3's `chrome.*` returns
+// Promises since Chrome 88, so picking the right namespace is all
+// we need.
+const browserApi =
+  typeof globalThis.browser !== "undefined" && globalThis.browser?.runtime
+    ? globalThis.browser
+    : globalThis.chrome;
 
 const RPC_URL_KEY = "seal:rpc_url";
 const ACCOUNTS_KEY = "seal:accounts"; // public metadata only (addresses, not keys)
 const APPROVED_ORIGINS_KEY = "seal:approved_origins";
 
 async function getApprovedOrigins() {
-  const out = await chrome.storage.local.get(APPROVED_ORIGINS_KEY);
+  const out = await browserApi.storage.local.get(APPROVED_ORIGINS_KEY);
   return out[APPROVED_ORIGINS_KEY] || [];
 }
 
@@ -25,17 +38,17 @@ async function approveOrigin(origin) {
   const list = await getApprovedOrigins();
   if (!list.includes(origin)) {
     list.push(origin);
-    await chrome.storage.local.set({ [APPROVED_ORIGINS_KEY]: list });
+    await browserApi.storage.local.set({ [APPROVED_ORIGINS_KEY]: list });
   }
 }
 
 async function getAccounts() {
-  const out = await chrome.storage.local.get(ACCOUNTS_KEY);
+  const out = await browserApi.storage.local.get(ACCOUNTS_KEY);
   return out[ACCOUNTS_KEY] || [];
 }
 
 async function getRpcUrl() {
-  const out = await chrome.storage.local.get(RPC_URL_KEY);
+  const out = await browserApi.storage.local.get(RPC_URL_KEY);
   return out[RPC_URL_KEY] || "http://localhost:8545";
 }
 
@@ -47,14 +60,14 @@ function enqueueRequest(req) {
   const id = nextRequestId++;
   return new Promise((resolve, reject) => {
     pendingRequests.set(id, { req, resolve, reject });
-    chrome.action.openPopup().catch(() => {
+    browserApi.action.openPopup().catch(() => {
       // openPopup is gated; user must click toolbar icon. The popup
       // will pull pending requests on open.
     });
   });
 }
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+browserApi.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   (async () => {
     try {
       switch (msg.type) {

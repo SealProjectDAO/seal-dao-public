@@ -1,5 +1,0 @@
-{"log":
- [{"message":
-   ".> LEAN_PATH=././.lake/build/lib DYLD_LIBRARY_PATH=././.lake/build/lib /Users/bechaderenaud/.elan/toolchains/leanprover--lean4---v4.8.0/bin/lean -DautoImplicit=false ././././SealVerify/Basic/VRF.lean -R ./././. -o ././.lake/build/lib/SealVerify/Basic/VRF.olean -i ././.lake/build/lib/SealVerify/Basic/VRF.ilean -c ././.lake/build/ir/SealVerify/Basic/VRF.c --json",
-   "level": "trace"}],
- "depHash": "5366063564625758204"}

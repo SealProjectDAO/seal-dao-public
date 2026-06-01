@@ -157,6 +157,49 @@ already works.
 **Cost**: ~1 day if kernels are complete; ~1 week if we hit missing
 kernels and have to write them.
 
+#### Option A progress 2026-05-08
+
+Steps 1-3 above are now landed in vendor (`vendor/risc0-circuit-
+rv32im-sys-5.0.0-rc.1/build.rs`, `cxx/rv32im/ffi.cpp`, `src/lib.rs`,
+`Cargo.toml`; `vendor/risc0-circuit-rv32im-5.0.0-rc.1/{Cargo.toml,
+src/prove.rs}`; `vendor/risc0-zkvm-5.0.0-rc.1/Cargo.toml`).
+`.cargo-checksum.json` updated for each touched file.
+
+`cargo build -p seal-zk --features "risc0 local-prover risc0-zkvm/metal"
+--release` now **gets further** but hits two real upstream gaps that
+the original Option A estimate underweighted:
+
+1. **`metal-cpp` not vendored.** `cxx/hal/metal/hal.cpp:24` includes
+   `<Metal/Metal.hpp>` (the Apple metal-cpp wrapper) which is NOT
+   part of the macOS SDK — it's a separate header-only library
+   shipped at <https://developer.apple.com/metal/cpp/>. Apple's
+   own SDK only ships the Objective-C `<Metal/Metal.h>`. The HAL
+   would need either (a) the metal-cpp single-header dropped into
+   `cxx/hal/metal/include/`, or (b) a port to plain Objective-C++
+   using the Apple-shipped `<Metal/Metal.h>`. Option (a) is ~30
+   minutes; Option (b) is a chunk of porting work.
+
+2. **`.metal` kernels can't compile via `cc::Build`.** build.rs
+   feeds the `eval_check_22.metal` (and other generated MSL files)
+   to `cc::Build`, which calls `c++` on them — and `c++` chokes on
+   `#include <metal_stdlib>`. The kernels need the Xcode
+   `MetalToolchain` (`xcrun -sdk macosx metal -c eval_check_22.metal
+   -o eval_check_22.air` then `metallib`-link), invoked separately
+   from `cc::Build`. The C++ HAL then loads the resulting
+   `.metallib` at runtime via `Bundle.main` / `MTLDevice
+   .newLibrary(URL:)`. Bridging this into `cc::Build` cleanly is
+   maybe a day of build-script work (probably with `Command::new`
+   directly).
+
+Both are tractable but push the total effort well past the 1-day
+estimate. Picking up Option A from here means: vendor metal-cpp
+single header → wire `xcrun metal -c | metallib` into build.rs →
+make the `.metallib` discoverable to the runtime HAL.
+
+If these two are landed and the kernels still don't pass numeric
+parity with the CPU HAL, Option A merges into Option B's
+per-kernel-write workstream.
+
 ### Option B — medium: write the missing Metal kernels ourselves
 
 If Option A's forked build errors out on a missing Metal Shading

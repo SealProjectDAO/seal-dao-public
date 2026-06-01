@@ -1,8 +1,0 @@
-# Solana BPF build size (ringtail-verify feature ON)
-seal_bridge.so: 299016 bytes
-
-# Note: full CU measurement requires running against
-# solana-test-validator with instrumented instructions.
-# This script only builds; measurement is future work.
-# (Parse `consumed X of Y compute units` from solana logs
-# during a live unlock_tokens ix invocation.)
