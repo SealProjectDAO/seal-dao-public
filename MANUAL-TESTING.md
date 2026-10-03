@@ -1876,15 +1876,11 @@ Council members are identified by an ML-DSA verifying-key hex (the
 `pubkey` field); generate one key file per seat so you have the
 hexes handy.
 
-> ⚠️ **Known issue** (2026-05-20): the second `seal_bridgeRotateCommitteeKey`
-> call in a sequence — i.e. rotating *back* to a previous key after an
-> earlier rotation in the same node lifetime — silently fails the
-> council-quorum check inside the handler (the `info!` log line that
-> the first rotation emits does NOT appear for the second call). The
-> first rotation persists fine. `bridge-e2e.sh` skips the rotate-back
-> half of its smoke test by default for this reason
-> (`RUN_ROTATION_SMOKE=1` to enable). Tracked as a follow-up; the
-> bridge round trip itself is unaffected.
+> **Note:** The rotate-back smoke test once failed with `-32005 rate
+> limit exceeded` because the default `rpm_admin=5` capped admin RPCs
+> at 5/min. This was fixed by bumping `--rpm-admin 60` in
+> docker-compose.testnet.yml. The test now runs rotate-back
+> unconditionally (skip with `SKIP_ROTATION_SMOKE=1`).
 
 ```bash
 # Generate seven seats.

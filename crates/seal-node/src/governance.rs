@@ -305,6 +305,11 @@ impl GovernanceModule {
     }
 
     /// Cast a vote on a proposal with conviction.
+    ///
+    /// If `voter_balance` is provided, the voter's actual balance is verified
+    /// before accepting the vote.  The caller must have `stake` available
+    /// (i.e. `voter_balance >= stake`).  Pass `None` to skip the
+    /// check (e.g. for tests).
     pub fn vote_with_conviction(
         &mut self,
         proposal_id: u64,
@@ -312,7 +317,18 @@ impl GovernanceModule {
         choice: VoteChoice,
         stake: u64,
         conviction: Conviction,
+        voter_balance: Option<u64>,
     ) -> Result<(), String> {
+        // Verify the caller actually has the stake they're voting with.
+        if let Some(available) = voter_balance {
+            if available < stake {
+                return Err(format!(
+                    "voter {} has {} available but claims {}",
+                    voter, available, stake
+                ));
+            }
+        }
+
         let proposal = self
             .proposals
             .get(&proposal_id)
@@ -378,7 +394,7 @@ impl GovernanceModule {
         weight: u64,
     ) -> Result<(), String> {
         // For backward compatibility, treat weight as stake with 1× conviction
-        self.vote_with_conviction(proposal_id, voter, choice, weight, Conviction::X1)
+        self.vote_with_conviction(proposal_id, voter, choice, weight, Conviction::X1, None)
     }
 
     /// Withdraw a vote (tokens remain locked for the original conviction period).
@@ -614,9 +630,10 @@ impl GovernanceModule {
 /// - Veto queued proposals during timelock (with mandatory post-hoc ratification)
 /// - Manage cryptographic agility (PQC algorithm rotation)
 /// - Cannot unilaterally pass proposals
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct TechnicalCouncil {
     /// Council members (public key -> member info).
+    #[serde(default)]
     members: HashMap<String, CouncilMember>,
     /// Maximum council size.
     max_size: usize,
@@ -648,6 +665,28 @@ impl TechnicalCouncil {
             min_size: 7,
             ..Self::default()
         }
+    }
+
+    /// Persist council state (members, whitelisted, vetoed) to a JSON
+    /// file atomically (write-to-temp-then-rename).
+    pub fn save_to_file(&self, path: &std::path::Path) -> Result<(), String> {
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| format!("failed to serialize council: {e}"))?;
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, &json).map_err(|e| format!("write council: {e}"))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("rename council: {e}"))?;
+        Ok(())
+    }
+
+    /// Load council state from a JSON file. Returns a fresh council
+    /// with members restored; members whose terms have expired can be
+    /// pruned by the caller via `expire_terms`.
+    pub fn load_from_file(path: &std::path::Path) -> Result<Self, String> {
+        let raw = std::fs::read_to_string(path)
+            .map_err(|e| format!("read council file: {e}"))?;
+        let council: TechnicalCouncil = serde_json::from_str(&raw)
+            .map_err(|e| format!("parse council file: {e}"))?;
+        Ok(council)
     }
 
     /// Add a member (via Token House election).
@@ -1190,7 +1229,7 @@ mod tests {
         );
 
         // 100 stake with 4× conviction = 400 weight
-        gov.vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 100, Conviction::X4)
+        gov.vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 100, Conviction::X4, None)
             .unwrap();
 
         let votes = gov.get_votes(id).unwrap();
@@ -1213,7 +1252,7 @@ mod tests {
             0,
         );
 
-        gov.vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 500, Conviction::X3)
+        gov.vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 500, Conviction::X3, None)
             .unwrap();
 
         assert_eq!(gov.conviction_locks.len(), 1);
@@ -1233,7 +1272,7 @@ mod tests {
             0,
         );
 
-        gov.vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 500, Conviction::None)
+        gov.vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 500, Conviction::None, None)
             .unwrap();
 
         assert_eq!(gov.conviction_locks.len(), 0);
@@ -1251,12 +1290,12 @@ mod tests {
             0,
         );
 
-        gov.vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 100, Conviction::X2)
+        gov.vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 100, Conviction::X2, None)
             .unwrap();
         assert_eq!(gov.get_votes(id).unwrap()[0].weight, 200);
 
         // Change to X4
-        gov.vote_with_conviction(id, "alice".into(), VoteChoice::No, 100, Conviction::X4)
+        gov.vote_with_conviction(id, "alice".into(), VoteChoice::No, 100, Conviction::X4, None)
             .unwrap();
         let votes = gov.get_votes(id).unwrap();
         assert_eq!(votes.len(), 1);
@@ -1300,9 +1339,9 @@ mod tests {
             0,
         );
 
-        gov.vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 100, Conviction::X1)
+        gov.vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 100, Conviction::X1, None)
             .unwrap(); // unlock at epoch 6 (5+1)
-        gov.vote_with_conviction(id, "bob".into(), VoteChoice::Yes, 200, Conviction::X4)
+        gov.vote_with_conviction(id, "bob".into(), VoteChoice::Yes, 200, Conviction::X4, None)
             .unwrap(); // unlock at epoch 13 (5+8)
 
         assert_eq!(gov.conviction_locks.len(), 2);
@@ -1371,9 +1410,9 @@ mod tests {
 
         // 10% turnout → threshold = 50 + 20*(90)/100 = 68%
         // 600 yes, 400 no → 60% approval < 68% → REJECTED
-        gov.vote_with_conviction(id, "a".into(), VoteChoice::Yes, 600, Conviction::X1)
+        gov.vote_with_conviction(id, "a".into(), VoteChoice::Yes, 600, Conviction::X1, None)
             .unwrap();
-        gov.vote_with_conviction(id, "b".into(), VoteChoice::No, 400, Conviction::X1)
+        gov.vote_with_conviction(id, "b".into(), VoteChoice::No, 400, Conviction::X1, None)
             .unwrap();
 
         let status = gov.tally(id, 5).unwrap();
@@ -1393,7 +1432,7 @@ mod tests {
         );
 
         // Only 5% turnout (50000 of 1000000) → below 10% minimum
-        gov.vote_with_conviction(id, "a".into(), VoteChoice::Yes, 50000, Conviction::X1)
+        gov.vote_with_conviction(id, "a".into(), VoteChoice::Yes, 50000, Conviction::X1, None)
             .unwrap();
 
         let status = gov.tally(id, 14).unwrap();
@@ -1414,9 +1453,9 @@ mod tests {
 
         // 100% turnout → threshold = 50% exactly
         // 510 yes, 490 no → 51% > 50% → PASSES
-        gov.vote_with_conviction(id, "a".into(), VoteChoice::Yes, 510, Conviction::X1)
+        gov.vote_with_conviction(id, "a".into(), VoteChoice::Yes, 510, Conviction::X1, None)
             .unwrap();
-        gov.vote_with_conviction(id, "b".into(), VoteChoice::No, 490, Conviction::X1)
+        gov.vote_with_conviction(id, "b".into(), VoteChoice::No, 490, Conviction::X1, None)
             .unwrap();
 
         let status = gov.tally(id, 5).unwrap();
@@ -1438,9 +1477,9 @@ mod tests {
         // Alice: 300 stake with X4 conviction = 1200 weight (Yes)
         // Bob: 500 stake with X1 conviction = 500 weight (No)
         // Alice wins despite lower stake due to conviction
-        gov.vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 300, Conviction::X4)
+        gov.vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 300, Conviction::X4, None)
             .unwrap();
-        gov.vote_with_conviction(id, "bob".into(), VoteChoice::No, 500, Conviction::X1)
+        gov.vote_with_conviction(id, "bob".into(), VoteChoice::No, 500, Conviction::X1, None)
             .unwrap();
 
         let status = gov.tally(id, 5).unwrap();
@@ -1675,6 +1714,54 @@ mod tests {
         assert_eq!(tc.member_count(), 1);
     }
 
+    #[test]
+    fn test_tc_persistence() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("council.json");
+
+        // Create council with members
+        let mut tc = TechnicalCouncil::new();
+        tc.add_member(CouncilMember {
+            pubkey: "m0".into(),
+            name: "Seat 0".into(),
+            term_start_epoch: 0,
+            term_end_epoch: 26280,
+        })
+        .unwrap();
+        tc.add_member(CouncilMember {
+            pubkey: "m1".into(),
+            name: "Seat 1".into(),
+            term_start_epoch: 0,
+            term_end_epoch: 26280,
+        })
+        .unwrap();
+        tc.add_member(CouncilMember {
+            pubkey: "m2".into(),
+            name: "Seat 2".into(),
+            term_start_epoch: 0,
+            term_end_epoch: 26280,
+        })
+        .unwrap();
+        tc.save_to_file(&path).unwrap();
+        assert!(path.is_file());
+
+        // Load and verify
+        let loaded = TechnicalCouncil::load_from_file(&path).unwrap();
+        assert_eq!(loaded.member_count(), 3);
+        assert!(loaded.has_two_thirds_approval(&["m0".into(), "m1".into(), "m2".into()]));
+        assert!(!loaded.has_two_thirds_approval(&["m0".into()]));
+
+        // After removal, load should reflect updated state
+        let mut loaded2 = loaded;
+        loaded2.remove_member("m0").unwrap();
+        loaded2.save_to_file(&path).unwrap();
+        let loaded3 = TechnicalCouncil::load_from_file(&path).unwrap();
+        assert_eq!(loaded3.member_count(), 2);
+        // 2 members: threshold = ceil(2*2/3) = 2, so 2 of 2 passes
+        assert!(loaded3.has_two_thirds_approval(&["m1".into(), "m2".into()]));
+        assert!(!loaded3.has_two_thirds_approval(&["m1".into()]));
+    }
+
     // --- Service Operators Council tests ---
 
     #[test]
@@ -1823,5 +1910,37 @@ mod kani_proofs {
         assert!(Conviction::X3.multiplier_x10() < Conviction::X4.multiplier_x10());
         assert!(Conviction::X4.multiplier_x10() < Conviction::X5.multiplier_x10());
         assert!(Conviction::X5.multiplier_x10() < Conviction::X6.multiplier_x10());
+    }
+
+    #[test]
+    fn test_balance_verification_rejects_insufficient() {
+        let mut gov = GovernanceModule::new();
+        let id = gov.create_proposal(
+            ProposalTrack::ParameterChange,
+            "Test".into(),
+            "".into(),
+            "p".into(),
+            "p".into(),
+            0,
+        );
+
+        // Voter has 50 available but tries to vote with 100 → rejected
+        let result = gov.vote_with_conviction(
+            id, "alice".into(), VoteChoice::Yes, 100, Conviction::X1, Some(50),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("has 50 available but claims 100"));
+
+        // Voter has exactly enough → accepted
+        let result = gov.vote_with_conviction(
+            id, "bob".into(), VoteChoice::Yes, 50, Conviction::X1, Some(50),
+        );
+        assert!(result.is_ok());
+
+        // No balance check provided → accepted (backward compat)
+        let result = gov.vote_with_conviction(
+            id, "carol".into(), VoteChoice::Yes, 99999, Conviction::X1, None,
+        );
+        assert!(result.is_ok());
     }
 }

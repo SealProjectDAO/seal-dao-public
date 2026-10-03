@@ -1,0 +1,263 @@
+Important correction — and I owe you this clearly: I had the wrong "0xMonaco." There are two unrelated projects with that name, and you linked the one I
+  wasn't describing.
+
+  - Paradigm CTF 0xMonaco (0xmonaco.ctf.paradigm.xyz, Monaco.sol by transmissions11) — the racing game. I confirmed from the source that it uses a VRGDA
+  (computeActionPrice with wadExp/wadLn, ACCELERATE_PER_TURN_DECREASE = 0.33e18) and has no order book. That's what my earlier "correction" was about.
+  - 0xmonaco.com ("Monaco — The World's Trading Floor") — the site you actually linked. This is a real CLOB trading platform, and it confirms: "Verifiable 
+  order-matching and single-slot finality all on the EVM," "<1ms matching and 400ms settlement," spot + perps + prediction markets, portfolio margining, maker
+  rebates, REST/WS/gRPC/MCP + SDKs in TS/Rust/Python/C++.
+
+  So your original framing — "0xMonaco with CLOB" — was correct, and my pushback was aimed at the wrong target. Scratch the VRGDA comparison; here's the right
+  one, Seal DEX vs. Monaco (0xmonaco.com) — and it's a much sharper comparison because both are CLOBs claiming single-slot finality.
+
+  Seal DEX vs. Monaco (0xmonaco.com) — two on-chain CLOBs
+
+  ┌──────────────────┬───────────────────────────────────────────────────────────────────┬─────────────────────────────────────────────────────────────────┐
+  │       Axis       │                             Seal DEX                              │                      Monaco (0xmonaco.com)                      │
+  ├──────────────────┼───────────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
+  │ Microstructure   │ CLOB, per-block batch auction (clears once/block)                 │ CLOB, continuous matching engine                                │
+  ├──────────────────┼───────────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
+  │ Match latency    │ ~4 s (block-bounded)                                              │ <1 ms matching, 400 ms settlement                               │
+  ├──────────────────┼───────────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
+  │ Throughput       │ ~125–250 trades/s ceiling                                         │ engine-bound, much higher                                       │
+  ├──────────────────┼───────────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
+  │ Matching         │ In-node Rust engine, in-memory BTreeMap books → committed         │ Fast off/side-chain engine → "verifiable order-matching"        │
+  │ location         │ on-chain via TxType::DexMatch                                     │ settled on EVM                                                  │
+  ├──────────────────┼───────────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
+  │ Finality         │ Single-slot, Algorand PQ-VRF proposer + Ringtail threshold        │ Single-slot finality on the EVM                                 │
+  │                  │ committee, STARK state proof                                      │                                                                 │
+  ├──────────────────┼───────────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
+  │ Markets          │ Spot token pairs only                                             │ Spot + perpetuals + prediction markets                          │
+  ├──────────────────┼───────────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
+  │ Margin           │ Cross-margin deferred (Phase 3)                                   │ Portfolio margining live                                        │
+  ├──────────────────┼───────────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
+  │ MEV / fairness   │ Batch clearing is the MEV defense — no intra-block ordering edge, │ Continuous price-time priority; relies on "verifiable" matching │
+  │                  │  FIFO within price level                                          │  for trust, not batching                                        │
+  ├──────────────────┼───────────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
+  │ Cryptography     │ PQC-native (ML-DSA / ML-KEM / SHA3, Ringtail)                     │ EVM = classical crypto (ECDSA/keccak)                           │
+  ├──────────────────┼───────────────────────────────────────────────────────────────────┼─────────────────────────────────────────────────────────────────┤
+  │ APIs             │ JSON-RPC (seal_placeOrder, seal_getOrderBook, …)                  │ REST / WebSocket / gRPC / MCP + SDKs                            │
+  └──────────────────┴───────────────────────────────────────────────────────────────────┴─────────────────────────────────────────────────────────────────┘
+
+  The real, sharp differences (both being CLOBs)
+
+  1. Batch vs. continuous. Seal batches all orders into the 4 s block and clears together — slow but structurally MEV-proof and simple to prove (one DexMatch
+  payload per block). Monaco runs a continuous <1 ms engine and instead makes the matching itself verifiable on EVM. Same goal (trustless matching), opposite
+  method: Seal removes the ordering game; Monaco lets it run fast and proves it was done honestly.
+  2. Where "verifiable" lives. Seal's trust root is the STARK proof of state + threshold-signed block. Monaco's is "verifiable order-matching … on the EVM."
+  Both are saying don't trust the operator's match — but Seal proves the whole state transition post-quantum, Monaco proves the matching step on classical EVM.
+  3. PQC vs. EVM. This is Seal's actual differentiator vs. Monaco — Seal's whole stack (signatures, committee, proofs) is post-quantum; Monaco is a fast EVM
+  CLOB with classical crypto.
+  4. Product surface. Monaco is far ahead on product — perps, prediction markets, portfolio margin, multi-language SDKs, MCP. Seal DEX is spot-only with
+  cross-margin still deferred. If Monaco is your reference design, perps + portfolio margin + an MCP/gRPC surface are the obvious gaps.
+
+  Sources: 0xmonaco.com (CLOB platform you linked), Monaco.sol gist — transmissions11 and Paradigm VRGDA (the other, CTF 0xMonaco), plus in-repo
+  crates/seal-token/src/orderbook.rs + docs/DEX-DESIGN.md.
+
+  Want me to spec the gaps against Monaco — i.e., what it'd take to add perps + portfolio margin to Seal's batch-auction CLOB, or to move Seal from 4 s batch
+  clearing toward a faster continuous engine while keeping the PQC finality?
+
+====
+
+[Why Monaco Protocol?                                                                                                                                        
+                                                                                                                                                               
+  Whether you’re building a trading application or trading directly via our SDK, Monaco Protocol provides institutional-grade infrastructure without the       
+  complexity:                                                                                                                                                  
+  No Infrastructure Overhead: No need to run matching engines, indexers, or maintain order books                                                               
+  Professional Order Matching: Price-time priority matching with support for LIMIT and MARKET orders                                                           
+  Advanced Execution Controls: Time-in-force options (GTC, IOC, FOK) for precise trade execution                                                               
+  Competitive Fee Structure: 5 bps base taker fee, -1 bps maker rebate (applications can add their own taker fees on top and keep 100%)                        
+  Real-time Market Data: WebSocket streams for live order updates, order book depth, and OHLCV candlestick data                                                
+  Flexible Integration: REST API, TypeScript SDK, and direct smart contract interaction options                                                                
+  Customizable for Applications: Frontend builders can set custom taker fees and get dedicated vault isolation] explain                                        
+
+⏺ This is a third, distinct "Monaco" — careful, because the name keeps colliding in this thread:
+
+  1. Paradigm CTF 0xMonaco — the VRGDA racing game (no order book).
+  2. 0xmonaco.com — "Monaco, The World's Trading Floor" (the CLOB perps venue you linked earlier).
+  3. Monaco Protocol — this copy: an order-book-as-infrastructure / "DEX-as-a-service" liquidity layer that apps build on top of via SDK. Originally a Solana
+  exchange/betting-market protocol.
+
+  The pitch here is not "trade on our venue" — it's "don't build your own order book, rent ours." Decoding each bullet:
+
+  "No Infrastructure Overhead: no matching engines, indexers, or order books"
+  The protocol runs the matching engine and maintains the books (on-chain program + hosted indexers). You consume it; you don't host it. This is the exact
+  opposite of what Seal does today — Seal is the matching engine (DexManager in-node). Monaco sells the engine as a shared public good so app builders skip the
+  part you and I just speced two proposals for.
+
+  "Professional Order Matching: price-time priority, LIMIT and MARKET orders"
+  Identical algorithm to Seal's orderbook.rs — price-time FIFO, same two order types. No differentiation here; it's table stakes.
+
+  "Advanced Execution Controls: GTC, IOC, FOK"
+  Time-in-force flags. GTC = good-til-cancelled (rests in the book). IOC = immediate-or-cancel (fill what crosses now, drop the remainder). FOK = fill-or-kill
+  (fill the whole order instantly or nothing). These are precisely Seal's deferred Phase-3 order types in DEX-DESIGN.md — Monaco ships them; Seal doesn't yet.
+
+  "5 bps base taker fee, -1 bps maker rebate (apps add their own taker fee and keep 100%)"
+  Taker pays 0.05%; maker is paid 0.01% (negative fee = a liquidity incentive). The key phrase is the parenthetical: app builders bolt their own taker fee on 
+  top and keep all of it. That's the business model — Monaco takes a thin protocol cut, the front-end monetizes its users. Contrast Seal's 0.1%/0.2% with 50%
+  burn / 50% to proposer — Seal routes fees to the protocol, Monaco routes them to app builders.
+
+  "Real-time Market Data: WebSocket streams — order updates, book depth, OHLCV candles"
+  Push-based feeds (server streams to you) vs. Seal's pull-based JSON-RPC (seal_getOrderBook). OHLCV = open/high/low/close/volume candlesticks for charting.
+  This is the "indexer" work Seal would otherwise have to build.
+
+  Three access tiers — managed HTTP, a typed client library, or raw on-chain calls. Seal currently offers only the third-ish (JSON-RPC).
+
+
+  "Customizable for Applications: custom taker fees + dedicated vault isolation"
+  Each app gets a segregated settlement vault so funds/risk don't commingle across the apps sharing the protocol, and sets its own fee. This is what makes
+  "many front-ends, one order book" safe.
+  The architectural model — and why it matters for Seal
+
+  Monaco Protocol is selling the protocol/front-end split: one shared, neutral order-book layer; many independent app front-ends that own the customer
+  relationship, set fees, and keep the revenue. That maps onto two things from this thread:
+  - Your design tracks: this is essentially "expose DexManager as shared infrastructure + per-app vaults + an SDK" rather than baking the DEX into one node. If
+  Seal wants third-party builders, the gaps are concrete: GTC/IOC/FOK, WebSocket+OHLCV feeds, a TS SDK, and per-app vault isolation — none of which exist yet.
+  - The legal review: the protocol/front-end split is exactly the risk-shifting structure in docs/LEGAL-REVIEW.md. In Monaco's model the front-end builder sets
+  fees, takes the customer relationship, and therefore takes the regulatory exposure (VASP/CASP/operator status); the protocol stays thin, neutral
+  infrastructure — the low-risk "validator-equivalent" posture. That's the same conclusion I reached for Seal: ship the neutral protocol, let others run (and
+  fees, takes the customer relationship, and therefore takes the regulatory exposure (VASP/CASP/operator status); the protocol stays thin, neutral
+  infrastructure — the low-risk "validator-equivalent" posture. That's the same conclusion I reached for Seal: ship the neutral protocol, let others run (and
+  own the liability for) front-ends.
+  own the liability for) front-ends.
+
+  So if you're eyeing Monaco Protocol as a reference, it's reinforcing the "shared order-book infra + app-builder front-ends" model — which is both a product
+  direction (SDK + vaults + TIF + streaming feeds) and a legal-structuring choice (push fee-taking and the customer relationship to the front-end). Want me to
+  fold a "DEX-as-infrastructure / app-vault" section into the Track A/B proposals, or add the GTC/IOC/FOK + WebSocket/SDK gaps to the perps doc's sequencing?
+
+  "Flexible Integration: REST API, TypeScript SDK, direct smart-contract interaction"
+  Three access tiers — managed HTTP, a typed client library, or raw on-chain calls. Seal currently offers only the third-ish (JSON-RPC).
+
+  "Customizable for Applications: custom taker fees + dedicated vault isolation"
+  Each app gets a segregated settlement vault so funds/risk don't commingle across the apps sharing the protocol, and sets its own fee. This is what makes
+  "many front-ends, one order book" safe.
+
+  The architectural model — and why it matters for Seal
+
+  Monaco Protocol is selling the protocol/front-end split: one shared, neutral order-book layer; many independent app front-ends that own the customer
+  relationship, set fees, and keep the revenue. That maps onto two things from this thread:
+
+  - Your design tracks: this is essentially "expose DexManager as shared infrastructure + per-app vaults + an SDK" rather than baking the DEX into one node. If
+  Seal wants third-party builders, the gaps are concrete: GTC/IOC/FOK, WebSocket+OHLCV feeds, a TS SDK, and per-app vault isolation — none of which exist yet.
+  - The legal review: the protocol/front-end split is exactly the risk-shifting structure in docs/LEGAL-REVIEW.md. In Monaco's model the front-end builder sets
+  fees, takes the customer relationship, and therefore takes the regulatory exposure (VASP/CASP/operator status); the protocol stays thin, neutral
+  infrastructure — the low-risk "validator-equivalent" posture. That's the same conclusion I reached for Seal: ship the neutral protocol, let others run (and
+  own the liability for) front-ends.
+
+  So if you're eyeing Monaco Protocol as a reference, it's reinforcing the "shared order-book infra + app-builder front-ends" model — which is both a product
+  direction (SDK + vaults + TIF + streaming feeds) and a legal-structuring choice (push fee-taking and the customer relationship to the front-end). Want me to
+  fold a "DEX-as-infrastructure / app-vault" section into the Track A/B proposals, or add the GTC/IOC/FOK + WebSocket/SDK gaps to the perps doc's sequencing?
+
+===
+
+  legal consequences of this model?                                                                                                                            
+
+⏺ Short version: this model doesn't reduce legal risk — it relocates and concentrates it. The convenience pitch ("we run the matching engine, order books,
+  indexers, and vaults") is, in regulatory terms, a description of running an exchange with custody. So the "protocol/front-end split" cuts two ways, and which
+  way depends entirely on what the protocol retains. (IANAL; this builds on docs/LEGAL-REVIEW.md.)
+
+  The core tension
+
+  In the legal review, the low-risk posture was the bare, non-custodial, no-fee, no-admin-key validator. Monaco Protocol's pitch is the opposite of every one
+  of those qualifiers:
+
+  ┌──────────────────────────────────────┬───────────────────────────────────────┬────────────────────────────────────────────────────────────────────────┐
+  │            Monaco feature            │          What it is legally           │                              Consequence                               │
+  ├──────────────────────────────────────┼───────────────────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+  │ "We run the matching engine + order  │ Operating a trading venue             │ The protocol is the exchange/CASP/VASP/CTP — not infrastructure        │
+  │ books"                               │                                       │                                                                        │
+  ├──────────────────────────────────────┼───────────────────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+  │ "Dedicated vault isolation"          │ Custody / control of client assets    │ The single biggest AML + money-transmission + VASP trigger in all six  │
+  │ (settlement vaults)                  │                                       │ jurisdictions                                                          │
+  ├──────────────────────────────────────┼───────────────────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+  │ "5 bps base taker fee" to the        │ A fee switch / protocol revenue +     │ Destroys every "sufficiently decentralized" carve-out (MiCA Recital    │
+  │ protocol                             │ identifiable operator                 │ 22, FATF control test, US "control")                                   │
+  ├──────────────────────────────────────┼───────────────────────────────────────┼────────────────────────────────────────────────────────────────────────┤
+  │ Hosted REST/WebSocket/indexer        │ Operational control, ongoing user     │ More evidence of an operator, not autonomous code                      │
+  │                                      │ relationship                          │                                                                        │
+  └──────────────────────────────────────┴───────────────────────────────────────┴────────────────────────────────────────────────────────────────────────┘
+
+  So the "no infrastructure overhead" benefit to app builders is purchased by concentrating the regulated activity onto the protocol operator.
+  Monaco-as-marketed looks like a regulated exchange that white-labels itself — not a neutral public good.
+
+  Who bears what
+
+  The protocol operator (if it runs matching + vaults + takes the base fee) is the prime candidate for:
+  - US: unregistered exchange (SEC, if any listed token is a security — and a CLOB is the paradigm exchange, weak decentralization defense), DCM/SEF (CFTC, for
+  any perp/leverage), MSB (FinCEN, because vault custody = accepting/transmitting value), and criminal §1960. The CFTC v. ZeroEx/0x order is directly on
+  point: a protocol that merely provided DEX infrastructure was charged. US v. Storm shows running the infra + taking fees + control defeats "we're just
+  software."
+  - EU: CASP for operating a trading platform and custody (two enumerated services). Recital 22 carve-out gone the moment there are admin keys + a protocol
+  fee.
+  - KR/JP/TW/CA: VASP / CAESP / VASP-AML / CTP respectively — order matching + custody is the textbook trigger; JP's "virtually managed by a person" test is
+  plainly met by a hosted matching engine; vaults trigger the 95% cold-storage rule.
+
+  Each app builder that sets its own taker fee and "keeps 100%" is, in its users' jurisdiction, plausibly its own unregistered
+  broker/exchange/money-transmitter — and the model hands this exposure to many small front-end builders who almost certainly have no KYC/AML/sanctions 
+  program. That's a liability the SDK pitch quietly transfers to them.
+
+  The dangerous combination — "single enterprise" / facilitation: because the protocol and the front-end split the fee on the same trade (base + app fee), a
+  regulator can treat them as one economic enterprise, or hold the protocol liable for knowingly providing exchange infrastructure + fee rails to unlicensed 
+  front-ends across jurisdictions (aiding/abetting unlicensed operation; sanctions exposure if any front-end serves a sanctioned user — the protocol is the
+  common chokepoint). Revenue-sharing is the thread that ties them together.
+
+  "Vault isolation" is a risk-segregation feature, not a legal shield
+
+  It stops one app's funds/insolvency from contaminating another's — useful operationally and for app-vs-app civil exposure. But it does not remove the custody
+  characterization from the protocol. Isolated custody is still custody.
+
+  When the split actually protects the protocol
+
+  The protocol/front-end separation only delivers the low-risk infra posture if the protocol genuinely gives up control:
+
+  1. Non-custodial vaults users alone control (no protocol/admin key can move funds), or no protocol-held custody at all;
+  2. No admin keys / upgrade authority over the matching or vault programs (immutable contracts);
+  3. No protocol fee to an identifiable, controllable recipient;
+  4. No protocol-operated front-end and no protocol-run targeting of any restricted market.
+
+  Hit all four and you're back to "neutral infrastructure; the front-ends are the regulated operators." Monaco's marketed model (hosted engine, vaults, 5 bps
+  base fee, hosted APIs) fails 1–3 — so as described, the protocol is the regulated party.
+
+  Implication for Seal
+
+  This is the exact fork in your design. If Seal exposes DexManager as Monaco-style shared infra, the legal outcome is decided by how much control Seal's 
+  protocol retains:
+
+  - Monaco-as-marketed (Seal runs matching + vaults + takes the 50%-proposer fee it has today) → Seal/its operators become the regulated exchange + custodian
+  in every target market. That's the high-risk column of LEGAL-REVIEW.md, not the validator column.
+  - The protective version → on-chain matching with no admin keys, non-custodial settlement (no vault the protocol controls), no protocol fee switch to a 
+  controllable treasury (or burn-only), sequencer/proposer rotation, and no Seal-run front-end. Then app builders carry the operator liability and Seal stays
+  the thin, low-risk protocol.
+
+  Net: the model is legally neutral-to-dangerous, not protective, by default. It protects the protocol only if the protocol is genuinely decentralized and
+  non-custodial — and the moment you add hosted matching, custody vaults, or a protocol fee for convenience (exactly Monaco's selling points), you've built a
+  regulated exchange and named yourself the operator.
+
+  Want me to add a "DEX-as-infrastructure: legal structuring" subsection to docs/LEGAL-REVIEW.md capturing this — specifically the four conditions under which
+  the protocol/front-end split holds, and a non-custodial-vault vs. protocol-fee decision for Seal?
+
+====
+
+Done. Added to docs/DEX-PERPS-MARGIN-PROPOSAL.md:
+
+  Phase 5 row in the sequencing table — structured-product vaults as consumers of the Phase 1–3 engine.
+
+  "Extensions: DOVs & iterative looping vaults (risk-first)" section, with the design discipline stated up front: a vault is a deterministic policy that drives
+  the existing margin/oracle/insurance machinery, not a new primitive. If a vault's exposure can't be expressed as positions the engine already prices, that's
+  a missing engine feature — which is why these sit at Phase 5, after the risk engine they consume.
+
+  - A. DOVs — OptionSeries + VaultEpoch structs (European option settled by the §1 PQC oracle). Key risk-first insight: covered calls / cash-secured puts are
+  structurally collateralized, so the short option needs no maintenance margin; premium is discovered by auctioning the option contract on the existing CLOB
+  rather than evaluating Black-Scholes on-chain (keeps it STARK-deterministic). MVP = covered/cash-secured only; spreads and naked legs wait for portfolio
+  margin (§3).
+  - B. Looping vaults — two expressions: (1) synthetic loop via the perp engine (preferred, no new primitive — a k× recursive long collapses to one leveraged
+  perp position the §3 engine already prices, funding = borrow cost, §4 ADL = cascade backstop); (2) spot-lending loop (needs a borrow module Seal lacks;
+  defer). Hard constraints: bounded recursion + deterministic max-leverage cap, health checked on the fully-unrolled position, reuse §4 liquidation wholesale,
+  all checked_*.
+
+  Regulatory note extended — DOVs = packaged derivatives / possible CIS; looping = leveraged (the synthetic-perp form is a perp, falls under the perps gating);
+  RWA collateral flagged as highest-incremental-risk (securities classification pulls the whole account into securities/custody regimes; off-chain oracle
+  halt/settlement-calendar risk). Gate all three the same way as perps, with per-market counsel sign-off.
+
+  The whole addition reinforces the existing sequencing: risk engine first (Phases 1–3), yield products after (Phase 5) — which is exactly what the job
+  description's "risk-first approach" means.

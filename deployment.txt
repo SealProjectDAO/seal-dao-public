@@ -1,0 +1,181 @@
+● Deployment architecture
+
+                      ┌─────────────────────────────────────────────┐
+                      │         Your local machine                  │
+                      │                                             │
+                      │  deploy script generates committee key      │
+                      │  (openssl rand -hex 32) → .bridge-committee-key.hex  │
+                      │                                             │
+                      │  bridge-committee-key.hex (clear text)      │
+                      └────┬────────────────────────────────────────┘
+                           │ env var (BRIDGE_COMMITTEE_KEY)
+                           ▼
+      ┌─────────────────────────────────────────────────────────────┐
+      │          Docker Compose (local or cloud VM)                 │
+      │                                                             │
+      │  seal-1 ── P2P ──> seal-2 ── P2P ──> seal-3                │
+      │  RPC :8645  RPC :8646  RPC :8647                            │
+      │                                                             │
+      │  Each node receives --bridge-committee-key <hex>            │
+      │  (passed as CLI arg via env var BRIDGE_COMMITTEE_KEY)       │
+      │                                                             │
+      │  ┌──────────────┐ ┌────────────────────────┐               │
+      │  │ bridge-committee-key.hex │ ┌────────────┤  │
+      │  │ ← on disk (persisted)    │  │ ← CLI arg  │  │
+      │  │ ← loaded before CLI      │  │ ← used if  │  │
+      │  │ ← override on restart    │  │ ← no disk  │  │
+      │  └──────────────────────────┘ └────────────┘               │
+      └────┬───────────────────────────────────────────────┬──────┘
+           │                                               │
+      ┌────▼──────┐                              ┌────────▼────────┐
+      │  Solana   │                              │   Stellar       │
+      │  devnet   │                              │   testnet       │
+      │           │                              │                 │
+      │ Anchor    │                              │ Soroban         │
+      │ program   │                              │ contract        │
+      └───────────┘                              └─────────────────┘
+
+  The full lifecycle is:
+  1. deploy script generates a 256-bit random committee key, deploys the Solana Anchor program to devnet and the Stellar Soroban contract to testnet, starts 3 seal nodes via docker-compose, registers observers via seal_addBridgeObserver RPC calls
+  2. Seal nodes poll https://api.devnet.solana.com and https://horizon-testnet.stellar.org for lock events, mint wrapped tokens on-chain via the bridge observer set
+  3. Reverse direction: burn on seal → get committee signature (HMAC or Ringtail) → claim unlock on source chain
+
+  ---
+  Answering your three questions
+  
+  1. Adding one extra bridge runner/node
+
+  The seal-1/2/3 topology uses a bootstrap pattern: seal-2 and seal-3 connect to seal-1 via /dns4/seal-1/tcp/4001 (P2P). The bridge observer set is in-process — each seal node independently polls the source chains and commits deposits to its own
+  local state.
+
+  If you add a 4th node:
+  - Same role as seal-2/3: bootstrap from seal-1 via --bootstrap-peers /dns4/seal-1/tcp/4001, same --bridge-committee-key, same poll intervals
+  - Observation is duplicated: all 4 nodes independently poll Solana devnet and Stellar testnet. This means 4x RPC load but no shared observer state
+  - No consensus required on deposits: deposits are idempotent — if multiple nodes observe the same Solana lock event, only one will succeed in process_deposit() (the BridgeDeposit is deduplicated by source_tx_hash)
+  - RPC load: seal-1's RPC (:8645) is the preferred endpoint for external clients (seal-2/3 don't expose RPC ports to host in the compose file by default — you'd need to add them)
+
+  2. Cloud deployment with encrypted local key storage
+
+  There are currently 3 types of secrets that need protection on each node:
+
+  ┌──────────────────────┬─────────────────────────────────────────────────────────────────────────────────┬────────────────────────────────────────────────────────────────┐
+  │        Secret        │                                 Current storage                                 │                    What's at risk if leaked                    │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────┤
+  │ Committee key (HMAC) │ --bridge-committee-key CLI arg + persisted to data_dir/bridge-committee-key.hex │ Witness signing — if known, can forge unlock claims            │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────┤
+  │ Ringtail keypair     │ --bridge-ringtail-keypair-file JSON file on disk                                │ Threshold signing — if known, can produce committee signatures │
+  ├──────────────────────┼─────────────────────────────────────────────────────────────────────────────────┼────────────────────────────────────────────────────────────────┤
+  │ Validator key        │ --validator-key JSON or Docker volume validator-key.json                        │ Node identity + consensus participation                        │
+  └──────────────────────┴─────────────────────────────────────────────────────────────────────────────────┴────────────────────────────────────────────────────────────────┘
+
+  The keysource.rs traits (CommitteeKeySource, RingtailKeySource) are designed precisely for this — they define the interface so the codebase doesn't assume file-based loading. Currently only FileKeySource is implemented. The --bridge-kms-config
+  flag already exists to swap in a custom key source.
+
+  Your options:
+
+  Option A: Local decryptor sidecar (recommended for near-term)
+
+  ┌──────────────────────────────────────────────────┐
+  │  Your laptop / on-prem                           │
+  │  ┌──────────────────────────────────────────────┐│
+  │  │  encrypted keys on disk (AES-256-GCM)        ││
+  │  │  .keys/seal-committee.key.aes                ││
+  │  │  .keys/ringtail.key.aes                      ││
+  │  │  .keys/validator.key.aes                     ││
+  │  │                                              ││
+  │  │  seal-kms-sidecar                            ││
+  │  │  - Holds decryption key (from agent/TPM)     ││
+  │  │  - Runs gRPC server locally                  ││
+  │  │  - Never writes plaintext to disk            ││
+  │  └──────────────┬───────────────────────────────┘│
+  │                 │ gRPC: decrypt(key) → [u8; 32]  │
+  └─────────────────┼────────────────────────────────┘
+                    │
+          ┌─────────▼──────────┐
+          │  Cloud VM          │
+          │  ┌───────────────┐ │
+          │  │ seal-node:1   │ │
+          │  │               │ │
+          │  │ CommitteeKey │ │
+          │  │ Source =     │ │
+          │  │ GrpcClient   │ │
+          │  │              │ │
+          │  │  → gRPC call │ │
+          │  │  → decrypt   │ │
+          │  │  → use [u8;32]││
+          │  └───────────────┘ │
+          └────────────────────┘
+
+  Implement impl CommitteeKeySource for GrpcKeyClient { read_committee_mac() } that calls the local sidecar. The sidecar holds the passphrase in memory (or from a TPM/HSM), decrypts on each call, never writes plaintext to disk. Zero persistent
+  clear-text keys on the cloud VM.
+
+  Option B: AWS KMS / GCP KMS / HashiCorp Vault
+
+  The CommitteeKeySource trait already exists. Implement it against a KMS:
+  - Store the master key in KMS; the committee key is encrypted and uploaded to the cloud node as ciphertext
+  - On startup, the node calls KMS Decrypt (in-region, low latency) → gets plaintext → uses in-memory → drops
+  - No key ever touches disk on the cloud node
+  - Audit trail via KMS CloudTrail/Stackdriver
+  - Same pattern for Ringtail via RingtailKeySource
+
+  3. No persistent clear-text keys on nodes
+
+  All three options above achieve this. The key insight is that the traits are already in place (CommitteeKeySource, RingtailKeySource) — you just need to implement them:
+
+  // This is the gap — the trait exists, FileKeySource is the only impl:
+  pub trait CommitteeKeySource: Send + Sync {
+      fn read_committee_mac(&self) -> Result<[u8; 32], String>;
+  }
+
+  // You'd add:
+  pub struct KmsKeySource {
+      client: AwsKmsClient,  // or VaultClient, GrpcClient, etc.
+      key_id: String,
+  }
+
+  impl CommitteeKeySource for KmsKeySource {
+      fn read_committee_mac(&self) -> Result<[u8; 32], String> {
+          // Call KMS Decrypt → [u8; 32] → return
+          // No disk I/O. Plaintext only in register memory.
+      }
+  }
+
+  In main.rs, the --bridge-kms-config flag already wires this in:
+
+  // Line 294-341 of main.rs already reads --bridge-kms-config
+  // and swaps CommitteeKeySource / RingtailKeySource
+  let bridge_kms_config: Option<String> = parse_arg(&args, "--bridge-kms-config");
+  if let Some(path) = &bridge_kms_config {
+      // Loads JSON config → constructs FileKeySource (current default)
+      // Swap to your custom impl here:
+      // let kms = KmsSource::from_config(config);
+      // bridge_committee_key = Some(kms.read_committee_mac()?)
+  }
+
+  The main.rs file at line 341 shows the wired path already accepts a KMS config JSON. You'd just change the FileKeySource construction to your custom source.
+
+  Summary of what needs to happen
+
+  ┌───────────────────────────────────────────────┬─────────────┬───────────────────────────────────────────────────────────┐
+  │                     Item                      │   Status    │                        Work needed                        │
+  ├───────────────────────────────────────────────┼─────────────┼───────────────────────────────────────────────────────────┤
+  │ CommitteeKeySource trait                      │ ✅ Done     │                                                           │
+  ├───────────────────────────────────────────────┼─────────────┼───────────────────────────────────────────────────────────┤
+  │ RingtailKeySource trait                       │ ✅ Done     │                                                           │
+  ├───────────────────────────────────────────────┼─────────────┼───────────────────────────────────────────────────────────┤
+  │ FileKeySource (disk-based)                    │ ✅ Done     │                                                           │
+  ├───────────────────────────────────────────────┼─────────────┼───────────────────────────────────────────────────────────┤
+  │ --bridge-kms-config CLI flag                  │ ✅ Done     │                                                           │
+  ├───────────────────────────────────────────────┼─────────────┼───────────────────────────────────────────────────────────┤
+  │ KMS/HSM/gRPC implementation                   │ ❌ Not done │ Implement CommitteeKeySource + RingtailKeySource          │
+  ├───────────────────────────────────────────────┼─────────────┼───────────────────────────────────────────────────────────┤
+  │ Add encrypted key management to deploy script │ ❌ Not done │ Add --bridge-kms-config support, encrypt/decrypt commands │
+  └───────────────────────────────────────────────┴─────────────┴───────────────────────────────────────────────────────────┘
+
+===
+
+ can you PLAN for a more custom but also boring scheme: use [ https://github.com/zeta1999/rust-secure-memory-public ] and have some pairing between the cloud vm / docker instance for simulation, 
+   using a hybrid PQC pairing mechanism and hybrid PQC ids for the machines/vms that are NOT the keys; after pairing with the master machine, the master machine sends the keys to the nodes, consider an option where the only key that is transferred 
+   is the validator key but the rest is using a seal kms side car, only when absolutely needed (so, except when starting a new node ... when?); complete the secnario with a case where someone else decides to run there own validators (seal L1 and   
+  maybe xml/sol bridges), how to we manage? what about governance (how do I control who has how many %... or do we use SEAL or governance token amounts ??)                                                                                             
+  

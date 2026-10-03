@@ -257,18 +257,40 @@ deploy_solana() {
     local prog_dir="$solana_dir/programs/seal-bridge"
     local prog_so="$prog_dir/target/deploy/seal_bridge.so"
     local deploy_so="$solana_dir/target/deploy/seal_bridge.so"
-    # Build with `cargo build-sbf -- --locked` from the program dir
-    # rather than `anchor build` from `bridges/solana`. Two reasons:
-    #   1) anchor 0.31's wrapper swallows cargo-build-sbf's exit
-    #      code, so a real build failure ends with exit 0 and no
-    #      .so. The verify-artifact check below catches that, but
-    #      rerunning to actually fix is slow.
-    #   2) `--locked` is required: the program's existing
-    #      Cargo.lock pins `getrandom 0.2.17` (SBF-compatible) and
-    #      `0.1.16`, but with the workspace vendor config moved
-    #      aside (see `with_crates_io`) cargo otherwise re-resolves
-    #      from crates.io and picks `getrandom 0.3`, which fails to
-    #      compile for the SBF target with `unresolved module 'imp'`.
+    local keypair="$solana_dir/target/deploy/seal_bridge-keypair.json"
+
+    # Ensure keypair and staging files exist
+    if [ ! -f "$keypair" ]; then
+        solana-keygen new --no-bip39-passphrase --outfile "$keypair" --force >/dev/null 2>&1
+    fi
+    mkdir -p "$solana_dir/target/deploy"
+    cp "$keypair" "$solana_dir/target/deploy/seal_bridge-keypair.json" 2>/dev/null || true
+    if [ -f "$prog_dir/target/deploy/seal_bridge-keypair.json" ] \
+       && [ ! -f "$solana_dir/target/deploy/seal_bridge-keypair.json" ]; then
+        cp "$prog_dir/target/deploy/seal_bridge-keypair.json" "$solana_dir/target/deploy/seal_bridge-keypair.json"
+        keypair="$solana_dir/target/deploy/seal_bridge-keypair.json"
+    fi
+
+    # Patch `declare_id!` in the program source to match the keypair
+    # address, AND update Anchor.toml. Without this, the on-chain
+    # program rejects transactions because the declared ID (hardcoded
+    # in source) differs from the deployment address.
+    local program_id
+    program_id=$(solana address -k "$keypair" 2>/dev/null)
+    if [ -n "$program_id" ]; then
+        sed -i "s/declare_id!(\"[^\"]*\")/declare_id!(\"$program_id\")/" "$prog_dir/src/lib.rs"
+        sed -i "s/^seal_bridge = \".*\"/seal_bridge = \"$program_id\"/" "$solana_dir/Anchor.toml"
+        info "pached declare_id! + Anchor.toml → $program_id"
+    else
+        fail "could not derive program ID from keypair"
+        return 2
+    fi
+
+    # Build with `cargo build-sbf -- --locked` from the program dir.
+    # `--locked` is required: the program's existing Cargo.lock pins
+    # `getrandom 0.2.17` (SBF-compatible). Without it, cargo
+    # re-resolves from crates.io and picks getrandom 0.3, which fails
+    # for the SBF target with `unresolved module 'imp'`.
     info "building program (cargo build-sbf -- --locked)"
     if ! with_crates_io bash -c "cd '$prog_dir' && cargo build-sbf -- --locked"; then
         fail "cargo build-sbf failed"
@@ -278,35 +300,31 @@ deploy_solana() {
         fail "cargo build-sbf succeeded but $prog_so is missing or empty"
         return 2
     fi
-    # Stage the .so where `anchor deploy` looks for it. anchor reads
-    # Anchor.toml + walks `target/deploy/` from `bridges/solana/`.
-    mkdir -p "$solana_dir/target/deploy"
     cp "$prog_so" "$deploy_so"
-    # Re-use the program's keypair if anchor expects it at the
-    # bridges/solana level; both paths reference the same key.
-    if [ ! -f "$solana_dir/target/deploy/seal_bridge-keypair.json" ] \
-       && [ -f "$prog_dir/target/deploy/seal_bridge-keypair.json" ]; then
-        cp "$prog_dir/target/deploy/seal_bridge-keypair.json" \
-           "$solana_dir/target/deploy/seal_bridge-keypair.json"
-    fi
-    # `anchor deploy` builds a TPU client that asks the validator
-    # for upcoming leader info; the dockerized solana-test-validator
-    # only exposes 8899/8900 (JSON-RPC + WebSocket), not the TPU
-    # gossip ports, so the TPU client can't bootstrap and times out
-    # after 20s. `solana program deploy --use-rpc` skips the TPU
-    # path entirely and just submits the program-deploy transactions
-    # over the RPC.
-    local keypair="$solana_dir/target/deploy/seal_bridge-keypair.json"
-    if ! solana program deploy \
+
+    # `solana program deploy --use-rpc` skips the TPU path entirely
+    # (the dockerized validator only exposes 8899/8900, not TPU gossip).
+    local deploy_out
+    if ! deploy_out=$(solana program deploy \
             --use-rpc \
             --url "$SOLANA_RPC" \
             --keypair "$HOME/.config/solana/id.json" \
             --program-id "$keypair" \
-            "$deploy_so"; then
+            "$deploy_so" 2>&1); then
         fail "solana program deploy failed"
         return 2
     fi
-    pass "Solana program deployed"
+
+    # Update the IDL's metadata address so anchor test can resolve
+    # the workspace program (anchor.workspace.SealBridge reads the
+    # address from the IDL, not from Anchor.toml).
+    if [ -f "$solana_dir/target/idl/seal_bridge.json" ]; then
+        sed -i "s/\"address\": \"[^\"]*\"/\"address\": \"$program_id\"/" "$solana_dir/target/idl/seal_bridge.json"
+        info "updated IDL program ID → $program_id"
+    fi
+
+    echo "$deploy_out"
+    pass "Solana program deployed (id=$program_id)"
 }
 
 deploy_stellar() {

@@ -43,5 +43,5 @@ pub use gpu::{
 };
 pub use risc0::{RiscZeroProver, RiscZeroVerifier};
 pub use sp1::{Sp1Prover, Sp1Verifier};
-pub use stub::StubProver;
+pub use stub::{StubProver, StubVerifier};
 pub use traits::{StateTransition, ZkProof, ZkProver, ZkVerifier};

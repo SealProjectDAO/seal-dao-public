@@ -7,6 +7,7 @@
 use crate::error::BridgeError;
 use crate::types::*;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Manages bridge state: deposits, withdrawals, and wrapped balances.
 #[derive(Default)]
@@ -53,6 +54,14 @@ pub struct BridgeManager {
     /// scripts keep working untouched.
     #[cfg(feature = "ringtail-singleton")]
     committee_ringtail_keypair: Option<Box<crate::ringtail::RingtailKeypair>>,
+    /// KMS committee signer (on-demand HMAC signing). When set, used
+    /// instead of `committee_key` for `compute_committee_signature`.
+    /// The key never leaves the KMS sidecar.
+    pub committee_signer: Option<Arc<dyn crate::keysource::CommitteeSigner>>,
+    /// KMS Ringtail signer (on-demand threshold signing). When set,
+    /// used instead of `committee_ringtail_keypair`.
+    #[cfg(feature = "ringtail-singleton")]
+    pub ringtail_signer: Option<Arc<dyn crate::keysource::RingtailSigner>>,
     /// Optional outbound notification channel — fires once per
     /// successful `initiate_withdrawal` to signal that the
     /// withdrawal is ready for committee signing. Subscribed by the
@@ -355,6 +364,19 @@ impl BridgeManager {
     ) -> Option<String> {
         #[cfg(feature = "ringtail-singleton")]
         {
+            // Priority 1: KMS Ringtail signer (on-demand threshold)
+            if let Some(signer) = &self.ringtail_signer {
+                match signer.sign_ringtail(dest_chain, dest_address, amount, nonce) {
+                    Ok(sig) => return Some(sig),
+                    Err(e) => {
+                        eprintln!(
+                            "[seal-bridge] ringtail KMS sign failed: {e} \
+— withdrawal falls back to next signing mode",
+                        );
+                    }
+                }
+            }
+            // Priority 2: Legacy Ringtail keypair
             if let Some(kp) = self.committee_ringtail_keypair.as_ref() {
                 match crate::ringtail::compute_committee_ringtail_sig(
                     dest_chain,
@@ -366,23 +388,28 @@ impl BridgeManager {
                 ) {
                     Ok(bytes) => return Some(hex::encode(bytes)),
                     Err(e) => {
-                        // Don't fall back to HMAC silently — that would
-                        // produce a signature the on-chain ringtail-
-                        // verify branch would reject. Surface the
-                        // failure as `None` so the operator notices in
-                        // the withdrawal record. eprintln rather than
-                        // tracing so the bridge crate doesn't acquire a
-                        // log-framework dep just for one warn line.
                         eprintln!(
-                            "[seal-bridge] ringtail singleton sign failed: {} \
-                             — withdrawal lands without signature",
-                            e
+                            "[seal-bridge] ringtail singleton sign failed: {e} \
+— withdrawal lands without signature",
                         );
                         return None;
                     }
                 }
             }
         }
+        // Priority 3: KMS HMAC signer (on-demand committee-of-1)
+        if let Some(signer) = &self.committee_signer {
+            match signer.sign_committee(dest_chain, dest_address, amount, nonce) {
+                Ok(sig) => return Some(sig),
+                Err(e) => {
+                    eprintln!(
+                        "[seal-bridge] committee KMS sign failed: {e} \
+— withdrawal falls back to next signing mode",
+                    );
+                }
+            }
+        }
+        // Priority 4: Legacy HMAC key
         self.committee_key
             .as_ref()
             .map(|k| compute_committee_mac(dest_chain, k, dest_address, amount, nonce))
@@ -610,6 +637,49 @@ pub(crate) const BRIDGE_DOMAIN_TAG_SOLANA: &[u8] = b"seal-bridge-solana-v1";
 /// the other.
 pub(crate) const BRIDGE_DOMAIN_TAG_STELLAR: &[u8] = b"seal-bridge-stellar-v1";
 
+/// Build the raw HMAC input (the "unlock payload") for a withdrawal.
+///
+/// This is the byte sequence that the KMS sidecar's `sign_committee`
+/// endpoint receives as `payload_hex`, and also what the local
+/// `compute_committee_mac` HMACs over. Keeping them identical avoids
+/// signature mismatch between local and KMS signing paths.
+pub(crate) fn build_unlock_payload(
+    chain: &Chain,
+    dest_address: &str,
+    amount: u64,
+    nonce: u64,
+) -> Vec<u8> {
+    match chain {
+        Chain::Solana => {
+            let recipient = solana_recipient_bytes(dest_address);
+            let mut payload = Vec::with_capacity(
+                recipient.len() + 8 + 8 + BRIDGE_DOMAIN_TAG_SOLANA.len(),
+            );
+            payload.extend_from_slice(&recipient);
+            payload.extend_from_slice(&amount.to_le_bytes());
+            payload.extend_from_slice(&nonce.to_le_bytes());
+            payload.extend_from_slice(BRIDGE_DOMAIN_TAG_SOLANA);
+            payload
+        }
+        Chain::Stellar => {
+            let recipient_xdr = stellar_address_to_xdr(dest_address).unwrap_or_default();
+            let amount_be_16 = {
+                let mut b = [0u8; 16];
+                b[8..].copy_from_slice(&amount.to_be_bytes());
+                b
+            };
+            let mut payload = Vec::with_capacity(
+                recipient_xdr.len() + 16 + 8 + BRIDGE_DOMAIN_TAG_STELLAR.len(),
+            );
+            payload.extend_from_slice(&recipient_xdr);
+            payload.extend_from_slice(&amount_be_16);
+            payload.extend_from_slice(&nonce.to_be_bytes());
+            payload.extend_from_slice(BRIDGE_DOMAIN_TAG_STELLAR);
+            payload
+        }
+    }
+}
+
 /// Short chain identifier used in withdrawal IDs.
 fn chain_tag(chain: &Chain) -> &'static str {
     match chain {
@@ -771,48 +841,11 @@ fn compute_committee_mac(
     use sha2::Sha256;
     type HmacSha256 = Hmac<Sha256>;
 
-    match chain {
-        Chain::Solana => {
-            let recipient = solana_recipient_bytes(dest_address);
-            let mut mac = HmacSha256::new_from_slice(committee_key)
-                .expect("HMAC-SHA-256 accepts any byte length key");
-            mac.update(&recipient);
-            mac.update(&amount.to_le_bytes());
-            mac.update(&nonce.to_le_bytes());
-            mac.update(BRIDGE_DOMAIN_TAG_SOLANA);
-            hex::encode(mac.finalize().into_bytes())
-        }
-        Chain::Stellar => {
-            // The Stellar program HMACs over the XDR serialization of
-            // an `ScVal::Address(...)`. Reconstruct that off-chain:
-            //   - decode the G… / C… StrKey to its 32-byte payload
-            //   - prefix with SCV_ADDRESS (= 18) + ScAddressType
-            //     discriminant (0 = account / 1 = contract) + (for
-            //     accounts) PublicKey discriminant (0 = ed25519).
-            // Then the contract layout is `recipient_xdr || amount_be_16
-            // || nonce_be_8 || domain_tag`.
-            let Some(recipient_xdr) = stellar_address_to_xdr(dest_address) else {
-                // validate_dest_address would have already rejected this,
-                // so this branch is defense-in-depth.
-                return format!("stellar-decode-failed:{nonce:016x}");
-            };
-            let mut mac = HmacSha256::new_from_slice(committee_key)
-                .expect("HMAC-SHA-256 accepts any byte length key");
-            mac.update(&recipient_xdr);
-            // i128 big-endian, 16 bytes — Stellar amounts are i128 on
-            // the contract side. We hold u64 host-side; widen with
-            // leading zeros so the BE bytes match.
-            let amount_be_16 = {
-                let mut b = [0u8; 16];
-                b[8..].copy_from_slice(&amount.to_be_bytes());
-                b
-            };
-            mac.update(&amount_be_16);
-            mac.update(&nonce.to_be_bytes());
-            mac.update(BRIDGE_DOMAIN_TAG_STELLAR);
-            hex::encode(mac.finalize().into_bytes())
-        }
-    }
+    let payload = build_unlock_payload(chain, dest_address, amount, nonce);
+    let mut mac = HmacSha256::new_from_slice(committee_key)
+        .expect("HMAC-SHA-256 accepts any byte length key");
+    mac.update(&payload);
+    hex::encode(mac.finalize().into_bytes())
 }
 
 #[cfg(test)]

@@ -2,21 +2,36 @@
 
 > **At-a-glance: the four operator commands.** These cannot be run
 > from inside this repo — they must execute on the live VPN
-> validator hosts. Once code-side work is at 2026-05-16 EOD state,
-> this is everything left:
+> validator hosts. Before running anything, generate and encrypt
+> deployer keys per **[§0 Deployer keys](#0-deployer-keys-generation-funding-and-encryption)**.
 >
 > ```bash
+> # 0. Generate + encrypt deployer keys, preload passphrase (see §0)
+> scripts/solana-gpg-wrapper.sh init
+> scripts/stellar-gpg-wrapper.sh init
+> scripts/solana-gpg-wrapper.sh preload
+> scripts/stellar-gpg-wrapper.sh preload
+>
 > # 1. Deploy bridge programs to live devnet/testnet (Solana + Stellar)
-> ./scripts/bridge-deploy-devnet.sh \
->     --solana-keypair $HOME/.config/solana/id.json \
->     --stellar-account <G-addr> \
+> #    install → deploy → wipe  (see §0.2 "install/wipe security model")
+> scripts/solana-gpg-wrapper.sh install
+> scripts/stellar-gpg-wrapper.sh install
+> REAL_SOLANA=solana REAL_STELLAR=stellar ./scripts/bridge-deploy-devnet.sh \
+>     --solana-keypair ~/.config/solana/id.json \
+>     --stellar-account "$(scripts/stellar-gpg-wrapper.sh keys address seal-bridge-deployer --network testnet)" \
 >     --seal-rpc http://127.0.0.1:8545
+> scripts/solana-gpg-wrapper.sh wipe
+> scripts/stellar-gpg-wrapper.sh wipe
 >
 > # 2. Flip on-chain bridge programs to Ringtail-verify mode
-> ./scripts/bridge-redeploy-ringtail.sh \
->     --solana-keypair $HOME/.config/solana/id.json \
->     --stellar-account <G-addr> \
+> scripts/solana-gpg-wrapper.sh install
+> scripts/stellar-gpg-wrapper.sh install
+> REAL_SOLANA=solana REAL_STELLAR=stellar ./scripts/bridge-redeploy-ringtail.sh \
+>     --solana-keypair ~/.config/solana/id.json \
+>     --stellar-account "$(scripts/stellar-gpg-wrapper.sh keys address seal-bridge-deployer --network testnet)" \
 >     --seal-rpc http://127.0.0.1:8545
+> scripts/solana-gpg-wrapper.sh wipe
+> scripts/stellar-gpg-wrapper.sh wipe
 >
 > # 3. Fund each validator's relayer keys (per-validator custody)
 > cp bridges/.relayer-keys.example.json bridges/.relayer-keys.json
@@ -28,7 +43,7 @@
 > ./scripts/bridge-test-ringtail-multi.sh
 > ```
 >
-> Detail for each command lives in the sections below (§1 / §3 / §5 / §6).
+> Detail for each command lives in the sections below (§2 / §4 / §6 / §7).
 > For 5- and 7-validator stacks, see
 > [`docs/TESTNET-VALIDATOR-SIZES.md`](TESTNET-VALIDATOR-SIZES.md) —
 > the multi-validator smoke script in step 4 is a template that
@@ -40,6 +55,179 @@ live public chains (Solana devnet + Stellar testnet). It assumes
 the host-side code is already at the 2026-05-16 EOD state (every
 code-side blocker closed; see
 [`docs/TODOS/BRIDGE-TESTNET-READINESS-2026-05.md`](TODOS/BRIDGE-TESTNET-READINESS-2026-05.md)).
+
+---
+
+## 0. Deployer and relayer keys
+
+The scripts in this runbook need **two categories** of keys:
+
+| Key | What it does | When needed |
+|--|--|--|
+| **Solana deployer** | Signs program-deploy, airdrop, ATA init on devnet | Once (deploy phase) |
+| **Stellar deployer** | Signs contract-deploy, trustline, payments on testnet | Once (deploy phase) |
+| **Relayer keys** (per-validator) | Signs burn→unlock withdrawal transactions | Only when a withdrawal occurs |
+
+Both categories are encrypted with GPG on disk. The GPG wrappers
+decrypt transparently on each command invocation, and the passphrase
+is cached by `gpg-agent` for 1 hour (configurable), so you type it
+**once per session** even if the command needs the key dozens of times.
+
+See [`KEY-SECURITY-AUDIT.md`](KEY-SECURITY-AUDIT.md) for the full
+key-by-key security analysis.
+
+### 0.1 Generate keys (plaintext, before encryption)
+
+```bash
+# Solana deployer key (Ed25519, 64-byte JSON)
+solana-keygen new --no-passphrase --outfile ~/.config/solana/id.json
+solana config set --url https://api.devnet.solana.com
+solana config set --keypair ~/.config/solana/id.json
+
+# Stellar deployer identity (Ed25519, managed by stellar CLI)
+stellar keys generate seal-bridge-deployer
+```
+
+### 0.2 Encrypt keys with GPG wrappers
+
+```bash
+# Solana: encrypt and wrap
+scripts/solana-gpg-wrapper.sh init
+# Prompts for GPG passphrase once. Key stored as:
+#   ~/.config/solana/id.json.gpg  (AES-256 encrypted)
+# The plaintext file is removed from disk.
+
+# Stellar: encrypt all plaintext identities
+scripts/stellar-gpg-wrapper.sh init
+# Prompts for GPG passphrase once. Each identity stored as:
+#   ~/.stellar/keys/seal-bridge-deployer.gpg  (AES-256 encrypted)
+# The plaintext files are backed up as *.plaintext.bak.
+
+# Verify nothing is on disk in plaintext
+scripts/solana-gpg-wrapper.sh status
+scripts/stellar-gpg-wrapper.sh status
+# Should show: "No plaintext keys on disk (good)"
+```
+
+### 0.3 Preload passphrase for the deploy session
+
+Before running any deploy commands, preload the passphrase so
+**no prompts appear during the script execution**:
+
+```bash
+scripts/solana-gpg-wrapper.sh preload
+# → enters passphrase into gpg-agent cache (1h TTL by default)
+
+scripts/stellar-gpg-wrapper.sh preload
+# → same passphrase (use the same GPG key for both)
+```
+
+Now every Solana/Stellar command via the wrapper works without
+any prompts. The wrapper decrypts, calls the real CLI, and wipes
+the plaintext on exit. One passphrase. Zero prompts.
+
+### 0.4 Use the wrappers for all key-requiring commands
+
+Replace every `solana` and `stellar` command with the wrapper:
+
+```bash
+# Instead of:  solana airdrop 2 $(solana address)
+scripts/solana-gpg-wrapper.sh airdrop 2 "$(scripts/solana-gpg-wrapper.sh address)"
+
+# Instead of:  stellar keys fund seal-bridge-deployer --network testnet
+scripts/stellar-gpg-wrapper.sh keys fund seal-bridge-deployer --network testnet
+
+# Instead of:  solana balance
+scripts/solana-gpg-wrapper.sh balance
+```
+
+The deploy script uses the standard `solana`/`stellar` CLI directly,
+so you must either:
+- Point the wrapper's decrypted key into the expected path (it does
+  this automatically by updating the Solana CLI config), or
+- Use the wrapper for any commands the deploy script calls
+
+### 0.5 When the keys are needed
+
+| Phase | Keys needed? | How often? |
+|--|--|--|
+| **Key generation** | Yes — once, during init | Once ever |
+| **Bridge program deploy** | Yes — Solana + Stellar deployer keys | Once per deploy |
+| **Ringtail mode flip** | Yes — same deployer keys | Once (different program ID) |
+| **Relayer key funding** | Yes — relayer keys | Once per relayer key |
+| **Node running** | **No** — observers are read-only | Never |
+| **Withdrawal (burn→unlock)** | Relayer keys only | Only when a user burns |
+| **Bridge redeploy** | Deployer keys | Only when redeploying (after drain) |
+
+**After deploy completes, the deployer keys are stashed and never
+touched again.** The encrypted `.gpg` files sit on disk at all times.
+The plaintext key only exists on disk during two modes:
+
+| Mode | Where plaintext lives | How long? |
+|--|--|--|
+| `wrapped` (default) | `/tmp/.solana-id.json` or `~/.stellar/keys/<name>` | Until the CLI exits |
+| `install`/`wipe` | `~/.config/solana/id.json` or `~/.stellar/keys/<name>` | Until `wipe` is called |
+
+In `wrapped` mode, `/tmp` is typically tmpfs (RAM-backed), so the
+plaintext never hits persistent storage. The Stellar wrapper writes
+to `~/.stellar/keys/` (on-disk), but the cleanup trap zeroes and
+removes it immediately after the CLI exits.
+
+**After deploy completes, the deployer keys are stashed and never
+touched again.** No plaintext exists unless you explicitly run
+`install`.
+
+### 0.6 Relayer keys
+
+Each validator node needs a Solana + Stellar keypair to fund
+withdrawal transactions. Generate, encrypt, and configure them:
+
+```bash
+# Generate + encrypt 3 Solana relayer keys
+for i in 1 2 3; do
+  solana-keygen new --no-passphrase --outfile /tmp/.relayer-sol-$i
+  scripts/solana-gpg-wrapper.sh encrypt /tmp/.relayer-sol-$i
+  rm /tmp/.relayer-sol-$i
+done
+# Keys now at: ~/.config/solana/relayer-sol-$i.gpg
+
+# Generate + encrypt 3 Stellar relayer keys
+for i in 1 2 3; do
+  stellar keys generate "relayer-validator-$i"
+done
+# Init re-scans and encrypts any new plaintext identities it finds
+scripts/stellar-gpg-wrapper.sh init
+
+# Get addresses via the wrappers
+scripts/solana-gpg-wrapper.sh address                    # relayer 1
+scripts/stellar-gpg-wrapper.sh keys address relayer-validator-1
+# ... repeat for 2 and 3
+
+# Build the relayer config
+cp bridges/.relayer-keys.example.json bridges/.relayer-keys.json
+$EDITOR bridges/.relayer-keys.json
+```
+
+### 0.7 Pre-deployment checklist (key edition)
+
+```bash
+# 1. Verify encrypted storage
+scripts/solana-gpg-wrapper.sh status     # no plaintext on disk
+scripts/stellar-gpg-wrapper.sh status    # no plaintext on disk
+
+# 2. Verify gpg-agent cache is configured
+grep -E 'default-cache-ttl|max-cache-ttl' ~/.gnupg/gpg-agent.conf
+# Should show: default-cache-ttl 3600  max-cache-ttl 86400
+
+# 3. Preload passphrase
+scripts/solana-gpg-wrapper.sh preload
+scripts/stellar-gpg-wrapper.sh preload
+
+# 4. Verify wrapper works (one test command)
+scripts/solana-gpg-wrapper.sh address    # should print pubkey, no prompt
+```
+
+---
 
 If you want the **local-stack** equivalent (solana-test-validator +
 stellar/quickstart in docker), use
@@ -53,7 +241,7 @@ document is for going live against public devnet/testnet.
 
 ---
 
-## 0. Pre-flight checklist
+## 1. Pre-flight checklist
 
 Before touching any script, confirm:
 
@@ -80,7 +268,7 @@ Validate the host-side wiring with the in-process integration test
 before touching public chains:
 
 ```bash
-cargo test -p seal-node --test bridge_ringtail_dispatch
+cargo test -p seal-node --test bridge_ringtail_dispatch --features ringtail-singleton
 ```
 
 It should pass without docker. If it fails, do NOT proceed — the
@@ -89,7 +277,7 @@ converge.
 
 ---
 
-## 1. Public-chain deploy (P4)
+## 2. Public-chain deploy (P4)
 
 Single command per environment. The script does:
 
@@ -144,7 +332,7 @@ forward every `poll_interval_secs`.
 
 ---
 
-## 2. HMAC committee-of-1 smoke (optional but recommended)
+## 3. HMAC committee-of-1 smoke (optional but recommended)
 
 Before flipping anything Ringtail-ward, prove the deploy works in
 the simpler HMAC mode. Pick any address with bridge tokens:
@@ -163,7 +351,7 @@ mirror commands for Stellar are `xlm` and `reverse-xlm`.
 
 ---
 
-## 3. Flip to Ringtail mode (P5)
+## 4. Flip to Ringtail mode (P5)
 
 This is a **second deploy** with new program/contract IDs — BPF
 and WASM bytes differ when `ringtail-verify` is on, so existing
@@ -205,7 +393,7 @@ ringtail-verify` and didn't skip on a cached `target/`.
 
 ---
 
-## 4. Per-validator Ringtail keypairs + flags
+## 5. Per-validator Ringtail keypairs + flags
 
 Each validator needs its own keypair file (PublicParams + collapsed
 sk) and a matching set of `--bridge-ringtail-*` flags.
@@ -271,7 +459,7 @@ schema is wrong; re-run `bridge-ringtail-keygen`.
 
 ---
 
-## 5. Fund the per-validator relayer keys (P1#3 op follow-up)
+## 6. Fund the per-validator relayer keys (P1#3 op follow-up)
 
 Each validator runs its own `seal-relayer` instance with its own
 destination-chain keys (per-validator custody — decided 2026-05-16,
@@ -318,7 +506,7 @@ unlock transactions for the lifetime of the testnet drip.
 
 ---
 
-## 6. Multi-validator e2e smoke (P1#5 layer 6)
+## 7. Multi-validator e2e smoke (P1#5 layer 6)
 
 This is the **gate that proves Ringtail is wired end-to-end across
 validators**. It only works once steps 3–5 are done.
@@ -376,7 +564,7 @@ to write the analogous override.
 
 ---
 
-## 7. Public-testnet round-trip smoke
+## 8. Public-testnet round-trip smoke
 
 Once steps 1–6 pass on the local docker stack, fire a real
 round-trip against public devnet/testnet:
@@ -448,7 +636,7 @@ selectors, or missing `set_usdc_sac` calls before they burn fees.
 
 ---
 
-## 8. Observability
+## 9. Observability
 
 While running, watch these:
 
@@ -458,7 +646,7 @@ While running, watch these:
     successful aggregate
   - `seal_bridge_committee_signature_hash_mismatch_total` — MUST
     stay at 0; non-zero = validators disagreeing
-  - `seal_bridge_rate_limit_tripped_total{group=…}` — P8/§4.1
+  - `seal_bridge_rate_limit_tripped_total{group=…}` — P8/§5.1
 - Grafana row: `Bridge / Ringtail` (added in commit `6b8c29dd6`).
 - Prometheus alerts (3 new ones in `6b8c29dd6`):
   - `BridgeRingtailGateConfigDrift` — validator threshold/size disagree
@@ -471,7 +659,7 @@ running anything else.
 
 ---
 
-## 9. Rollback / kill-switch
+## 10. Rollback / kill-switch
 
 If anything goes sideways:
 
@@ -488,7 +676,7 @@ If anything goes sideways:
 
 ---
 
-## 10. Common gotchas
+## 11. Common gotchas
 
 - **Solana airdrop rate-limits.** 2 SOL per call, devnet faucet
   often denies after a few requests. Spread calls across hours, or

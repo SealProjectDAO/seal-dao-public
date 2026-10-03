@@ -17,6 +17,58 @@ this doc is the public-testnet variant.
 > validators, varying threshold), see
 > [`docs/TESTNET-VALIDATOR-SIZES.md`](TESTNET-VALIDATOR-SIZES.md).
 
+### Quick-start (TL;DR)
+
+```bash
+# 1. Deploy contracts (one-time)          → §1
+# 2. Wire program IDs into seal-node      → §1.3
+# 3. Fund source wallets on each chain   → §0 (faucets) + §4.1-4.2
+# 4. Lock tokens on source chain         → §2 (SOL) / §3 (XLM) / §4 (USDC)
+# 5. Observe wrapped mint on Seal         → seal_pollBridges
+# 6. Burn on Seal, fetch committee MAC    → §2.2 / §3
+# 7. Unlock on destination chain         → anchor run unlock-tokens / stellar unlock_xlm
+```
+
+All seven steps are automated by the demo script:
+
+```bash
+BRIDGE_TESTNET_DEMO_LIVE=1 ./scripts/bridge-testnet-demo.sh both   # forward only
+BRIDGE_TESTNET_DEMO_LIVE=1 ./scripts/bridge-testnet-demo.sh reverse-both  # full round-trip
+```
+
+## Quick Deploy (one-liner)
+
+For a complete bring-up — deploy contracts, generate a random committee key,
+start the 3-node seal bridge stack, and register observers — use the
+deployment script:
+
+```bash
+./scripts/bridge-testnet-deploy.sh deploy   # full lifecycle (one-time)
+./scripts/bridge-testnet-deploy.sh up       # start nodes only (restart)
+./scripts/bridge-testnet-deploy.sh down     # stop containers
+./scripts/bridge-testnet-deploy.sh status   # verify nodes + observers
+./scripts/bridge-testnet-deploy.sh demo     # run lock→mint flow
+./scripts/bridge-testnet-deploy.sh teardown # stop + remove all volumes
+```
+
+This script:
+1. Deploys the Solana Anchor program to devnet and the Stellar Soroban
+   contract to testnet (reuses existing deployments if keys are present)
+2. Generates a 256-bit random committee key (`openssl rand -hex 32`)
+3. Starts 3 seal nodes via `docker-compose.testnet-public.yml`
+4. Initializes on-chain bridge programs with the committee key
+5. Registers Solana and Stellar observers via `seal_addBridgeObserver`
+
+See the script source for environment variable overrides
+(`BRIDGE_COMMITTEE_KEY`, `SOLANA_DEPLOYER`, etc.).
+
+> **Note on signing mode.** The steps below use the **HMAC-based**
+> committee signature (host-side, set via `--bridge-committee-key`).
+> In production with Ringtail enabled, `seal_getBridgeWithdrawal`
+> returns `"committee_signature_hex": null` because the signature is
+> produced asynchronously by the Ringtail session; the operator
+> runbook covers the Ringtail flow separately.
+
 > **Status (2026-05).**
 > - §1 deploys (Solana Anchor program + Soroban contract) work as
 >   documented against real public testnets.
@@ -35,6 +87,14 @@ this doc is the public-testnet variant.
 > - §4 USDC flows: Stellar shipped (`set_usdc_sac` + `lock_usdc` +
 >   `unlock_usdc`); Solana routes through the generic `lock_tokens`
 >   ix with `usdc_mint` registered on the observer.
+> - Reverse modes (reverse, reverse-sol, reverse-xlm, reverse-usdc-sol,
+>   reverse-usdc-xlm, reverse-both) fully close the lock→mint→burn→unlock
+>   round trip on both chains.
+> - Bridge withdrawal fee is exposed via `seal_getBridgeWithdrawalFee`
+>   (see §5).
+> - Ringtail mode (see [RUNBOOK-TESTNET-OPERATOR.md](RUNBOOK-TESTNET-OPERATOR.md))
+>   replaces the HMAC path; this doc covers the HMAC path for testing
+>   and development.
 
 ---
 
@@ -459,6 +519,84 @@ stable across `docker compose down -v` cycles. Pass that local
 `SOL_MINT` as `usdc_mint` to `seal_addBridgeObserver` in the local
 stack to route locks of it to `WrappedToken::WUSDC`.
 
+### 4.3 USDC round-trip: Stellar
+
+```bash
+# Lock 1 USDC (10⁷ stroops) on Stellar → mint WUSDC on Seal.
+LOCK_AMOUNT_USDC=10000000   # 1 USDC (7 decimals)
+SEAL_RECIPIENT_HEX=$(cargo run --quiet -p seal-cli -- addr-to-hex "$SEAL_RECIPIENT")
+
+cd bridges/stellar
+stellar contract invoke --id "$(cat ../.stellar-testnet-contract-id)" \
+    --source seal-bridge-deployer --network testnet \
+    -- lock_usdc \
+    --sender "$(stellar keys address seal-bridge-deployer)" \
+    --amount "$LOCK_AMOUNT_USDC" \
+    --seal_address "$SEAL_RECIPIENT_HEX"
+
+# Force a sweep + confirm the mint:
+curl -s -X POST "$SEAL_RPC" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"seal_pollBridges","params":{}}' | jq
+curl -s -X POST "$SEAL_RPC" -H 'content-type: application/json' \
+  -d "$(jq -cn --arg a "$SEAL_RECIPIENT" \
+       '{jsonrpc:"2.0",id:1,method:"seal_getBridgeWrappedBalance",
+         params:{address:$a,token:"WUSDC"}}')" | jq
+# Expected: balance == LOCK_AMOUNT_USDC.
+```
+
+Reverse direction (burn WUSDC → unlock USDC on Stellar):
+
+```bash
+# 1) Burn on Seal
+WD=$(seal bridge-withdraw --node "$SEAL_RPC" --key "$SEAL_KEY" \
+       --dest-chain Stellar --dest-address <G-address> \
+       --token WUSDC --amount 10000000 \
+     | grep -oE 'withdrawal_id: \S+' | awk '{print $2}')
+
+# 2) Fetch committee MAC
+JSON=$(seal bridge-get-withdrawal --node "$SEAL_RPC" --withdrawal-id "$WD")
+SIG=$(echo "$JSON" | jq -r '.withdrawal.committee_signature_hex')
+NONCE=$(echo "$JSON" | jq -r '.withdrawal.nonce')
+
+# 3) Submit claim on Stellar
+cd bridges/stellar
+stellar contract invoke --id "$(cat ../.stellar-testnet-contract-id)" \
+  --network testnet --source seal-bridge-deployer \
+  -- unlock_usdc \
+  --recipient <G-address> --amount 10000000 \
+  --nonce "$NONCE" --proof "$SIG"
+```
+
+### 4.4 USDC round-trip: Solana
+
+Lock direction uses the same `anchor run lock-sol` driver as SOL,
+just with a different mint and ATA setup (see §4.2 for ATA
+initialisation):
+
+```bash
+cd bridges/solana
+anchor run lock-sol -- \
+    --amount 10000000 \
+    --seal-recipient "$SEAL_RECIPIENT_HEX" \
+    --mint "$SOL_USDC_MINT" \
+    --sender-ata "$SOL_USDC_SENDER_ATA" \
+    --vault-ata "$SOL_USDC_VAULT_ATA" \
+    --program-id "$(cat ../.solana-devnet-program-id)" \
+    --provider.cluster devnet
+
+# Sweep + confirm WUSDC:
+curl -s -X POST "$SEAL_RPC" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"seal_pollBridges","params":{}}' | jq
+curl -s -X POST "$SEAL_RPC" -H 'content-type: application/json' \
+  -d "$(jq -cn --arg a "$SEAL_RECIPIENT" \
+       '{jsonrpc:"2.0",id:1,method:"seal_getBridgeWrappedBalance",
+         params:{address:$a,token:"WUSDC"}}')" | jq
+```
+
+Reverse direction is identical to §2.2 (same `seal bridge-withdraw`
+/ `anchor run unlock-tokens` pattern), just with `--token WUSDC`
+on the Seal side and the same `unlock_tokens` ix on Solana.
+
 ---
 
 ## 5. Status checks and troubleshooting
@@ -467,6 +605,14 @@ stack to route locks of it to `WrappedToken::WUSDC`.
 # Is my observer wired?
 curl -s -X POST "$SEAL_RPC" -H 'content-type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"seal_listBridgeObservers","params":{}}' | jq
+
+# What's the withdrawal fee? (Returns fee_base_units and fee_seal;
+# fee is deducted from the burned amount — the recipient gets
+# amount - fee. 0 = no fee.)
+curl -s -X POST "$SEAL_RPC" -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"seal_getBridgeWithdrawalFee","params":{}}' | jq
+# Also via CLI:
+# seal bridge-fee --node <rpc-url>
 
 # Are events being seen on the source chain? (object-param shape;
 # the legacy positional ["Solana"] still works for back-compat.)

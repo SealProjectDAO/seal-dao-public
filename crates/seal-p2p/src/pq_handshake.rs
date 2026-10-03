@@ -44,6 +44,7 @@
 //! - **Session key**: Double KEM (both sides contribute randomness)
 
 use seal_crypto::hash::sha3_256;
+use seal_crypto::hybrid_kem::{HybridKemKeypair, HybridKemPublicKey, HybridKemSharedSecret};
 use seal_crypto::kem::{KemCiphertext, KemKeypair, KemPublicKey};
 use seal_crypto::signature::{Signature, SigningKey, VerifyingKey};
 
@@ -277,6 +278,241 @@ fn derive_session_key(ss1: &[u8], ss2: &[u8]) -> [u8; SESSION_KEY_SIZE] {
     sha3_256(&input).0
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Hybrid KEM variant (ML-KEM + X25519)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Domain separation for hybrid handshake signatures.
+const HYBRID_HANDSHAKE_DOMAIN: &[u8] = b"seal-pq-hybrid-handshake:";
+
+/// Domain separation for hybrid session key derivation.
+const HYBRID_SESSION_DOMAIN: &[u8] = b"seal-pq-hybrid-session:";
+
+/// Hybrid handshake message 1: Initiator → Responder
+pub struct HybridHandshakeMsg1 {
+    pub hybrid_pk: Vec<u8>, // 1216 bytes (1184 ML-KEM + 32 X25519)
+}
+
+/// Hybrid handshake message 2: Responder → Initiator
+pub struct HybridHandshakeMsg2 {
+    pub hybrid_pk: Vec<u8>, // 1216 bytes
+    pub mlkem_ct: Vec<u8>,  // 1088 bytes
+    pub x25519_ct: [u8; 32], // X25519 ephemeral public key
+    pub signature: Vec<u8>, // 3309 bytes
+}
+
+/// Hybrid handshake message 3: Initiator → Responder
+pub struct HybridHandshakeMsg3 {
+    pub mlkem_ct: Vec<u8>,  // 1088 bytes
+    pub x25519_ct: [u8; 32], // X25519 ephemeral public key
+    pub signature: Vec<u8>, // 3309 bytes
+}
+
+/// Hybrid handshake result with hybrid-derived session key.
+pub struct HybridHandshakeResult {
+    pub session_key: [u8; SESSION_KEY_SIZE],
+    pub remote_identity: Vec<u8>,
+}
+
+/// Hybrid initiator side of the PQ-Noise handshake.
+pub struct HybridInitiator {
+    kem_keypair: HybridKemKeypair,
+    identity_sk: Vec<u8>,
+    _identity_vk: Vec<u8>,
+}
+
+impl HybridInitiator {
+    pub fn new(identity_sk: &[u8], identity_vk: &[u8]) -> Self {
+        Self {
+            kem_keypair: HybridKemKeypair::generate(),
+            identity_sk: identity_sk.to_vec(),
+            _identity_vk: identity_vk.to_vec(),
+        }
+    }
+
+    pub fn create_msg1(&self) -> HybridHandshakeMsg1 {
+        HybridHandshakeMsg1 {
+            hybrid_pk: self.kem_keypair.public_key().to_bytes(),
+        }
+    }
+
+    /// Process msg2 from responder, generate msg3.
+    /// Returns (msg3, handshake_result) on success.
+    pub fn process_msg2(
+        &self,
+        msg2: &HybridHandshakeMsg2,
+        responder_identity_vk: &[u8],
+    ) -> Result<(HybridHandshakeMsg3, HybridHandshakeResult), String> {
+        // Verify responder identity
+        let vk = VerifyingKey::from_bytes(responder_identity_vk)
+            .map_err(|e| format!("invalid responder identity key: {}", e))?;
+
+        // Verify responder signature: signs (domain || our_pk || ct || x25519_ct || their_pk)
+        let signed_data = [
+            HYBRID_HANDSHAKE_DOMAIN,
+            &self.kem_keypair.public_key().to_bytes(),
+            &msg2.mlkem_ct,
+            &msg2.x25519_ct,
+            &msg2.hybrid_pk,
+        ]
+        .concat();
+        let sig = Signature::from_bytes(msg2.signature.clone());
+        vk.verify(&signed_data, &sig)
+            .map_err(|_| "responder signature verification failed")?;
+
+        // Decapsulate hybrid shared secret from msg2 ciphertexts
+        let ss1 = self
+            .kem_keypair
+            .decapsulate_from_ct(
+                &KemCiphertext::from_bytes(msg2.mlkem_ct.clone()),
+                &msg2.x25519_ct,
+            )
+            .map_err(|e| format!("hybrid decapsulation failed: {}", e))?;
+
+        // Encapsulate under responder's hybrid public key for msg3
+        let resp_pk = HybridKemPublicKey::from_bytes(&msg2.hybrid_pk)
+            .map_err(|e| format!("invalid responder hybrid pk: {}", e))?;
+        let encaps = resp_pk.encapsulate();
+        let ss2 = encaps.shared_secret.clone();
+
+        // Derive session key
+        let session_key = derive_hybrid_session_key(ss1.as_bytes(), ss2.as_bytes());
+
+        // Sign our contribution
+        let sk = SigningKey::from_bytes(&self.identity_sk)
+            .map_err(|e| format!("invalid identity sk: {}", e))?;
+        let sign_data = [
+            HYBRID_HANDSHAKE_DOMAIN,
+            &msg2.hybrid_pk,
+            &encaps.mlkem_ct.to_bytes(),
+            &encaps.x25519_ct,
+        ]
+        .concat();
+        let our_sig = sk
+            .sign(&sign_data)
+            .map_err(|e| format!("signing failed: {}", e))?;
+
+        let msg3 = HybridHandshakeMsg3 {
+            mlkem_ct: encaps.mlkem_ct.to_bytes().to_vec(),
+            x25519_ct: encaps.x25519_ct,
+            signature: our_sig.to_bytes().to_vec(),
+        };
+
+        Ok((
+            msg3,
+            HybridHandshakeResult {
+                session_key,
+                remote_identity: responder_identity_vk.to_vec(),
+            },
+        ))
+    }
+}
+
+fn derive_hybrid_session_key(ss1: &[u8; 32], ss2: &[u8; 32]) -> [u8; SESSION_KEY_SIZE] {
+    let input = [HYBRID_SESSION_DOMAIN, ss1, ss2].concat();
+    sha3_256(&input).0
+}
+
+/// Hybrid responder side of the PQ-Noise handshake.
+pub struct HybridResponder {
+    kem_keypair: HybridKemKeypair,
+    identity_sk: Vec<u8>,
+    _identity_vk: Vec<u8>,
+    /// Shared secret from encapsulating under initiator's key (for msg3 decapsulation).
+    shared_secret_1: Option<HybridKemSharedSecret>,
+    /// Initiator's hybrid public key (for msg3 signature verification).
+    init_hybrid_pk: Option<Vec<u8>>,
+}
+
+impl HybridResponder {
+    pub fn new(identity_sk: &[u8], identity_vk: &[u8]) -> Self {
+        Self {
+            kem_keypair: HybridKemKeypair::generate(),
+            identity_sk: identity_sk.to_vec(),
+            _identity_vk: identity_vk.to_vec(),
+            shared_secret_1: None,
+            init_hybrid_pk: None,
+        }
+    }
+
+    /// Process msg1 from initiator, generate msg2.
+    pub fn process_msg1(&mut self, msg1: &HybridHandshakeMsg1) -> Result<HybridHandshakeMsg2, String> {
+        let init_pk = HybridKemPublicKey::from_bytes(&msg1.hybrid_pk)
+            .map_err(|e| format!("invalid initiator hybrid pk: {}", e))?;
+
+        // Encapsulate under initiator's hybrid public key
+        let encaps = init_pk.encapsulate();
+        self.shared_secret_1 = Some(encaps.shared_secret.clone());
+        self.init_hybrid_pk = Some(msg1.hybrid_pk.clone());
+
+        // Sign: our identity signs (domain || init_pk || our_ct || our_x25519_pk || our_pk)
+        let sk = SigningKey::from_bytes(&self.identity_sk)
+            .map_err(|e| format!("invalid identity sk: {}", e))?;
+        let sign_data = [
+            HYBRID_HANDSHAKE_DOMAIN,
+            &msg1.hybrid_pk,
+            &encaps.mlkem_ct.to_bytes(),
+            &encaps.x25519_ct,
+            &self.kem_keypair.public_key().to_bytes(),
+        ]
+        .concat();
+        let sig = sk
+            .sign(&sign_data)
+            .map_err(|e| format!("signing failed: {}", e))?;
+
+        Ok(HybridHandshakeMsg2 {
+            hybrid_pk: self.kem_keypair.public_key().to_bytes(),
+            mlkem_ct: encaps.mlkem_ct.to_bytes().to_vec(),
+            x25519_ct: encaps.x25519_ct,
+            signature: sig.to_bytes().to_vec(),
+        })
+    }
+
+    /// Process msg3 from initiator, complete handshake.
+    pub fn process_msg3(
+        &self,
+        msg3: &HybridHandshakeMsg3,
+        initiator_identity_vk: &[u8],
+    ) -> Result<HybridHandshakeResult, String> {
+        // Verify initiator signature: signs (domain || our_pk || their_ct || their_x25519_pk)
+        let our_pk_bytes = self.kem_keypair.public_key().to_bytes();
+        let signed_data = [
+            HYBRID_HANDSHAKE_DOMAIN,
+            &our_pk_bytes,
+            &msg3.mlkem_ct,
+            &msg3.x25519_ct,
+        ]
+        .concat();
+        let vk = VerifyingKey::from_bytes(initiator_identity_vk)
+            .map_err(|e| format!("invalid initiator identity key: {}", e))?;
+        let sig = Signature::from_bytes(msg3.signature.clone());
+        vk.verify(&signed_data, &sig)
+            .map_err(|_| "initiator signature verification failed")?;
+
+        // Decapsulate to get shared secret 2 from msg3 ciphertexts
+        let ss2 = self
+            .kem_keypair
+            .decapsulate_from_ct(
+                &KemCiphertext::from_bytes(msg3.mlkem_ct.clone()),
+                &msg3.x25519_ct,
+            )
+            .map_err(|e| format!("hybrid decapsulation failed: {}", e))?;
+
+        // Get shared secret 1 from msg1 encapsulation
+        let ss1 = self
+            .shared_secret_1
+            .as_ref()
+            .ok_or("handshake not started (no msg1 processed)")?;
+
+        let session_key = derive_hybrid_session_key(ss1.as_bytes(), ss2.as_bytes());
+
+        Ok(HybridHandshakeResult {
+            session_key,
+            remote_identity: initiator_identity_vk.to_vec(),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -407,5 +643,117 @@ mod tests {
         assert_eq!(msg2.signature.len(), SIGNATURE_SIZE);
         assert_eq!(msg3.ciphertext.len(), KEM_CIPHERTEXT_SIZE);
         assert_eq!(msg3.signature.len(), SIGNATURE_SIZE);
+    }
+
+    #[test]
+    fn test_hybrid_full_handshake() {
+        let (i_sk, i_vk) = generate_identity();
+        let (r_sk, r_vk) = generate_identity();
+
+        let initiator = HybridInitiator::new(&i_sk, &i_vk);
+        let mut responder = HybridResponder::new(&r_sk, &r_vk);
+
+        // msg1: I → R
+        let msg1 = initiator.create_msg1();
+        assert_eq!(msg1.hybrid_pk.len(), 1216); // 1184 ML-KEM + 32 X25519
+
+        // msg2: R → I
+        let msg2 = responder.process_msg1(&msg1).unwrap();
+        assert_eq!(msg2.hybrid_pk.len(), 1216);
+        assert_eq!(msg2.mlkem_ct.len(), 1088);
+        assert_eq!(msg2.x25519_ct.len(), 32);
+        assert!(!msg2.signature.is_empty());
+
+        // msg3: I → R (+ initiator gets session key)
+        let (msg3, i_result) = initiator.process_msg2(&msg2, &r_vk).unwrap();
+        assert_eq!(msg3.mlkem_ct.len(), 1088);
+        assert_eq!(msg3.x25519_ct.len(), 32);
+        assert!(!msg3.signature.is_empty());
+
+        // R processes msg3 (+ responder gets session key)
+        let r_result = responder.process_msg3(&msg3, &i_vk).unwrap();
+
+        // Both sides derive the same session key
+        assert_eq!(
+            i_result.session_key, r_result.session_key,
+            "hybrid session keys must match"
+        );
+
+        // Both know each other's identity
+        assert_eq!(i_result.remote_identity, r_vk);
+        assert_eq!(r_result.remote_identity, i_vk);
+    }
+
+    #[test]
+    fn test_hybrid_wrong_identity_rejected() {
+        let (i_sk, i_vk) = generate_identity();
+        let (r_sk, r_vk) = generate_identity();
+        let (_, wrong_vk) = generate_identity();
+
+        let initiator = HybridInitiator::new(&i_sk, &i_vk);
+        let mut responder = HybridResponder::new(&r_sk, &r_vk);
+
+        let msg1 = initiator.create_msg1();
+        let msg2 = responder.process_msg1(&msg1).unwrap();
+
+        // Use wrong identity to verify — should fail
+        let result = initiator.process_msg2(&msg2, &wrong_vk);
+        assert!(result.is_err(), "should reject wrong responder identity");
+    }
+
+    #[test]
+    fn test_hybrid_different_keys_per_handshake() {
+        let (i_sk, i_vk) = generate_identity();
+        let (r_sk, r_vk) = generate_identity();
+
+        // Handshake 1
+        let init1 = HybridInitiator::new(&i_sk, &i_vk);
+        let mut resp1 = HybridResponder::new(&r_sk, &r_vk);
+        let msg1_1 = init1.create_msg1();
+        let msg2_1 = resp1.process_msg1(&msg1_1).unwrap();
+        let (msg3_1, result1) = init1.process_msg2(&msg2_1, &r_vk).unwrap();
+        let _ = resp1.process_msg3(&msg3_1, &i_vk).unwrap();
+
+        // Handshake 2 (same identities, different ephemeral keys)
+        let init2 = HybridInitiator::new(&i_sk, &i_vk);
+        let mut resp2 = HybridResponder::new(&r_sk, &r_vk);
+        let msg1_2 = init2.create_msg1();
+        let msg2_2 = resp2.process_msg1(&msg1_2).unwrap();
+        let (msg3_2, result2) = init2.process_msg2(&msg2_2, &r_vk).unwrap();
+
+        assert_ne!(
+            result1.session_key, result2.session_key,
+            "different hybrid handshakes must produce different keys"
+        );
+
+        // Different msg2 ciphertexts confirm different ephemeral keys
+        assert_ne!(msg2_1.mlkem_ct, msg2_2.mlkem_ct);
+        assert_ne!(msg2_1.x25519_ct, msg2_2.x25519_ct);
+
+        // Each msg3 also unique
+        assert_ne!(msg3_1.mlkem_ct, msg3_2.mlkem_ct);
+        assert_ne!(msg3_1.x25519_ct, msg3_2.x25519_ct);
+    }
+
+    #[test]
+    fn test_hybrid_tampered_msg3_rejected() {
+        let (i_sk, i_vk) = generate_identity();
+        let (r_sk, r_vk) = generate_identity();
+
+        let initiator = HybridInitiator::new(&i_sk, &i_vk);
+        let mut responder = HybridResponder::new(&r_sk, &r_vk);
+
+        let msg1 = initiator.create_msg1();
+        let msg2 = responder.process_msg1(&msg1).unwrap();
+        let (mut msg3, _) = initiator.process_msg2(&msg2, &r_vk).unwrap();
+
+        // Tamper with ML-KEM ciphertext
+        if !msg3.mlkem_ct.is_empty() {
+            msg3.mlkem_ct[0] ^= 0xFF;
+        }
+
+        // Signature verification should fail
+        let result = responder.process_msg3(&msg3, &i_vk);
+        assert!(result.is_err(), "should reject tampered msg3");
     }
 }

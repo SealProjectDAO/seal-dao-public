@@ -23,6 +23,7 @@ seal-zk = { path = "../seal-zk" }
 seal-mpc = { path = "../seal-mpc" }
 seal-token = { path = "../seal-token" }
 seal-bridge = { path = "../seal-bridge" }
+seal-kms-sidecar = { path = "../seal-kms-sidecar", optional = true }
 libp2p = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -47,6 +48,10 @@ default = []
 # Arc<Mutex<RingtailBridgeOrchestrator>> on RpcState, network-loop
 # routing). P1#5 layer 4 — see docs/decisions/ADR-002.
 ringtail-singleton = ["seal-bridge/ringtail-singleton"]
+# KMS sidecar mode — delegate bridge signing to a Unix-socket KMS
+# instead of loading raw keys from disk. Requires both ringtail-singleton
+# for the RingtailSigner path and kms-client for the socket client.
+kms-mode = ["seal-bridge/kms-client", "seal-bridge/ringtail-singleton", "dep:seal-kms-sidecar"]
 
 [dev-dependencies]
 tempfile = { workspace = true }

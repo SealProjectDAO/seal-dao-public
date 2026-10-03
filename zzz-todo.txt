@@ -1,0 +1,504 @@
+
+WORK ON
+- Validator registration portal — referenced in TESTNET.md Phase 1 but not in apps/. Lightweight web service (form → store ML-DSA pubkey + VRF
+  pubkey).                                                                                                                                             
+- Release binaries + signed checksums — no release CI today (CLAUDE.md is explicit: shell scripts only). Need a scripts/release.sh that produces     
+  Linux x86_64 / Linux ARM64 / macOS ARM64 + SHA256 + Docker image to ghcr.io.   
+
+ignore other red items 
+
+work on 
+
+Yellow — code-side work that's not testnet-blocking but worth landing first                                                                          
+  
+  1. Stellar SDK / docker-image protocol skew (Tier-1 #2) — soroban-sdk 22 vs stellar/quickstart:latest running protocol 25. Blocks the Stellar bridge 
+  end-to-end test on a real testnet — Phase 3 stress, not Phase 1 onboarding. ~1–3 sessions.
+  2. State-sync implementation (Tier-1 #3 step 2/6+) — design doc landed (docs/STATE-SYNC.md); RPCs seal_getSnapshotManifest / seal_getSnapshotChunk / 
+  seal_listSnapshots not yet implemented. Late-joining validators in Phase 2 will need this. ~3–5 sessions.                                            
+  3. CUDA STARK bring-up (Tier-1 #1) — not testnet-blocking; just an unmeasured number for STATUS row 7/8. Run scripts/cuda-bringup.sh on the RTX 6000
+  host.   
+
+  ===
+PLAN, save plan + todos + status to repo, commitment
+confirm next todos 
+
+
+===
+
+[ **A. Desktop wallet (§1.1) — not yet.** `apps/seal-wallet/standalone.html`
+has Connect / Sign / SQL / MPC / ZK / custom-token / DEX panels but
+**no native SEAL Send form** and no `seal_transfer` call site (the
+`signedRpc` helper at `standalone.html:340-350` is wired, nothing in
+the UI drives it for a plain transfer). Tracked in TODOS.md — for now
+use path B or C below.
+] fix that ~
+
+****
+
+# Set the fee (caller must be fee_authority, signs with --key):
+seal set-transfer-fee --symbol GOLD --fee-bps 100 \
+    --node http://localhost:8545 --key creator-key.json
+
+# Rotate the fee authority to a different address:
+seal set-fee-authority --symbol GOLD --new-authority seal1xyz... \
+    --node http://localhost:8545 --key creator-key.json
+
+# Permanently lock the fee at its current value (terminal, no inverse):
+seal renounce-fee-authority --symbol GOLD \
+    --node http://localhost:8545 --key creator-key.json
+```
+==> not working 
+
+==== gain, not working
+```bash
+# Burn — auth required; caller's balance of `symbol` is destroyed,
+# total_supply decreases.
+seal rpc --node $NODE --key alice.json \
+    --method seal_burnToken --params '{"symbol":"GOLD","amount":100}'
+
+# Per-account freeze — auth required; caller must be the token's
+# freeze_authority. The address is blocked from initiating transfers.
+seal rpc --node $NODE --key creator-key.json \
+    --method seal_freezeAccount \
+    --params '{"symbol":"GOLD","address":"sealt1bob…"}'
+# Inverse:
+seal rpc --node $NODE --key creator-key.json \
+    --method seal_unfreezeAccount \
+    --params '{"symbol":"GOLD","address":"sealt1bob…"}'
+
+# Global freeze — auth required, freeze_authority-gated. When true,
+# every transfer of `symbol` rejects regardless of per-account state.
+seal rpc --node $NODE --key creator-key.json \
+    --method seal_setTokenFrozen --params '{"symbol":"GOLD","frozen":true}'
+
+# Reads (no auth):
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"seal_isFrozen",
+       "params":{"symbol":"GOLD","address":"sealt1bob…"}}' | jq
+
+# Every address frozen for this token (lex-sorted, capped at 10 000):
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"seal_listFrozenAccounts",
+       "params":{"symbol":"GOLD"}}' | jq
+
+# Inverse view — every token where this address is frozen.
+# Wallet uses this to render "you're blocked on N tokens" at sign-in.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":3,"method":"seal_listFrozenSymbolsForAddress",
+       "params":{"address":"sealt1bob…"}}' | jq
+```
+
+[ this must be fixed / 17 
+
+Register an observer (no auth today — alpha bootstrap endpoint; see
+the §17 preamble):
+
+```bash
+# Solana observer — params: {chain, rpc_url, program_id, usdc_mint?}.
+# Replace the program_id with the deployed seal-bridge Anchor program
+# id (scripts/bridge-e2e.sh deploys one and prints it).
+# `usdc_mint` (optional, base58 SPL mint): when a LockEvent's mint
+# matches, the deposit routes to WUSDC; otherwise to WSOL. The
+# canonical devnet USDC mint is
+# `Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr` — omit the field if
+# you only operate the SOL flow.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"seal_addBridgeObserver",
+       "params":{"chain":"Solana","rpc_url":"http://127.0.0.1:8899","program_id":"<deployed-program-id>","usdc_mint":"Gh9ZwEmdLJ8DscKNTkTqPbNwLNNBjuSzaG9Vp2KGtKJr"}}' | jq
+
+# Stellar observer — params: {chain, horizon_url, contract_id}.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"seal_addBridgeObserver",
+       "params":{"chain":"Stellar","horizon_url":"http://127.0.0.1:8000","contract_id":"<soroban-contract-id>"}}' | jq
+```
+
+**Per-owner gap-closer reads** (no auth, all object-param). Each
+returns the slice scoped to one address — useful for wallets asking
+"what crossed for me?" without filtering the global stream
+client-side:
+
+
+]
+
+[[ => doc is crap, give full example 
+
+### 17.2 Withdraw (auth required — the only signed bridge RPC today)
+
+`seal_bridgeWithdraw` is the one bridge method in `requires_auth`, so
+the caller's ML-DSA signature identifies whose wrapped balance to
+burn. Params:
+`{dest_chain, dest_address, token, amount}` — **`token` is required**
+and `dest_address` is the *destination-chain* pubkey (Solana
+ed25519 base58 / Stellar G-address), not a Seal address.
+
+```bash
+# Typed CLI (preferred — pairs with bridge-list-withdrawals /
+# bridge-get-withdrawal below):
+seal bridge-withdraw \
+    --dest-chain Solana \
+    --dest-address <solana-ed25519-pubkey> \
+    --token WSOL \
+    --amount 1000000 \
+    --node $NODE --key treasury.json
+# → Burned 1000000 WSOL → Solana:<pubkey>
+#   withdrawal_id: wd_sol_3
+#   Next: seal bridge-get-withdrawal --withdrawal-id wd_sol_3 ...
+
+# Generic-RPC equivalent (same request shape, manual envelope):
+seal rpc --node $NODE --key treasury.json \
+  --method seal_bridgeWithdraw \
+  --params '{"dest_chain":"Solana","dest_address":"<solana-ed25519-pubkey>","token":"WSOL","amount":1000000}'
+# → {"withdrawal_id":"wd_sol_3", "caller":"sealt1…"}
+```
+
+**Expected:** `minted_on_seal <= locked_on_source` invariant always
+holds; withdrawals above the caller's wrapped balance fail; to a
+paused chain fail with `ChainPaused`. Confirm via `seal_getBridgeStatus`
+(§17.1) — the invariant and `paused_chains` are both surfaced there.
+
+**Reverse-claim handoff (committee signature pickup):** the
+on-chain `unlock_tokens(amount, nonce, signature)` ix consumes
+three fields the burn produced. Fetch them via the typed CLI or
+the unauth RPCs:
+
+```bash
+# Typed (one-liner):
+seal bridge-get-withdrawal --withdrawal-id wd_sol_3 --node $NODE
+
+# All pending withdrawals (optional chain filter):
+seal bridge-list-withdrawals --chain Solana --node $NODE
+
+# Generic-RPC equivalents:
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"seal_getBridgeWithdrawal",
+       "params":{"withdrawal_id":"wd_sol_3"}}' | jq
+
+# Global list with optional `chain` filter. Same envelope per
+# entry. Both named ({chain:"Solana"}) and positional (["Solana"])
+# param shapes are accepted.
+curl -s -X POST $NODE -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"seal_listBridgeWithdrawals",
+       "params":{"chain":"Solana"}}' | jq
+```
+
+Each record carries
+`{id, nonce, dest_chain, dest_address, seal_address, amount, token,
+committee_signature_hex, executed}`. `committee_signature_hex` is
+`null` until a committee signature is attached — populated
+immediately on burn when seal-node was started with
+`--bridge-committee-key` (single-validator testnet path), or
+later via the multi-validator Ringtail aggregate path.
+
+For the canonical bytes the on-chain `verify_committee_sig`
+recomputes:
+
+| Chain | Payload | Output |
+|---|---|---|
+| Solana | `recipient_pubkey(32) ‖ amount_le(8) ‖ nonce_le(8) ‖ "seal-bridge-solana-v1"` | HMAC-SHA-256 over `committee_key` |
+| Stellar | `Address::to_xdr(32–44 bytes) ‖ amount_be_16 ‖ nonce_be_8 ‖ "seal-bridge-stellar-v1"` | HMAC-SHA-256 over `committee_key` |
+
+`committee_key` is set per seal-node via `--bridge-committee-key
+<64-hex-chars>` and MUST match the value the on-chain bridge program
+was initialized with (Solana `BridgeState::committee_key`, Stellar
+`brkey` storage slot). Rotate via the on-chain `rotate_committee_key`
+ix + the host-side `seal_bridgeRotateCommitteeKey` RPC
+(council-gated; persists atomically to
+`<data_dir>/bridge-committee-key.hex` so seal-node restart no longer
+reverts the rotation). See §17.3 for the host-side recipe.
+
+**Claim the unlock on the destination chain.** Once
+`committee_signature_hex` is populated, hand the (amount, nonce,
+signature) tuple to the destination-chain unlock ix. The Anchor /
+Soroban programs recompute the canonical bytes from the table
+above and accept iff the bytes match.
+
+```bash
+# Solana — `anchor run unlock-tokens` (wraps the Solana ix; uses
+# the deployer keypair as authority). recipient_ata + vault_ata are
+# the SPL token accounts for the unlock recipient and the bridge
+# vault PDA respectively.
+JSON=$(seal bridge-get-withdrawal --withdrawal-id wd_sol_3 --node $NODE)
+NONCE=$(echo "$JSON" | jq -r '.withdrawal.nonce')
+SIG=$(echo "$JSON" | jq -r '.withdrawal.committee_signature_hex')
+cd bridges/solana
+anchor run unlock-tokens -- \
+  --amount 1000000 --nonce "$NONCE" --signature "$SIG" \
+  --recipient <solana-ed25519-pubkey> \
+  --recipient-ata <spl-token-account> \
+  --vault-ata $(anchor run derive-vault-ata -- --mint <mint> | awk '/vault ATA:/ {print $3}') \
+  --authority <authority-pubkey>
+
+# Stellar — `stellar contract invoke -- unlock_xlm`. recipient is the
+# G-address that receives the released XLM; proof = committee_signature_hex.
+stellar contract invoke --id "$(cat bridges/.stellar-testnet-contract-id)" \
+  --source seal-bridge-deployer --network testnet \
+  -- unlock_xlm \
+  --recipient <G-address> --amount 1000000 \
+  --nonce "$NONCE" --proof "$SIG"
+```
+
+**Expected:** Anchor rejects with `InvalidSignature` if any byte
+of the canonical payload disagrees (most common cause: pubkey-vs-
+ATA confusion on Solana, or byte-order on Stellar). Soroban rejects
+with `InvalidProof`. Replay attempts (same nonce twice) reject
+with `AlreadyClaimed` on either chain.
+
+
+]]
+
+==== 19.3 is it wokring???
+
+bash-3.2$ cargo run -p seal-cli -- rpc --node $NODE --key alice.json \
+>     --method seal_cancelOrder \
+>     --params '{"pair":"GOLD/SEAL","order_id":1}'
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.74s
+     Running `target/debug/seal rpc --node 'http://localhost:8545' --key alice.json --method seal_cancelOrder --params '{"pair":"GOLD/SEAL","order_id":1}'`
+RPC error (-32000): order 1 not found
+bash-3.2$ cargo run -p seal-cli -- rpc --node $NODE --key alice.json     --method seal_cancelOrder     --params '{"pair":"GOLD/SEAL","order_id":2}
+'
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.42s
+     Running `target/debug/seal rpc --node 'http://localhost:8545' --key alice.json --method seal_cancelOrder --params '{"pair":"GOLD/SEAL","order_id":2}'`
+RPC error (-32000): order 2 not found
+bash-3.2$ 
+
+===
+
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.69s
+     Running `target/debug/seal rpc --node 'http://localhost:8545' --key alice.json --method seal_govPropose --params '{"track":"treasury_small","title":"Bootstrap grant","payload":"{\"amount\":1000}"}'`
+{
+  "proposal_id": 0,
+  "start_epoch": 7,
+  "track": "TreasurySmall"
+}
+bash-3.2$ cargo run -p seal-cli -- rpc --node $NODE --key alice.json \
+>     --method seal_govVote \
+>     --params '{"proposal_id":1,"choice":"aye","stake":1000,"conviction":"x3"}'
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.61s
+     Running `target/debug/seal rpc --node 'http://localhost:8545' --key alice.json --method seal_govVote --params '{"proposal_id":1,"choice":"aye","stake":1000,"conviction":"x3"}'`
+
+19.45 / proposal id ~> chain properly in teh examples
+
+bash-3.2$ cargo run -p seal-cli -- rpc --node $NODE --key alice.json \
+>     --method seal_govDelegate \
+>     --params '{"track":"treasury_small","delegate":"sealt1…real-address…","weight":1000}'
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.63s
+     Running `target/debug/seal rpc --node 'http://localhost:8545' --key alice.json --method seal_govDelegate --params '{"track":"treasury_small","delegate":"sealt1…real-address…","weight":1000}'`
+{
+  "ok": true
+}
+bash-3.2$ 
+==> we should check the address
+
+description is void??? i.e. ""
+
+bash-3.2$ curl -s -X POST $NODE -H 'content-type: application/json' \
+>   -d '{"jsonrpc":"2.0","id":3,"method":"seal_govGetVotes","params":{"proposal_id":0}}' | jq
+{
+  "jsonrpc": "2.0",
+  "result": {
+    "votes": []
+  },
+  "id": 3
+}
+bash-3.2$ 
+WHERE IS ALICE VOTE????
+
+
+Runtime execution still surfaces `LanguageNotImplemented` because
+`wasmtime` isn't yet vendored in this workspace; validation gates
+malformed bytecode out of the chain ahead of that wiring. Wire-up
+plan: add `WasmtimeProcEngine` once the dep lands; current
+`wasm_validate.rs` is the validation surface that engine will import.
+<== we need proper examples with cli etc.
+
+[
+What this *doesn't* do: the n-of-n full path with smudging on still
+breaks byte-equality (`full_single_signer_smudging_breaks_byte_equality`
+documents this boundary). The round-1 / round-2 / aggregate API now
+exposes the rounding hook and the Lagrange combiner needed to close
+that — wiring `DROP_BITS > 0` end-to-end is a follow-up that has to
+re-derive the noise budget from the audit's σ targets.
+
+Migration of `CommitteeManager` (the simplified one-shot path) to
+`CommitteeManagerFull` happens at the consensus-runner integration
+layer; both APIs ship in parallel until the cut-over.
+
+] fix??
+
+====
+
+bash-3.2$ cd bridges/solana/programs/seal-bridge
+bash-3.2$ anchor build --features ringtail-verify
+error: unexpected argument '--features' found
+
+  tip: to pass '--features' as a value, use '-- --features'
+
+Usage: anchor build [OPTIONS] [-- <CARGO_ARGS>...]
+
+For more information, try '--help'.
+
+
+Usage: anchor build [OPTIONS] [-- <CARGO_ARGS>...]
+
+For more information, try '--help'.
+bash-3.2$ anchor build -- --features ringtail-verify
+[2026-05-18T06:29:29.275372000Z ERROR cargo_build_sbf] Failed to obtain package metadata: `cargo metadata` exited with an error: error: no matching package named `anchor-lang` found
+    location searched: directory source `/Users/bechaderenaud/work/seal/seal-dao-master/vendor` (which is replacing registry `crates-io`)
+    required by package `seal-bridge v0.1.0 (/Users/bechaderenaud/work/seal/seal-dao-master/bridges/solana/programs/seal-bridge)`
+    
+bash-3.2$ 
+
+not good
+
+
+26.2 => fail to connect
+
+bash-3.2$ cargo run -p seal-cli -- snapshots --node http://localhost:8545
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.63s
+     Running `target/debug/seal snapshots --node 'http://localhost:8545'`
+snapshots failed: connect: Connection refused (os error 61)
+bash-3.2$ cargo run -p seal-cli -- snapshots --limit 5
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.21s
+     Running `target/debug/seal snapshots --limit 5`
+snapshots failed: connect: Connection refused (os error 61)
+
+26.3
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 243 filtered out; finished in 0.77s
+
+bash-3.2$ HEIGHT=$(curl -s -X POST http://localhost:8545 \
+>     -H 'Content-Type: application/json' \
+>     -d '{"jsonrpc":"2.0","method":"seal_listSnapshots","params":{"limit":1},"id":1}' \
+>     | jq -r '.result.snapshots[0].height')
+bash-3.2$ cargo run -p seal-cli -- snapshot-manifest --height $HEIGHT
+cargo run -p seal-cli -- snapshot-manifest --height $HEIGHT --json | jq '.chunks | length'
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.80s
+     Running `target/debug/seal snapshot-manifest --height null`
+--height must be a positive integer
+bash-3.2$ cargo run -p seal-cli -- snapshot-manifest --height $HEIGHT --json | jq '.chunks | length'
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.20s
+     Running `target/debug/seal snapshot-manifest --height null --json`
+--height must be a positive integer
+bash-3.2$ 
+
+=== resally not clear wtf it is doing and what HEIGHT to use
+
+
+### 26.3 `seal_getSnapshotManifest` (operator UX)
+
+```bash
+HEIGHT=$(curl -s -X POST http://localhost:8545 \
+    -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","method":"seal_listSnapshots","params":{"limit":1},"id":1}' \
+    | jq -r '.result.snapshots[0].height')
+cargo run -p seal-cli -- snapshot-manifest --height $HEIGHT
+cargo run -p seal-cli -- snapshot-manifest --height $HEIGHT --json | jq '.chunks | length'
+```
+
+**Expected:** Summary block shows `state_root /
+tip_block_hash / manifest_hash / total_bytes / chunk_count`
+plus a chunk preview (first 8 + last 4 with `…` elision when
+>12 chunks). `--json` returns the raw RPC response for piping
+into the chunk-fetch loop.
+
+**Negative tests** (refuses pruned manifests):
+- Pick a `height` not in the retained roster → `-32004`
+  `snapshot at height N not retained`.
+- Pick a height whose snapshot the live state has moved past
+  (rare; race a query past the next epoch boundary) →
+  `-32005` with `live state_root … no longer matches snapshot
+  state_root …`.
+
+### 26.4 `seal_getSnapshotChunk` (operator UX)
+
+```bash
+cargo run -p seal-cli -- snapshot-chunk --height $HEIGHT --index 0
+cargo run -p seal-cli -- snapshot-chunk --height $HEIGHT --index 0 --out chunk0.bin
+```
+
+**Expected:** Prints `claimed_hash` (server-reported) +
+`recomputed_hash` (fresh local SHA3) + `(MATCH)`. The CLI
+exits 0 on MATCH, 2 on MISMATCH (the "host moved on
+mid-stream" signal). `--out chunk0.bin` writes the raw chunk
+bytes for offline diff against another peer.
+
+**Negative test:** `--index <chunk_count>` → `-32007`
+`chunk_index N out of range (snapshot has M chunks)`.
+
+### 26.5 `--bootstrap-from-snapshot` late-joiner (smoke owed)
+
+The full multi-node smoke (a fresh node converging against a
+2-node testnet without genesis-replay) is documented but not
+yet run on this dev machine — see the coverage note at the
+top. The intended invocation:
+
+```bash
+# On peer A (already at height >= 1 with at least one epoch
+# boundary crossed):
+cargo run -p seal-node -- --slots 0 --rpc-port 8545 --port 4001
+
+# On peer B (fresh):
+cargo run -p seal-node -- --slots 0 \
+    --rpc-port 8546 --port 4002 \
+    --bootstrap-peers /ip4/127.0.0.1/tcp/4001 \
+    --bootstrap-from-snapshot http://127.0.0.1:8545
+```
+
+**Expected log on peer B:**
+```
+Bootstrap-from-snapshot: connecting to http://127.0.0.1:8545…
+Bootstrap-from-snapshot: replayed N bytes across M chunk(s)
+  height = H, epoch = E, state_root = …
+Bootstrap-from-snapshot: balances populated, K account(s) live
+```
+
+
+### 26.6 Explorer surface
+
+`apps/seal-explorer-web/index.html` gained a **State Snapshots**
+section between Namespaces and Tokens. Live-refreshes on the
+2 s tick, sig-skipped to avoid re-rendering on idle ticks.
+Older nodes without the RPC silently render an empty section
+— the chain itself stays functional.
+
+```bash
+# Same drill as §3.1 for explorer-web setup, then visit:
+#   http://localhost:8000/?rpc=http://localhost:8545
+```
+=> json output only???
+
+27.X
+ergonomics are shit => must do better
+
+
+# Sign the canonical message manually (until `seal
+# register-validator` lands — see TESTNET-REGISTRATION.md
+# for the recipe). Easiest path: drive it through Rust:
+SIG=$(cargo run --quiet -p seal-cli -- rpc \
+    --node "irrelevant" --method "irrelevant" --params '{}' --key /tmp/reg-test.json \
+    --print-sig-only 2>/dev/null || echo "manual-sig-needed")
+
+  # OR construct the request body in a tiny Python helper:
+python3 - <<'PY'
+import json, hashlib
+# (driver code that builds the message bytes, signs via a
+#  Python ML-DSA binding or shells out to seal-cli; see
+#  docs/TESTNET-REGISTRATION.md for the canonical recipe.)
+PY
+
+incomplete code WTF bro???
+
+incomplete example anyway => 
+bash-3.2$ curl http://127.0.0.1:8547/registrations | jq
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+100    30  100    30    0     0  15723      0 --:--:-- --:--:-- --:--:-- 30000
+{
+  "count": 0,
+  "registrations": []
+}
++ registration data persistance and manual delete by admin ~
+
+private key MUST be encrypted
+
+how are user names stored in tar files ...

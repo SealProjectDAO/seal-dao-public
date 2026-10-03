@@ -43,7 +43,7 @@ export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.0.12077973
 - Sign messages with ML-DSA-65
 - Verify signatures
 - Export recovery phrase
-- Dark theme matching seal-dao.network
+- Dark theme matching renoir42.com
 
 ## Running on Emulator
 

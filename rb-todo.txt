@@ -1,0 +1,5 @@
+
+=> all tests / testnet
+=> governance & bridge
+=> key payment, bring your own node infra
+=> legal: limit what can be done for all + node identification ~

@@ -19,6 +19,7 @@ members = [
     "crates/seal-mpc",
     "crates/seal-procs",
     "crates/seal-bridge",
+    "crates/seal-kms-sidecar",
     "crates/seal-wallet",
     "crates/seal-tee",
     "crates/seal-node",
@@ -35,7 +36,7 @@ members = [
     "examples/seal-kindle",
     "apps/seal-faucet",
     "apps/seal-registration",
-    "apps/seal-relayer",
+    "apps/seal-relayer", "crates/seal-provisioner",
 ]
 
 [workspace.package]
@@ -55,6 +56,10 @@ pqcrypto-dilithium = "0.5"
 pqcrypto-kyber = "0.8"
 pqcrypto-traits = "0.3"
 sha3 = "0.10"
+x25519-dalek = "2"
+curve25519-dalek = "4"
+hmac = "0.12"
+sha2 = "0.10"
 
 # SQL
 sqlparser = { version = "0.53", features = ["visitor"] }

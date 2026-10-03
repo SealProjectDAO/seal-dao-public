@@ -10,18 +10,24 @@
 # invocation that captures the IDs and prints them back in env-var
 # form for the operator to paste into systemd / docker-compose.
 #
-# Usage:
+# Usage (GPG-wrapped keys):
+#   scripts/solana-gpg-wrapper.sh install && scripts/stellar-gpg-wrapper.sh install
 #   ./scripts/bridge-deploy-devnet.sh \
-#       --solana-keypair $HOME/.config/solana/id.json \
-#       --stellar-account G... \
+#       --solana-keypair ~/.config/solana/id.json \
+#       --stellar-account "$(scripts/stellar-gpg-wrapper.sh keys address seal-bridge-deployer --network testnet)" \
 #       --seal-rpc http://127.0.0.1:8645
+#   scripts/solana-gpg-wrapper.sh wipe && scripts/stellar-gpg-wrapper.sh wipe
+#
+# Before running: generate deployer keys (see docs/RUNBOOK-TESTNET-OPERATOR.md §0):
+#   solana-keygen new --no-passphrase --outfile ~/.config/solana/id.json
+#   solana config set --url https://api.devnet.solana.com
+#   solana airdrop 2 "$(solana address)"
+#   stellar keys generate seal-bridge-deployer
+#   stellar keys fund seal-bridge-deployer --network testnet
 #
 # Required:
-#   --solana-keypair <path>   Funded Solana devnet keypair (use
-#                             `solana airdrop 2 <pubkey> --url devnet`
-#                             via scripts/bridge-faucet.sh sol).
-#   --stellar-account <G..>   Funded Stellar testnet account (use
-#                             scripts/bridge-faucet.sh xlm <G..>).
+#   --solana-keypair <path>   Funded Solana devnet keypair.
+#   --stellar-account <G-addr> Funded Stellar testnet account (G-... prefix).
 #   --seal-rpc <url>          Where to call seal_addBridgeObserver.
 #                             Defaults to http://127.0.0.1:8645
 #                             (bridge stack — validator stack uses

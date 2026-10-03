@@ -24,13 +24,13 @@
 //! 4. Persist the highest withdrawal-id seen + executed to the
 //!    cursor file so restarts don't re-process the entire log.
 //!
-//! # Chain submission (next commit)
+//! # Chain submission
 //!
-//! This scaffold lands the loop with `--dry-run` only — actual
-//! `anchor run unlock-tokens` / `stellar contract invoke -- unlock_xlm`
-//! submission is wired in a follow-up commit (P1#3 #4). The dry-run
-//! mode is useful in production today to verify the loop sees the
-//! right withdrawals before flipping on real submission.
+//! Stellar: shells out to `stellar contract invoke ... unlock_xlm` /
+//! `unlock_usdc`. Solana: shells out to `anchor run unlock-tokens`
+//! with per-token (mint, vault_ATA) config. Per-validator deterministic
+//! back-off distributes gas cost across validators; idempotent
+//! mark-executed prevents double-payment.
 //!
 //! # Usage
 //!

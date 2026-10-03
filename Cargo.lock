@@ -1089,8 +1089,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c673075a2e0e5f4a1dde27ce9dee1ea4558c7ffe648f576438a20ca1d2acc4b0"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -6597,6 +6599,7 @@ dependencies = [
  "proptest",
  "reqwest",
  "seal-crypto",
+ "seal-kms-sidecar",
  "seal-ringtail-verify",
  "seal-threshold",
  "seal-token",
@@ -6659,6 +6662,7 @@ name = "seal-crypto"
 version = "0.1.0"
 dependencies = [
  "borsh",
+ "curve25519-dalek",
  "hex",
  "libcrux-ml-dsa",
  "libcrux-ml-kem",
@@ -6668,6 +6672,7 @@ dependencies = [
  "sha3",
  "subtle",
  "thiserror 2.0.18",
+ "x25519-dalek",
  "zeroize",
 ]
 
@@ -6708,6 +6713,26 @@ dependencies = [
  "seal-crypto",
  "seal-sql",
  "serde",
+]
+
+[[package]]
+name = "seal-kms-sidecar"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac",
+ "rand 0.8.5",
+ "seal-crypto",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sha3",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.23",
+ "zeroize",
 ]
 
 [[package]]
@@ -6769,6 +6794,7 @@ dependencies = [
  "seal-bridge",
  "seal-consensus",
  "seal-crypto",
+ "seal-kms-sidecar",
  "seal-merkle",
  "seal-mpc",
  "seal-p2p",
@@ -6825,6 +6851,22 @@ dependencies = [
  "sha3",
  "thiserror 2.0.18",
  "wasmparser",
+]
+
+[[package]]
+name = "seal-provisioner"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -6922,6 +6964,7 @@ dependencies = [
  "rand 0.8.5",
  "seal-crypto",
  "serde",
+ "sha3",
  "subtle",
  "thiserror 2.0.18",
  "zeroize",
@@ -9177,6 +9220,7 @@ dependencies = [
  "getrandom 0.4.2",
  "js-sys",
  "md-5",
+ "serde_core",
  "sha1_smol",
  "wasm-bindgen",
 ]

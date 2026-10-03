@@ -33,6 +33,8 @@ use seal_bridge::{
 };
 use seal_token::orderbook::DexManager;
 use seal_token::tokens::TokenManager;
+use std::process::Stdio;
+use tokio::process::Command;
 
 /// RPC server configuration.
 #[derive(Clone, Debug)]
@@ -124,6 +126,11 @@ pub struct RpcConfig {
     /// — see `verify_admin_multisig`. Defaults to 0 so existing
     /// configs aren't broken.
     pub admin_threshold: usize,
+    /// Chain relay configuration for `seal_bridgeWithdrawAndClaim`.
+    /// When `Some`, the handler attempts synchronous unlock submission
+    /// on the destination chain (Solana / Stellar). `None` = fall back
+    /// to the polling relayer for unlock submissions.
+    pub chain_relay: Option<ChainRelayConfig>,
 }
 
 impl Default for RpcConfig {
@@ -144,8 +151,238 @@ impl Default for RpcConfig {
             rpm_admin: 5,
             bridge_withdrawal_fee: 0,
             admin_threshold: 0,
+            chain_relay: None,
         }
     }
+}
+
+/// Chain relay configuration — mirrors the seal-relayer's config so the
+/// RPC layer can dispatch unlock submissions inline (for
+/// `seal_bridgeWithdrawAndClaim`). Empty fields mean "don't relay on
+/// this chain" — the handler falls back to just returning the
+/// withdrawal_id.
+#[derive(Clone, Debug, Default)]
+pub struct ChainRelayConfig {
+    pub solana_program_id: Option<String>,
+    pub solana_cluster: Option<String>,
+    pub solana_wallet: Option<String>,
+    pub solana_authority: Option<String>,
+    pub solana_anchor_dir: Option<String>,
+    pub solana_mint_wsol: Option<String>,
+    pub solana_vault_ata_wsol: Option<String>,
+    pub solana_mint_wusdc: Option<String>,
+    pub solana_vault_ata_wusdc: Option<String>,
+    pub stellar_contract_id: Option<String>,
+    pub stellar_source: Option<String>,
+    pub stellar_network: Option<String>,
+    pub stellar_contract_dir: Option<String>,
+}
+
+/// Submit an unlock on the destination chain (Solana or Stellar) by
+/// shelling out to the same CLIs the relayer uses (`anchor` /
+/// `stellar`). Returns the destination-chain tx hash on success.
+async fn dispatch_chain_unlock(
+    cfg: &ChainRelayConfig,
+    _withdrawal_id: &str,
+    dest_chain: &str,
+    dest_address: &str,
+    amount: u64,
+    nonce: u64,
+    token: &str,
+    committee_signature_hex: &str,
+) -> Result<Option<String>, String> {
+    match dest_chain {
+        "Solana" => dispatch_solana_unlock(cfg, dest_address, amount, nonce, token, committee_signature_hex).await,
+        "Stellar" => dispatch_stellar_unlock(cfg, dest_address, amount, nonce, token, committee_signature_hex).await,
+        other => Err(format!("unrecognized chain: {other}")),
+    }
+}
+
+async fn dispatch_solana_unlock(
+    cfg: &ChainRelayConfig,
+    dest_address: &str,
+    amount: u64,
+    nonce: u64,
+    token: &str,
+    committee_signature_hex: &str,
+) -> Result<Option<String>, String> {
+    let (mint, vault_ata) = match token {
+        "WSOL" => match (&cfg.solana_mint_wsol, &cfg.solana_vault_ata_wsol) {
+            (Some(m), Some(v)) => (m.clone(), v.clone()),
+            _ => return Err("solana WSOL not configured".into()),
+        },
+        "WUSDC" => match (&cfg.solana_mint_wusdc, &cfg.solana_vault_ata_wusdc) {
+            (Some(m), Some(v)) => (m.clone(), v.clone()),
+            _ => return Err("solana WUSDC not configured".into()),
+        },
+        other => return Err(format!("unsupported solana token: {other}")),
+    };
+
+    // Derive recipient ATA pubkey via spl-token (deterministic; does
+    // not contact the chain).
+    let recipient_ata = derive_solana_ata(&mint, dest_address).await?;
+
+    let anchor_dir = cfg.solana_anchor_dir.as_deref().unwrap_or("bridges/solana");
+    let cluster = cfg.solana_cluster.as_deref().unwrap_or("devnet");
+    let wallet = cfg.solana_wallet.as_deref().ok_or("solana wallet not configured")?;
+    let authority = cfg.solana_authority.as_deref().ok_or("solana authority not configured")?;
+    let program_id = cfg.solana_program_id.as_deref().ok_or("solana program-id not configured")?;
+
+    let mut cmd = Command::new("anchor");
+    cmd.current_dir(anchor_dir)
+        .arg("run")
+        .arg("unlock-tokens")
+        .arg("--")
+        .arg("--amount")
+        .arg(amount.to_string())
+        .arg("--nonce")
+        .arg(nonce.to_string())
+        .arg("--signature")
+        .arg(committee_signature_hex)
+        .arg("--recipient")
+        .arg(dest_address)
+        .arg("--recipient-ata")
+        .arg(&recipient_ata)
+        .arg("--vault-ata")
+        .arg(&vault_ata)
+        .arg("--authority")
+        .arg(authority)
+        .arg("--program-id")
+        .arg(program_id)
+        .arg("--provider.cluster")
+        .arg(cluster)
+        .arg("--provider.wallet")
+        .arg(wallet)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = cmd.output().await.map_err(|e| format!("spawn anchor: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("anchor unlock failed (exit {}): {}", output.status.code().unwrap_or(-1), stderr.lines().take(5).collect::<Vec<_>>().join("\n")));
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(parse_tx_hash_from_text(&text))
+}
+
+async fn dispatch_stellar_unlock(
+    cfg: &ChainRelayConfig,
+    dest_address: &str,
+    amount: u64,
+    nonce: u64,
+    token: &str,
+    committee_signature_hex: &str,
+) -> Result<Option<String>, String> {
+    let unlock_fn = match token {
+        "WXLM" => "unlock_xlm",
+        "WUSDC" => "unlock_usdc",
+        other => return Err(format!("unsupported stellar token: {other}")),
+    };
+
+    let contract_dir = cfg.stellar_contract_dir.as_deref().unwrap_or("bridges/stellar");
+    let network = cfg.stellar_network.as_deref().unwrap_or("testnet");
+    let contract_id = cfg.stellar_contract_id.as_deref().ok_or("stellar contract-id not configured")?;
+    let source = cfg.stellar_source.as_deref().ok_or("stellar source not configured")?;
+
+    let mut cmd = Command::new("stellar");
+    cmd.current_dir(contract_dir)
+        .arg("contract")
+        .arg("invoke")
+        .arg("--id")
+        .arg(contract_id)
+        .arg("--source")
+        .arg(source)
+        .arg("--network")
+        .arg(network)
+        .arg("--")
+        .arg(unlock_fn)
+        .arg("--recipient")
+        .arg(dest_address)
+        .arg("--amount")
+        .arg(amount.to_string())
+        .arg("--nonce")
+        .arg(nonce.to_string())
+        .arg("--proof")
+        .arg(committee_signature_hex)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let output = cmd.output().await.map_err(|e| format!("spawn stellar: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("stellar unlock failed (exit {}): {}", output.status.code().unwrap_or(-1), stderr.lines().take(5).collect::<Vec<_>>().join("\n")));
+    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(parse_tx_hash_from_text(&text))
+}
+
+/// Derive recipient ATA pubkey via spl-token CLI (deterministic; does
+/// not contact the chain). Mirrors the relayer's `derive_solana_ata`.
+async fn derive_solana_ata(mint: &str, owner: &str) -> Result<String, String> {
+    let output = Command::new("spl-token")
+        .arg("address")
+        .arg("--token")
+        .arg(mint)
+        .arg("--owner")
+        .arg(owner)
+        .arg("--verbose")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| format!("spawn spl-token: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("spl-token address failed: {stderr}"));
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("Associated token address:") {
+            return Ok(rest.trim().to_string());
+        }
+    }
+    Err(format!(
+        "spl-token address did not emit 'Associated token address:' line; stdout was:\n{text}"
+    ))
+}
+
+/// Extract a transaction hash from CLI output text. Works for both
+/// Solana and Stellar formats.
+fn parse_tx_hash_from_text(text: &str) -> Option<String> {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        // Stellar-style: "Transaction hash is abc..." or "tx hash: abc"
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.contains("transaction hash") || lower.contains("tx hash") {
+            for tok in trimmed.split_whitespace().rev() {
+                let tok = tok.trim_end_matches(|c: char| !c.is_ascii_alphanumeric());
+                if tok.len() >= 16 && tok.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Some(tok.to_string());
+                }
+            }
+        }
+        // Solana-style: "Tx: sig..." or "Signature: sig..."
+        for prefix in ["Tx:", "Signature:", "tx:", "signature:"] {
+            if let Some(rest) = trimmed.strip_prefix(prefix) {
+                let tok = rest.trim();
+                if !tok.is_empty() {
+                    let first = tok.split_whitespace().next().unwrap_or("");
+                    if !first.is_empty() {
+                        return Some(first.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Enforce the recipient-new-account policy. Returns Ok if the
@@ -261,6 +498,7 @@ pub fn rpc_group_for_method(method: &str) -> RpcGroup {
     match method {
         "seal_submitSql"
         | "seal_bridgeWithdraw"
+        | "seal_bridgeWithdrawAndClaim"
         | "seal_bridgeMarkExecuted"
         | "seal_transfer"
         | "seal_transferToken"
@@ -462,7 +700,18 @@ pub async fn start_rpc_server(
         start_time: std::time::Instant::now(),
         bridge,
         observers: Arc::new(Mutex::new(BridgeObserverSet::new())),
-        council: Arc::new(Mutex::new(TechnicalCouncil::new())),
+        council: Arc::new(Mutex::new({
+            let council = if let Some(ref dir) = data_dir {
+                let path = dir.join("council.json");
+                TechnicalCouncil::load_from_file(&path).unwrap_or_else(|e| {
+                    warn!("could not load council from {}: {e}; starting empty", path.display());
+                    TechnicalCouncil::new()
+                })
+            } else {
+                TechnicalCouncil::new()
+            };
+            council
+        })),
         faucet_drips: Arc::new(Mutex::new(std::collections::HashMap::new())),
         data_dir,
         #[cfg(feature = "ringtail-singleton")]
@@ -644,6 +893,7 @@ fn requires_auth(method: &str) -> bool {
             // Bridge mutations require a signed sender so we know whose
             // wrapped balance to burn when they initiate a withdrawal.
             | "seal_bridgeWithdraw"
+            | "seal_bridgeWithdrawAndClaim"
             // Relayer mark-executed: validator pubkey signs the
             // request; the handler additionally checks the caller's
             // address is in the active validator set (P1#3 per-
@@ -902,6 +1152,9 @@ async fn handle_rpc(
         "seal_getSnapshotChunk" => handle_get_snapshot_chunk(&state, &req.params).await,
         "seal_getNodeInfo" => handle_get_node_info(&state).await,
 
+        // Genesis config (read-only, no auth)
+        "seal_getGenesis" => handle_get_genesis(&state).await,
+
         // Private tables
         "seal_createPrivateTable" => {
             handle_create_private_table(&state, &req.params, caller_addr.unwrap_or("anonymous"))
@@ -920,6 +1173,9 @@ async fn handle_rpc(
         }
         "seal_zkProve" => {
             handle_zk_prove(&state, &req.params, caller_addr.unwrap_or("anonymous")).await
+        }
+        "seal_submitProof" => {
+            handle_submit_proof(&state, &req.params, caller_addr.unwrap_or("anonymous")).await
         }
 
         // Token operations
@@ -1065,6 +1321,10 @@ async fn handle_rpc(
         }
         "seal_bridgeWithdraw" => {
             handle_bridge_withdraw(&state, &req.params, caller_addr.unwrap_or("anonymous")).await
+        }
+        "seal_bridgeWithdrawAndClaim" => {
+            handle_bridge_withdraw_and_claim(&state, &req.params, caller_addr.unwrap_or("anonymous"))
+                .await
         }
         "seal_bridgeMarkExecuted" => {
             handle_bridge_mark_executed(&state, &req.params, caller_addr.unwrap_or("anonymous"))
@@ -1884,6 +2144,88 @@ async fn handle_zk_prove(
         "prover": "stub (SHA3 commitment — production: STARK via RISC Zero or SP1)",
         "caller": caller,
     }))
+}
+
+async fn handle_submit_proof(
+    state: &RpcState,
+    params: &serde_json::Value,
+    caller: &str,
+) -> Result<serde_json::Value, (i32, String)> {
+    use seal_crypto::hash::sha3_256;
+    use seal_zk::traits::ZkProof as ZkProofTrait;
+
+    let proof_hex = params
+        .get("proof")
+        .and_then(|v| v.as_str())
+        .ok_or((-32602, "missing 'proof' param (hex-encoded proof bytes)".into()))?;
+
+    let proof_bytes = hex::decode(proof_hex).map_err(|e| {
+        (-32602, format!("invalid 'proof' hex: {e}"))
+    })?;
+
+    // Deserialize public inputs from params
+    let pre_root_hex = params
+        .get("pre_state_root")
+        .and_then(|v| v.as_str())
+        .ok_or((-32602, "missing 'pre_state_root' param".into()))?;
+    let post_root_hex = params
+        .get("post_state_root")
+        .and_then(|v| v.as_str())
+        .ok_or((-32602, "missing 'post_state_root' param".into()))?;
+    let block_height = params
+        .get("block_height")
+        .and_then(|v| v.as_u64())
+        .ok_or((-32602, "missing 'block_height' param".into()))?;
+    let tx_count = params
+        .get("tx_count")
+        .and_then(|v| v.as_u64())
+        .ok_or((-32602, "missing 'tx_count' param".into()))?;
+    let tx_hash_hex = params
+        .get("tx_hash")
+        .and_then(|v| v.as_str())
+        .ok_or((-32602, "missing 'tx_hash' param".into()))?;
+
+    let pre_root_bytes = hex::decode(pre_root_hex).map_err(|e| {
+        (-32602, format!("invalid 'pre_state_root' hex: {e}"))
+    })?;
+    let post_root_bytes = hex::decode(post_root_hex).map_err(|e| {
+        (-32602, format!("invalid 'post_state_root' hex: {e}"))
+    })?;
+    let tx_hash_bytes = hex::decode(tx_hash_hex).map_err(|e| {
+        (-32602, format!("invalid 'tx_hash' hex: {e}"))
+    })?;
+
+    let pre_root = sha3_256(&pre_root_bytes);
+    let post_root = sha3_256(&post_root_bytes);
+    let tx_hash = sha3_256(&tx_hash_bytes);
+
+    let zk_proof = ZkProofTrait {
+        bytes: proof_bytes,
+        public_inputs: seal_zk::traits::StateTransition {
+            pre_state_root: pre_root,
+            post_state_root: post_root,
+            block_height,
+            tx_count: tx_count as u32,
+            tx_hash,
+        },
+    };
+
+    let node = state.node.lock().await;
+    let result = node.runner.verify_proof(&zk_proof);
+    drop(node);
+
+    match result {
+        Ok(()) => Ok(serde_json::json!({
+            "verified": true,
+            "block_height": zk_proof.public_inputs.block_height,
+            "pre_state_root": hex::encode(zk_proof.public_inputs.pre_state_root.0),
+            "post_state_root": hex::encode(zk_proof.public_inputs.post_state_root.0),
+            "proof_size": zk_proof.size(),
+            "verifier": "stub (production: backend-specific)",
+            "caller": caller,
+        })),
+        Err(e) => Err((-32000, format!("proof verification failed: {e}"))),
+    }
 }
 
 // ─── Private Table Handlers ─────────────────────────
@@ -3850,6 +4192,137 @@ async fn handle_bridge_withdraw(
     }))
 }
 
+/// `seal_bridgeWithdrawAndClaim`: burn wrapped tokens, create a signed
+/// withdrawal record, and immediately attempt to submit the unlock on
+/// the destination chain (Solana / Stellar) in a single RPC call.
+///
+/// Unlike `seal_bridgeWithdraw`, this handler tries to dispatch the
+/// unlock synchronously using the chain relay config. If chain
+/// submission succeeds, the response includes the destination tx hash
+/// and the withdrawal is marked executed on-chain. If it fails
+/// (chain down, missing config, etc.), the withdrawal still lands
+/// with a committee signature so the polling relayer can pick it up.
+///
+/// Params: `{"dest_chain": "Solana", "dest_address": "...", "token": "WSOL", "amount": 1000000}`.
+/// Auth: required.
+async fn handle_bridge_withdraw_and_claim(
+    state: &RpcState,
+    params: &serde_json::Value,
+    caller: &str,
+) -> Result<serde_json::Value, (i32, String)> {
+    if caller == "anonymous" {
+        return Err((-32000, "seal_bridgeWithdrawAndClaim requires authentication".into()));
+    }
+    let dest_chain_str = params
+        .get("dest_chain")
+        .and_then(|v| v.as_str())
+        .ok_or((-32602, "missing 'dest_chain' param".into()))?;
+    let dest_address = params
+        .get("dest_address")
+        .and_then(|v| v.as_str())
+        .ok_or((-32602, "missing 'dest_address' param".into()))?;
+    let token_str = params
+        .get("token")
+        .and_then(|v| v.as_str())
+        .ok_or((-32602, "missing 'token' param".into()))?;
+    let amount = params
+        .get("amount")
+        .and_then(|v| v.as_u64())
+        .ok_or((-32602, "missing or invalid 'amount' param".into()))?;
+
+    let dest_chain = parse_chain(dest_chain_str)?;
+    let token = parse_wrapped_token(token_str)?;
+    let lookup_key = normalize_seal_address_to_hex(caller)
+        .ok_or((-32602, format!("invalid caller address: {caller}")))?;
+
+    // P8/§4.2 — withdrawal fee (same as seal_bridgeWithdraw).
+    let fee = state.config.bridge_withdrawal_fee;
+    if fee > 0 {
+        let mut node = state.node.lock().await;
+        node.runner
+            .balances
+            .burn(caller, fee)
+            .map_err(|e| (-32000, format!("withdrawal-fee burn failed: {e}")))?;
+        drop(node);
+    }
+
+    // Create the withdrawal and collect the data we need for chain dispatch.
+    let (withdrawal_id, nonce, committee_sig_hex, dest_chain_for_dispatch, dest_address_for_dispatch, amount_for_dispatch, token_str_for_dispatch) = {
+        let mut bridge = state.bridge.lock().await;
+        let withdrawal_id_result =
+            bridge.initiate_withdrawal(&lookup_key, dest_chain, dest_address, token, amount);
+        match withdrawal_id_result {
+            Ok(id) => {
+                let w = bridge.get_withdrawal(&id)
+                    .ok_or((-32000, format!("withdrawal {id} disappeared after creation")))?;
+                let sig = w.committee_signature_hex.clone()
+                    .ok_or((-32000, format!("withdrawal {id} has no committee signature")))?;
+                let token_str = match w.token {
+                    WrappedToken::WSOL => "WSOL",
+                    WrappedToken::WXLM => "WXLM",
+                    WrappedToken::WUSDC => "WUSDC",
+                };
+                (id, w.nonce, sig, w.dest_chain.to_string(), w.dest_address.clone(), w.amount, token_str.to_string())
+            },
+            Err(e) => {
+                drop(bridge);
+                if fee > 0 {
+                    let mut node = state.node.lock().await;
+                    if let Err(re) = node.runner.balances.mint(caller, fee) {
+                        warn!(
+                            caller, fee, err = ?re,
+                            "withdrawal-fee refund failed — caller is owed {fee} SEAL", fee = fee
+                        );
+                    }
+                }
+                return Err((-32000, format!("withdraw failed: {e}")));
+            }
+        }
+    };
+
+    // Try to dispatch the unlock on the destination chain.
+    // Best-effort: if it fails, the withdrawal still exists with a
+    // valid committee signature and the polling relayer will pick it up.
+    let dest_tx_hash = if let Some(ref relay_cfg) = state.config.chain_relay {
+        match dispatch_chain_unlock(
+            relay_cfg,
+            &withdrawal_id,
+            &dest_chain_for_dispatch,
+            &dest_address_for_dispatch,
+            amount_for_dispatch,
+            nonce,
+            &token_str_for_dispatch,
+            &committee_sig_hex,
+        ).await {
+            Ok(Some(tx_hash)) => {
+                // Mark executed on Seal side since we know the on-chain unlock landed.
+                let mut bridge = state.bridge.lock().await;
+                let _ = bridge.execute_withdrawal(&withdrawal_id);
+                drop(bridge);
+                Some(tx_hash)
+            },
+            Ok(None) => None,
+            Err(e) => {
+                info!(
+                    withdrawal_id = %withdrawal_id,
+                    error = %e,
+                    "chain unlock dispatch failed — relayer will retry",
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    Ok(serde_json::json!({
+        "withdrawal_id": withdrawal_id,
+        "caller": caller,
+        "fee_burned": fee,
+        "dest_tx_hash": dest_tx_hash,
+    }))
+}
+
 /// `seal_addBridgeObserver`: register a chain observer so subsequent
 /// `seal_pollBridges` calls see its events. No auth for testnet; in
 /// production this will be admin-gated once the bridge param-store
@@ -4475,9 +4948,18 @@ async fn handle_bridge_council_add(
     };
     let mut council = state.council.lock().await;
     council.add_member(member).map_err(|e| (-32000, e))?;
+    let member_count = council.member_count();
+    // Persist council state so rotations survive node restart.
+    if let Some(ref dir) = state.data_dir {
+        let path = dir.join("council.json");
+        if let Err(e) = council.save_to_file(&path) {
+            warn!("failed to persist council state: {e}");
+        }
+    }
+    drop(council);
     Ok(serde_json::json!({
         "pubkey": pubkey,
-        "member_count": council.member_count(),
+        "member_count": member_count,
     }))
 }
 
@@ -4493,9 +4975,18 @@ async fn handle_bridge_council_remove(
         .ok_or((-32602, "missing 'pubkey' param".into()))?;
     let mut council = state.council.lock().await;
     council.remove_member(pubkey).map_err(|e| (-32000, e))?;
+    let member_count = council.member_count();
+    // Persist council state after removal.
+    if let Some(ref dir) = state.data_dir {
+        let path = dir.join("council.json");
+        if let Err(e) = council.save_to_file(&path) {
+            warn!("failed to persist council state: {e}");
+        }
+    }
+    drop(council);
     Ok(serde_json::json!({
         "pubkey": pubkey,
-        "member_count": council.member_count(),
+        "member_count": member_count,
     }))
 }
 
@@ -4674,9 +5165,17 @@ async fn handle_gov_vote(
     )?;
 
     let mut node = state.node.lock().await;
+    let balance = node.runner.balances.available(caller);
     node.runner
         .governance
-        .vote_with_conviction(proposal_id, caller.to_string(), choice, stake, conviction)
+        .vote_with_conviction(
+            proposal_id,
+            caller.to_string(),
+            choice,
+            stake,
+            conviction,
+            Some(balance),
+        )
         .map_err(|e| (-32000, e))?;
     Ok(serde_json::json!({ "ok": true }))
 }
@@ -5087,6 +5586,51 @@ async fn handle_get_node_info(state: &RpcState) -> Result<serde_json::Value, (i3
         "leases_active": leases,
         "uptime_secs": uptime,
     }))
+}
+
+/// Return the genesis configuration used to initialize this node.
+///
+/// This is a read-only endpoint — no authentication required.
+/// Returns `null` for genesis fields if the runner was not
+/// initialized with a `GenesisConfig` (e.g., `seal-node --help`).
+async fn handle_get_genesis(state: &RpcState) -> Result<serde_json::Value, (i32, String)> {
+    let node = state.node.lock().await;
+    match &node.runner.genesis_config {
+        Some(g) => Ok(serde_json::json!({
+            "chain_id": g.chain_id,
+            "genesis_time": g.genesis_time,
+            "initial_supply": g.initial_supply,
+            "validators": g.validators.iter().map(|v| {
+                serde_json::json!({
+                    "public_key": hex::encode(&v.public_key),
+                    "vrf_public_key": hex::encode(&v.vrf_public_key),
+                    "stake": v.stake,
+                    "name": v.name,
+                })
+            }).collect::<Vec<_>>(),
+            "allocations": g.allocations.iter().map(|a| {
+                serde_json::json!({
+                    "address": a.address,
+                    "amount": a.amount,
+                })
+            }).collect::<Vec<_>>(),
+            "consensus": {
+                "slot_duration_ms": g.consensus.slot_duration_ms,
+                "slots_per_epoch": g.consensus.slots_per_epoch,
+                "committee_size": g.consensus.committee_size,
+                "finality_threshold_percent": g.consensus.finality_threshold_percent,
+                "min_stake": g.consensus.min_stake,
+                "max_block_size": g.consensus.max_block_size,
+                "max_txs_per_block": g.consensus.max_txs_per_block,
+            },
+        })),
+        None => Ok(serde_json::json!({
+            "chain_id": None::<String>,
+            "genesis_time": None::<u64>,
+            "validators": Vec::<serde_json::Value>::new(),
+            "allocations": Vec::<serde_json::Value>::new(),
+        })),
+    }
 }
 
 // ─── Monitoring Endpoints ────────────────────────────────────
@@ -5981,5 +6525,32 @@ mod tests {
         // 6 approvers → approved.
         let six: Vec<String> = (0..6).map(|i| format!("pk_{}", i)).collect();
         assert!(tc.has_two_thirds_approval(&six));
+    }
+
+    #[test]
+    fn test_submit_proof_stub_verify() {
+        use seal_zk::{ZkProver, ZkVerifier};
+
+        // The stub verifier re-hashes the same inputs and checks equality
+        let prover = seal_zk::StubProver;
+        let verifier = seal_zk::StubVerifier;
+
+        let transition = seal_zk::traits::StateTransition {
+            pre_state_root: sha3_256(b"pre"),
+            post_state_root: sha3_256(b"post"),
+            block_height: 1,
+            tx_count: 5,
+            tx_hash: sha3_256(b"txs"),
+        };
+
+        let zk_proof = prover.prove(transition).unwrap();
+
+        // Valid proof verifies
+        assert!(verifier.verify(&zk_proof).is_ok());
+
+        // Tampered proof fails
+        let mut tampered = zk_proof;
+        tampered.bytes[0] ^= 0xFF;
+        assert!(verifier.verify(&tampered).is_err());
     }
 }

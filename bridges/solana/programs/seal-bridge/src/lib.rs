@@ -4,7 +4,7 @@ use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 // Program ID — replace with actual deployed address after `anchor deploy`.
 // The placeholder below is Anchor's default; it will be overwritten by
 // `anchor keys sync` after first deployment to devnet/mainnet.
-declare_id!("FaYr7yXwC3QnZapqTKkYU1Fgy6zwGUzoFjvyKQVXypyD");
+declare_id!("FrZimXzrJpCEWoPqTgpduG3RGwYxa5k4JQAHsXpwJPL9");
 
 /// Seal DAO <-> Solana Bridge Program (Skeleton)
 ///

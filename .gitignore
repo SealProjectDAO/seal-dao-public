@@ -1,0 +1,48 @@
+target/
+# vendor/ is recreated with: ./scripts/vendor-update.sh
+# PQC-patched libp2p crates are in patches/ (committed to git)
+# vendor/ itself is ~671MB and was not committed
+formal/rocq/.Makefile.d
+formal/rocq/.lia.cache
+formal/rocq/Makefile
+formal/rocq/Makefile.conf
+formal/rocq/seal_verify/*.vo
+formal/rocq/seal_verify/*.vos
+formal/rocq/seal_verify/*.vok
+formal/rocq/seal_verify/*.glob
+formal/rocq/seal_verify/.*.aux
+formal/lean/.lake/
+formal/lean/lake-manifest.json
+_apalache-out/
+mykey.json
+seal-data
+mykem.json
+node_modules
+testnet-data
+
+# Bridge build artifacts (Anchor + Soroban)
+bridges/solana/.anchor/
+bridges/solana/programs/*/build-sbf.log
+bridges/solana/programs/*/target/
+bridges/solana/target/
+bridges/stellar/target/
+# soroban-sdk 22 auto-generates per-test state snapshots under
+# `test_snapshots/`. Regenerated on every `cargo test`; tracking
+# would make each test edit a noisy multi-file diff.
+bridges/stellar/test_snapshots/
+# Stellar CLI per-cwd config + contract-id record from bridge-e2e
+# runs. Both are ephemeral artifacts of `./scripts/bridge-e2e.sh`
+# (see `deploy_stellar`, which wipes `.stellar/` at the start of
+# each run).
+.stellar/
+**/.stellar/
+bridges/.stellar-contract-id
+key.json
+alice.json
+treasury.json
+.claude/*.lock
+kem.json
+dist/
+alice.json
+bob.json
+creator.json

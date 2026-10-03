@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// SQL operation types that policies apply to.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PolicyAction {
     Select,
     Insert,
@@ -26,6 +26,17 @@ impl PolicyAction {
     /// Check if this action covers a given operation.
     pub fn covers(&self, action: &PolicyAction) -> bool {
         matches!(self, PolicyAction::All) || self == action
+    }
+
+    /// SQL keyword for use in DDL parsing.
+    pub fn as_keyword(&self) -> &'static str {
+        match self {
+            PolicyAction::All => "ALL ",
+            PolicyAction::Select => "SELECT ",
+            PolicyAction::Insert => "INSERT ",
+            PolicyAction::Update => "UPDATE ",
+            PolicyAction::Delete => "DELETE ",
+        }
     }
 }
 

@@ -164,6 +164,27 @@ async fn main() {
         },
         None => None,
     };
+    // `--clear-committee-key-file` deletes the persisted committee
+    // key file at startup. Use after a key rotation so the new
+    // --bridge-committee-key CLI value isn't silently overridden by
+    // a stale on-disk file.
+    let clear_committee_key_file = args.iter().any(|a| a == "--clear-committee-key-file");
+    if clear_committee_key_file {
+        let persisted_path = std::path::PathBuf::from(&data_dir).join("bridge-committee-key.hex");
+        if persisted_path.is_file() {
+            if std::fs::remove_file(&persisted_path).is_ok() {
+                println!(
+                    "Cleared stale bridge committee key file: {}",
+                    persisted_path.display()
+                );
+            } else {
+                eprintln!(
+                    "warning: failed to remove {}: file may not exist or be locked",
+                    persisted_path.display()
+                );
+            }
+        }
+    }
     // Persisted rotation takes precedence over the CLI flag so
     // `seal_bridgeRotateCommitteeKey` survives node restart. The
     // file lives in <data_dir>/bridge-committee-key.hex and is
@@ -178,7 +199,7 @@ async fn main() {
                     Ok(bytes) if bytes.len() == 32 => {
                         let mut k = [0u8; 32];
                         k.copy_from_slice(&bytes);
-                        if bridge_committee_key.map_or(false, |cli| cli != k) {
+                        if bridge_committee_key != Some(k) {
                             println!(
                                 "Persisted bridge committee key at {} overrides --bridge-committee-key",
                                 persisted_path.display()
@@ -250,6 +271,12 @@ async fn main() {
     // mainnet typically sets ~0.01 SEAL = 10_000_000 base units.
     let bridge_withdrawal_fee: u64 = parse_arg(&args, "--bridge-withdrawal-fee").unwrap_or(0);
 
+    // `--chain-relay-solana-*` / `--chain-relay-stellar-*` (P8/§bridge).
+    // When populated, `seal_bridgeWithdrawAndClaim` attempts synchronous
+    // unlock submission on the destination chain. Without these flags,
+    // the handler falls back to just creating the withdrawal record
+    // (the polling relayer handles unlock).
+
     // `--admin-threshold <n>` (P8/§4.3). M-of-N multisig
     // requirement for every admin-gated RPC. 0 or 1 = legacy
     // single-sig mode (caller in admin set is enough). >= 2
@@ -270,45 +297,82 @@ async fn main() {
     let rpm_default_override: Option<u64> = parse_arg(&args, "--rpm-default");
     let rpm_expensive_override: Option<u64> = parse_arg(&args, "--rpm-expensive");
 
-    // `--bridge-kms-config <path>` (P8/§4.4). Optional JSON config
+        // `--bridge-kms-config <path>` (P8/§4.4). Optional JSON config
     // that loads the committee MAC key (and, when ringtail-singleton
     // is on, the Ringtail keypair) via the
     // `seal_bridge::keysource::CommitteeKeySource` /
     // `RingtailKeySource` trait. Falls back to direct CLI flags
     // when not supplied. The file shape:
+    //   { "mode": "kms", "socket_path": "/tmp/seal-kms.sock" }
+    // OR (legacy file-backed mode):
     //   { "committee_mac_path": "/var/lib/seal/committee-mac.hex",
     //     "ringtail_keypair_path": "/var/lib/seal/ringtail.json" }
     // Either field may be absent. Future HSM/KMS adapters slot in
     // by implementing the same traits.
+    // KMS socket path, set by --bridge-kms-config in kms mode
+    #[cfg(feature = "kms-mode")]
+    let mut kms_socket_path: Option<std::path::PathBuf> = None;
     let bridge_kms_config: Option<String> = parse_arg(&args, "--bridge-kms-config");
     if let Some(path) = &bridge_kms_config {
         match std::fs::read_to_string(path) {
             Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
                 Ok(v) => {
-                    use seal_bridge::keysource::{CommitteeKeySource, FileKeySource};
-                    let mac_path = v
-                        .get("committee_mac_path")
-                        .and_then(|x| x.as_str())
-                        .map(std::path::PathBuf::from);
-                    let kp_path = v
-                        .get("ringtail_keypair_path")
-                        .and_then(|x| x.as_str())
-                        .map(std::path::PathBuf::from);
-                    let src = FileKeySource::new(mac_path.clone(), kp_path);
-                    if mac_path.is_some() {
-                        match src.read_committee_mac() {
-                            Ok(key) => {
-                                bridge_committee_key = Some(key);
-                                eprintln!(
-                                    "[bridge-kms] loaded committee MAC via FileKeySource ({})",
-                                    path
-                                );
-                            }
-                            Err(e) => {
-                                eprintln!("error: --bridge-kms-config committee MAC: {e}");
-                                std::process::exit(2);
+                    // KMS mode: delegate signing to Unix socket sidecar
+                    #[cfg(feature = "kms-mode")]
+                    if v.get("mode").and_then(|m| m.as_str()) == Some("kms") {
+                        let socket_path = v
+                            .get("socket_path")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("/tmp/seal-kms.sock");
+                        let socket_path = std::path::PathBuf::from(socket_path);
+                        // Defer KMS client init — bridge isn't created yet.
+                        // The actual KMS wiring happens after `bridge`
+                        // is constructed (see the `#[cfg(feature = "kms-mode")]`
+                        // block that follows bridge creation below).
+                        eprintln!("[bridge-kms] KMS mode: will connect to {} after bridge init", socket_path.display());
+                        // Store for later wiring after bridge creation
+                        kms_socket_path = Some(socket_path);
+                    } else {
+                        // Legacy file-backed mode
+                        #[cfg(not(feature = "kms-mode"))]
+                        {
+                            let _ = v;
+                            let _ = path;
+                            eprintln!("warning: --bridge-kms-config requires kms-mode feature");
+                        }
+                        #[cfg(feature = "kms-mode")]
+                        {
+                            use seal_bridge::keysource::{CommitteeKeySource, FileKeySource};
+                            let mac_path = v
+                                .get("committee_mac_path")
+                                .and_then(|x| x.as_str())
+                                .map(std::path::PathBuf::from);
+                            let kp_path = v
+                                .get("ringtail_keypair_path")
+                                .and_then(|x| x.as_str())
+                                .map(std::path::PathBuf::from);
+                            let src = FileKeySource::new(mac_path.clone(), kp_path);
+                            if mac_path.is_some() {
+                                match src.read_committee_mac() {
+                                    Ok(key) => {
+                                        bridge_committee_key = Some(key);
+                                        eprintln!(
+                                            "[bridge-kms] loaded committee MAC via FileKeySource ({})",
+                                            path
+                                        );
+                                    }
+                                    Err(e) => {
+                                        eprintln!("error: --bridge-kms-config committee MAC: {e}");
+                                        std::process::exit(2);
+                                    }
+                                }
                             }
                         }
+                    }
+                    #[cfg(not(feature = "kms-mode"))]
+                    {
+                        let _ = v;
+                        let _ = path;
                     }
                 }
                 Err(e) => {
@@ -323,7 +387,7 @@ async fn main() {
         }
     }
 
-    // P1#5 layer 4 — multi-validator Ringtail orchestrator config.
+// P1#5 layer 4 — multi-validator Ringtail orchestrator config.
     // All six flags must be present together or the orchestrator
     // path stays off (HMAC committee-of-1 default). The 6th flag
     // (--bridge-ringtail-prune-secs) and 7th
@@ -447,6 +511,7 @@ async fn main() {
             bootstrap_snapshot_peer,
             validator_keypair,
             bridge_committee_key,
+            #[cfg(feature = "kms-mode")] kms_socket_path,
             bridge_poll_interval_secs,
             bridge_withdrawal_fee,
             admin_threshold,
@@ -536,6 +601,49 @@ fn parse_arg<T: std::str::FromStr>(args: &[String], flag: &str) -> Option<T> {
         .position(|a| a == flag)
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
+}
+
+/// Build chain relay config from CLI flags. Returns None when no
+/// relay flags are present (the handler falls back to polling relayer).
+fn build_chain_relay_config() -> Option<rpc::ChainRelayConfig> {
+    let args: Vec<String> = std::env::args().collect();
+    let solana_program_id = parse_arg::<String>(&args, "--chain-relay-solana-program-id");
+    let solana_cluster = parse_arg::<String>(&args, "--chain-relay-solana-cluster").unwrap_or_else(|| "devnet".to_string());
+    let solana_wallet = parse_arg::<String>(&args, "--chain-relay-solana-wallet");
+    let solana_authority = parse_arg::<String>(&args, "--chain-relay-solana-authority");
+    let solana_anchor_dir = parse_arg::<String>(&args, "--chain-relay-solana-anchor-dir").unwrap_or_else(|| "bridges/solana".to_string());
+    let solana_mint_wsol = parse_arg::<String>(&args, "--chain-relay-solana-mint-wsol");
+    let solana_vault_ata_wsol = parse_arg::<String>(&args, "--chain-relay-solana-vault-ata-wsol");
+    let solana_mint_wusdc = parse_arg::<String>(&args, "--chain-relay-solana-mint-wusdc");
+    let solana_vault_ata_wusdc = parse_arg::<String>(&args, "--chain-relay-solana-vault-ata-wusdc");
+    let stellar_contract_id = parse_arg::<String>(&args, "--chain-relay-stellar-contract-id");
+    let stellar_source = parse_arg::<String>(&args, "--chain-relay-stellar-source");
+    let stellar_network = parse_arg::<String>(&args, "--chain-relay-stellar-network").unwrap_or_else(|| "testnet".to_string());
+    let stellar_contract_dir = parse_arg::<String>(&args, "--chain-relay-stellar-contract-dir").unwrap_or_else(|| "bridges/stellar".to_string());
+    let any = solana_program_id.is_some()
+        || solana_wallet.is_some()
+        || solana_authority.is_some()
+        || stellar_contract_id.is_some()
+        || stellar_source.is_some();
+    if !any {
+        None
+    } else {
+        Some(rpc::ChainRelayConfig {
+            solana_program_id,
+            solana_cluster: if solana_cluster != "devnet" { Some(solana_cluster) } else { None },
+            solana_wallet,
+            solana_authority,
+            solana_anchor_dir: if solana_anchor_dir != "bridges/solana" { Some(solana_anchor_dir) } else { None },
+            solana_mint_wsol,
+            solana_vault_ata_wsol,
+            solana_mint_wusdc,
+            solana_vault_ata_wusdc,
+            stellar_contract_id,
+            stellar_source,
+            stellar_network: if stellar_network != "testnet" { Some(stellar_network) } else { None },
+            stellar_contract_dir: if stellar_contract_dir != "bridges/stellar" { Some(stellar_contract_dir) } else { None },
+        })
+    }
 }
 
 /// Build the bridge Ringtail orchestrator config from CLI flags.
@@ -677,6 +785,7 @@ async fn run_networked(
         seal_crypto::signature::VerifyingKey,
     )>,
     bridge_committee_key: Option<[u8; 32]>,
+    #[cfg(feature = "kms-mode")] kms_socket_path: Option<std::path::PathBuf>,
     bridge_poll_interval_secs: u64,
     bridge_withdrawal_fee: u64,
     admin_threshold: usize,
@@ -814,6 +923,32 @@ async fn run_networked(
     let mut bridge = seal_bridge::BridgeManager::new(1);
     if let Some(k) = bridge_committee_key {
         bridge.set_committee_key(k);
+    }
+    // KMS mode: wire up CommitteeSigner (and optionally RingtailSigner)
+    #[cfg(feature = "kms-mode")]
+    if let Some(socket) = &kms_socket_path {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio rt for KMS wiring");
+        if let Err(e) = rt.block_on(async {
+            let signer = seal_bridge::kms_client::KmsCommitteeSigner::connect(socket.clone())
+                .await
+                .map_err(|e| format!("KMS committee signer connect: {e}"))?;
+            bridge.committee_signer = Some(std::sync::Arc::new(signer));
+            #[cfg(feature = "ringtail-singleton")]
+            {
+                let ringtail_signer = seal_bridge::kms_client::KmsRingtailSigner::connect(socket.clone())
+                    .await
+                    .map_err(|e| format!("KMS ringtail signer connect: {e}"))?;
+                bridge.ringtail_signer = Some(std::sync::Arc::new(ringtail_signer));
+            }
+            eprintln!("[bridge-kms] KMS signers wired to {}", socket.display());
+            Ok::<(), String>(())
+        }) {
+            eprintln!("error: KMS wiring: {e}");
+            std::process::exit(2);
+        }
     }
     let bridge = Arc::new(Mutex::new(bridge));
     // Hand the bridge Arc to the NetworkNode so the receive loop's
@@ -1074,6 +1209,7 @@ async fn run_networked(
             min_opening_balance,
             bridge_withdrawal_fee,
             admin_threshold,
+            chain_relay: build_chain_relay_config(),
             rpm_default: rpm_default_override.unwrap_or(rpm_defaults.rpm_default),
             rpm_expensive: rpm_expensive_override.unwrap_or(rpm_defaults.rpm_expensive),
             rpm_admin: rpm_admin_override.unwrap_or(rpm_defaults.rpm_admin),

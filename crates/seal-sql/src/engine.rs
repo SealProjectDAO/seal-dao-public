@@ -58,6 +58,8 @@ pub struct Engine {
     /// surfaced as a separate `CALL`/`SELECT proc(...)` path that
     /// doesn't need the engine to do anything new at parse time.
     pub procedures: seal_procs::ProcedureStore,
+    /// Row-level security policies for this engine's tables.
+    pub rls: crate::rls::RlsManager,
 }
 
 impl Engine {
@@ -70,6 +72,7 @@ impl Engine {
             block_seed: None,
             salt_counter: 0,
             procedures: seal_procs::ProcedureStore::new(),
+            rls: crate::rls::RlsManager::new(),
         }
     }
 
@@ -95,6 +98,17 @@ impl Engine {
     /// Execute a SQL string. Populates `last_write_log` for write operations.
     pub fn execute(&mut self, sql: &str) -> Result<QueryResult, SqlError> {
         self.last_write_log = None;
+
+        // RLS DDL: CREATE POLICY / DROP POLICY are not sqlparser AST
+        // variants, so we intercept them before the parser runs.
+        let trimmed = sql.trim_start().to_uppercase();
+        if trimmed.starts_with("CREATE POLICY") {
+            return self.execute_create_policy(sql);
+        }
+        if trimmed.starts_with("DROP POLICY") {
+            return self.execute_drop_policy(sql);
+        }
+
         let stmts = parse_sql(sql)?;
         let mut last_result = QueryResult {
             columns: vec![],
@@ -728,6 +742,216 @@ impl Engine {
         }
 
         hasher.finalize()
+    }
+
+    /// Execute a `CREATE POLICY` DDL statement.
+    ///
+    /// PostgreSQL-compatible syntax:
+    /// ```sql
+    /// CREATE POLICY policy_name ON table_name
+    ///     FOR SELECT | INSERT | UPDATE | DELETE | ALL
+    ///     TO role_or_user
+    ///     USING (using_expr)
+    ///     WITH CHECK (with_check_expr)
+    /// ```
+    fn execute_create_policy(&mut self, sql: &str) -> Result<QueryResult, SqlError> {
+        let sql = sql.trim();
+
+        // Strip "CREATE POLICY <name>"
+        let after = sql
+            .strip_prefix("CREATE POLICY ")
+            .ok_or_else(|| SqlError::Parse("CREATE POLICY: expected policy name".into()))?;
+
+        // Extract policy name (next identifier)
+        let (name, rest) = Self::extract_identifier(after).ok_or_else(|| {
+            SqlError::Parse("CREATE POLICY: expected policy name".into())
+        })?;
+
+        // "ON <table>" — trim whitespace before keyword matching
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix("ON ").ok_or_else(|| {
+            SqlError::Parse("CREATE POLICY: expected 'ON <table>'".into())
+        })?;
+        let (table_name, rest) = Self::extract_identifier(rest).ok_or_else(|| {
+            SqlError::Parse("CREATE POLICY: expected table name after 'ON'".into())
+        })?;
+
+        // "FOR <action>" — strip "FOR" prefix if present
+        let for_input = if rest.trim_start().to_uppercase().starts_with("FOR ") {
+            &rest.trim_start()[4..]
+        } else {
+            rest
+        };
+        let action = Self::parse_policy_action(for_input)?;
+        let rest_after_action = Self::skip_keyword(for_input, &action)
+            .ok_or_else(|| SqlError::Parse("CREATE POLICY: expected action keyword".into()))?;
+
+        // "TO <target>" — optional
+        let rest = if let Some(after_to) = rest_after_action.trim_start().strip_prefix("TO") {
+            Self::extract_identifier(after_to.trim_start())
+                .map(|(_, after)| after.trim_start())
+                .ok_or_else(|| {
+                    SqlError::Parse("CREATE POLICY: expected target after 'TO'".into())
+                })?
+        } else {
+            rest_after_action
+        };
+
+        // "USING (expr)"
+        let using_expr = Self::extract_parenthesized(rest, "USING")
+            .ok_or_else(|| SqlError::Parse("CREATE POLICY: expected 'USING (expr)'".into()))?;
+
+        // Optional "WITH CHECK (expr)" — search in the full remaining string
+        let with_check = {
+            let upper_rest = rest.to_uppercase();
+            if let Some(check_pos) = upper_rest.find("WITH CHECK") {
+                let check_rest = &rest[check_pos..];
+                Some(Self::extract_parenthesized(check_rest, "CHECK")
+                    .ok_or_else(|| {
+                        SqlError::Parse("CREATE POLICY: expected 'WITH CHECK (expr)'".into())
+                    })?)
+            } else {
+                None
+            }
+        };
+
+        let policy = crate::rls::Policy {
+            name: name.to_string(),
+            table_name: table_name.to_string(),
+            action,
+            using_expr: using_expr.to_string(),
+            with_check_expr: with_check.map(|s| s.to_string()),
+        };
+
+        self.rls.add_policy(policy)?;
+        Ok(QueryResult {
+            columns: vec![],
+            rows: vec![],
+            rows_affected: 0,
+        })
+    }
+
+    /// Execute a `DROP POLICY` DDL statement.
+    ///
+    /// PostgreSQL-compatible syntax:
+    /// ```sql
+    /// DROP POLICY policy_name ON table_name
+    /// ```
+    fn execute_drop_policy(&mut self, sql: &str) -> Result<QueryResult, SqlError> {
+        let sql = sql.trim();
+        let after = sql
+            .strip_prefix("DROP POLICY ")
+            .ok_or_else(|| SqlError::Parse("DROP POLICY: expected policy name".into()))?;
+
+        let (policy_name, rest) = Self::extract_identifier(after).ok_or_else(|| {
+            SqlError::Parse("DROP POLICY: expected policy name".into())
+        })?;
+
+        let rest = rest.trim_start();
+        let rest = rest.strip_prefix("ON ").ok_or_else(|| {
+            SqlError::Parse("DROP POLICY: expected 'ON <table>'".into())
+        })?;
+
+        let (table_name, _) = Self::extract_identifier(rest).ok_or_else(|| {
+            SqlError::Parse("DROP POLICY: expected table name after 'ON'".into())
+        })?;
+
+        self.rls.drop_policy(table_name, policy_name)?;
+        Ok(QueryResult {
+            columns: vec![],
+            rows: vec![],
+            rows_affected: 0,
+        })
+    }
+
+    /// Get a reference to the RLS manager for programmatic access.
+    pub fn rls(&self) -> &crate::rls::RlsManager {
+        &self.rls
+    }
+
+    /// Set a token checker for the engine's RlsManager.
+    pub fn set_rls_token_checker(&mut self, checker: crate::rls::TokenBalanceChecker) {
+        self.rls.set_token_checker(checker);
+    }
+
+    fn extract_identifier<'a>(input: &'a str) -> Option<(&'a str, &'a str)> {
+        let input = input.trim_start();
+        let bytes = input.as_bytes();
+        if bytes.is_empty() {
+            return None;
+        }
+        if bytes[0].is_ascii_alphabetic() || bytes[0] == b'_' {
+            let end = bytes
+                .iter()
+                .position(|&b| !b.is_ascii_alphanumeric() && b != b'_')
+                .unwrap_or(bytes.len());
+            let ident = &input[..end];
+            Some((ident, &input[end..]))
+        } else {
+            None
+        }
+    }
+
+    fn skip_keyword<'a>(input: &'a str, keyword: &crate::rls::PolicyAction) -> Option<&'a str> {
+        let upper = input.trim_start().to_uppercase();
+        let kw = keyword.as_keyword();
+        if upper.starts_with(kw) {
+            Some(&input.trim_start()[kw.len()..])
+        } else {
+            None
+        }
+    }
+
+    fn parse_policy_action(input: &str) -> Result<crate::rls::PolicyAction, SqlError> {
+        let upper = input.trim_start().to_uppercase();
+        // Strip optional "FOR" prefix
+        let input = if upper.starts_with("FOR ") {
+            &input.trim_start()[4..]
+        } else {
+            input.trim_start()
+        };
+        let upper = input.to_uppercase();
+        for kw in &["ALL ", "SELECT ", "INSERT ", "UPDATE ", "DELETE "] {
+            if upper.starts_with(kw) {
+                return Ok(match &kw[..kw.len() - 1] {
+                    "ALL" => crate::rls::PolicyAction::All,
+                    "SELECT" => crate::rls::PolicyAction::Select,
+                    "INSERT" => crate::rls::PolicyAction::Insert,
+                    "UPDATE" => crate::rls::PolicyAction::Update,
+                    "DELETE" => crate::rls::PolicyAction::Delete,
+                    _ => unreachable!(),
+                });
+            }
+        }
+        Err(SqlError::Parse(
+            "CREATE POLICY: expected action (ALL | SELECT | INSERT | UPDATE | DELETE)".into(),
+        ))
+    }
+
+    fn extract_parenthesized<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+        let upper = input.to_uppercase();
+        let pos = upper.find(keyword)?;
+        let after_keyword = &input[pos + keyword.len()..];
+        // Find the opening paren in the original slice (not the trimmed one)
+        let open = after_keyword.find('(')?;
+        let inner_start = pos + keyword.len() + open;
+        // Start depth at 1 — we're already past the opening '('
+        let mut depth = 1usize;
+        let scan_start = inner_start + 1;
+        for (i, c) in input[scan_start..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        // i is offset from scan_start, so closing paren is at scan_start + i
+                        return Some(input[scan_start..scan_start + i].trim());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 }
 
@@ -1486,5 +1710,120 @@ mod tests {
             .execute("SELECT * FROM users WHERE name = 'alice'")
             .unwrap();
         assert_eq!(result.rows.len(), 2);
+    }
+
+    #[test]
+    fn test_create_policy() {
+        let mut eng = Engine::new();
+        eng.execute("CREATE TABLE posts (id INTEGER, owner TEXT, body TEXT)").unwrap();
+
+        eng.execute(
+            "CREATE POLICY read_all ON posts FOR SELECT TO public
+             USING (true)",
+        )
+        .unwrap();
+
+        let policies = eng.rls.get_policies("posts", &crate::rls::PolicyAction::Select);
+        assert_eq!(policies.len(), 1);
+        assert_eq!(policies[0].name, "read_all");
+        assert_eq!(policies[0].using_expr, "true");
+    }
+
+    #[test]
+    fn test_create_policy_with_owner_check() {
+        let mut eng = Engine::new();
+        eng.execute("CREATE TABLE posts (id INTEGER, owner TEXT, body TEXT)").unwrap();
+
+        eng.execute(
+            "CREATE POLICY owner_write ON posts FOR UPDATE TO public
+             USING (owner = CURRENT_USER())",
+        )
+        .unwrap();
+
+        let policies = eng.rls.get_policies("posts", &crate::rls::PolicyAction::Update);
+        assert_eq!(policies.len(), 1);
+        assert!(policies[0].using_expr.contains("owner"));
+        assert!(policies[0].using_expr.contains("CURRENT_USER"));
+    }
+
+    #[test]
+    fn test_create_policy_with_with_check() {
+        let mut eng = Engine::new();
+        eng.execute("CREATE TABLE posts (id INTEGER, owner TEXT, body TEXT)").unwrap();
+
+        eng.execute(
+            "CREATE POLICY insert_check ON posts FOR INSERT TO public
+             USING (true) WITH CHECK (owner = CURRENT_USER())",
+        )
+        .unwrap();
+
+        let policies = eng.rls.get_policies("posts", &crate::rls::PolicyAction::Insert);
+        assert_eq!(policies.len(), 1);
+        assert!(policies[0].with_check_expr.is_some());
+        assert!(policies[0].with_check_expr.as_ref().unwrap().contains("CURRENT_USER"));
+    }
+
+    #[test]
+    fn test_drop_policy() {
+        let mut eng = Engine::new();
+        eng.execute("CREATE TABLE posts (id INTEGER, owner TEXT, body TEXT)").unwrap();
+
+        eng.execute("CREATE POLICY p1 ON posts FOR SELECT TO public USING (true)").unwrap();
+        assert_eq!(eng.rls.get_policies("posts", &crate::rls::PolicyAction::Select).len(), 1);
+
+        eng.execute("DROP POLICY p1 ON posts").unwrap();
+        assert_eq!(eng.rls.get_policies("posts", &crate::rls::PolicyAction::Select).len(), 0);
+    }
+
+    #[test]
+    fn test_drop_policy_not_found() {
+        let mut eng = Engine::new();
+        eng.execute("CREATE TABLE posts (id INTEGER, owner TEXT, body TEXT)").unwrap();
+
+        // Create then drop to clear the policy, then drop again to trigger "not found"
+        eng.execute("CREATE POLICY p1 ON posts FOR SELECT TO public USING (true)")
+            .unwrap();
+        eng.execute("DROP POLICY p1 ON posts").unwrap();
+
+        let result = eng.execute("DROP POLICY p1 ON posts");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_create_policy_all_action() {
+        let mut eng = Engine::new();
+        eng.execute("CREATE TABLE data (id INTEGER, owner TEXT)").unwrap();
+
+        eng.execute(
+            "CREATE POLICY all_access ON data FOR ALL TO admin
+             USING (owner = CURRENT_USER())",
+        )
+        .unwrap();
+
+        let select_policies = eng.rls.get_policies("data", &crate::rls::PolicyAction::Select);
+        assert_eq!(select_policies.len(), 1);
+
+        let delete_policies = eng.rls.get_policies("data", &crate::rls::PolicyAction::Delete);
+        assert_eq!(delete_policies.len(), 1);
+    }
+
+    #[test]
+    fn test_rls_on_engine_blocks_without_policy() {
+        let mut eng = Engine::new();
+        eng.execute("CREATE TABLE secrets (id INTEGER, owner TEXT, content TEXT)").unwrap();
+        eng.rls.enable_rls("secrets");
+
+        // No policies → deny all reads
+        let policies = eng.rls.get_policies("secrets", &crate::rls::PolicyAction::Select);
+        assert!(policies.is_empty());
+        assert!(!eng.rls.check_access("secrets", &crate::rls::PolicyAction::Select, "alice", None));
+
+        // With a public policy → allow all
+        eng.execute("CREATE POLICY public_read ON secrets FOR SELECT TO public USING (true)")
+            .unwrap();
+        let policies = eng.rls.get_policies("secrets", &crate::rls::PolicyAction::Select);
+        assert_eq!(policies.len(), 1);
+        assert!(eng.rls.check_access("secrets", &crate::rls::PolicyAction::Select, "anyone", None));
     }
 }

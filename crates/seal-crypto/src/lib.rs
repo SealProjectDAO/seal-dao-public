@@ -13,10 +13,14 @@ pub mod bech32m;
 pub mod error;
 pub mod hash;
 pub mod kem;
+pub mod hybrid_kem;
 pub mod signature;
 
 pub use address::SealAddress;
 pub use error::CryptoError;
 pub use hash::{sha3_256, Sha3Hasher};
+pub use hybrid_kem::{
+    HybridEncapsulation, HybridKemKeypair, HybridKemPublicKey, HybridKemSharedSecret,
+};
 pub use kem::{KemCiphertext, KemKeypair, KemPublicKey, KemSecretKey, KemSharedSecret};
 pub use signature::{Signature, SigningKey, VerifyingKey};

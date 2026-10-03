@@ -1,0 +1,532 @@
+
+=> make list of demo apps / be sure to add Browser plugins / support in the wallet ~
+
+====
+
+Status                                                                                                                                                     
+                                                                                                                                                             
+  Branch: main, clean, pushed. Rust: 1.94.1. Tests: 810+, zero failures. Session: 11 commits.                                                                
+                                                                                                                                                             
+  What's done (comprehensive — see STATUS.md in repo)                                                                                                        
+                                                                                                                                                             
+  Core: consensus, SQL engine, Merkle B-tree, row salts, StorageLease, invoicing, token economics, DEX, RLS, P2P, VRF (3 backends), threshold sigs (Ringtail 
+  scaffold), namespace persistence, committee messages, ZK provers (RISC Zero + SP1 vendored), formal proofs (TLA+ + Lean 4, 0 sorries), monitoring (/health,
+   /metrics, /status, Grafana, web explorer), testing guide, SPEC.md formalized.                                                                             
+                                                                
+  Detailed remaining TODOs
+
+  Blocked on external tooling                                                                                                                                
+   
+  1. RISC Zero ELF compilation — cargo-risczero v3 vs vendored v5-rc mismatch. When v5 ships: Docker build → embed ELF → uncomment 2 lines → real STARK      
+  proving                                                       
+  2. AES-256-GCM at-rest encryption — private tables use XOR placeholder, need aes-gcm crate                                                                 
+                                                                                                                                                             
+  Code TODOs (actionable)                                                                                                                                    
+                                                                                                                                                             
+  Demo apps & wallet features (from zzz.txt):                                                                                                                
+  3. Browser extension wallet — MetaMask-like extension with ML-DSA signing, WASM crypto
+  4. Browser plugin support in desktop wallet — Electron wallet needs dApp connector (inject provider API into web pages)                                       
+  5. Reference demo apps — none exist for the key use cases:                                                                                                 
+  - social.seal — social app with profiles, posts, follows (App-Private tables)                                                                              
+  - kyc.seal — KYC/identity with regulated-private tables + ZK proofs                                                                                        
+  - Sealed-bid auction — BOREALIS MPC demo                                                                                                                   
+  - Copy trading system (from yyy.txt brainstorm)                                                                                                            
+  - Decentralized Kindle / publishing (from yyy.txt)                                                                                                         
+  - x402-like payment method for SEAL                                                                                                                        
+                                                                                                                                                             
+  Bridge production:                                                                                                                                         
+  6. Real threshold sig verification in Solana/Stellar bridges (replace message-binding stubs with Ringtail)                                                 
+  7. Actual XLM transfers via Stellar SAC integration                                                                                                        
+  8. Ethereum bridge (deferred, ~2-3 months)                                                                                                                 
+  9. Bitcoin bridge (deferred, ~3-6 months)                                                                                                                  
+                                                                                                                                                             
+  Security hardening:                                                                                                                                        
+  10. Ringtail security audit (1546-line scaffold, 56 tests, but not audited)
+  11. Private table encryption: XOR → AES-256-GCM with ML-KEM key derivation                                                                                 
+  12. ChaCha20-Poly1305 for P2P transport (currently custom SHA3-CTR)                                                                                        
+                                                                                                                                                             
+  Formal verification final pass:                                                                                                                            
+  13. Kani: ensure all 60 harnesses pass                                                                                                                     
+  14. Miri: extend to more crates (currently 3)                                                                                                              
+  15. Extended fuzz campaign: 24h per target                                                                                                                 
+                                                                                                                                                             
+  Launch checklist (all unchecked):                                                                                                                          
+  16. Security audits (Veridise PQC + protocol) — engage        
+  17. Bug bounty (Immunefi) — 4+ weeks before launch                                                                                                         
+  18. Incentivized testnet (4 phases, 72h chaos)                                                                                                             
+  19. Genesis (30+ validators, token distribution)
+  20. Release (v1.0.0, binaries, Docker)                                                                                                                     
+  21. Infrastructure (3+ bootstrap nodes US/EU/APAC)                                                                                                         
+  22. Documentation (validator guide, runbook, SDK docs, API reference)
+                                                                                                                                                             
+  Priority suggestion                                           
+                                                                                                                                                             
+  Next session: items 3-5 (browser wallet + demo apps) since they're the most visible for testnet adoption and match the zzz.txt request.                    
+   
+──────────
+
++ use ../rust-secure-memory-public .... 
+
+jy needs ~ 
+quick starter with 'TEE/GPU etc."
+
+===
+
+Yes — the full stack works. Here's a quick run-through:                                                                                                    
+                                                                                                                                                             
+  # 1. Build                                                                                                                                                 
+  cargo build --release -p seal-node -p seal-cli                                                                                                             
+   
+  # 2. Start a node                                                                                                                                          
+  cargo run -p seal-node -- --slots 0 --rpc-port 8545           
+                                                                                                                                                             
+  # 3. In another terminal — health check
+  curl -s localhost:8545/health | jq .                                                                                                                       
+  curl -s localhost:8545/metrics | head -20                                                                                                                  
+  curl -s localhost:8545/status | jq .
+                                                                                                                                                             
+  # 4. SQL                                                      
+  curl -s localhost:8545 -d '{"jsonrpc":"2.0","id":1,"method":"seal_querySql","params":{"sql":"SELECT * FROM users"}}' | jq .
+                                                                                                                                                             
+  # 5. Chain state
+  curl -s localhost:8545 -d '{"jsonrpc":"2.0","id":1,"method":"seal_getHeight","params":{}}' | jq .                                                          
+  curl -s localhost:8545 -d '{"jsonrpc":"2.0","id":1,"method":"seal_getNodeInfo","params":{}}' | jq .                                                        
+                                                                                                                                                             
+  # 6. Tokens + DEX                                                                                                                                          
+  curl -s localhost:8545 -d '{"jsonrpc":"2.0","id":1,"method":"seal_listTokens","params":{}}' | jq .                                                         
+  curl -s localhost:8545 -d '{"jsonrpc":"2.0","id":1,"method":"seal_listPairs","params":{}}' | jq .                                                          
+                                                                                                                                                             
+  # 7. Web explorer                                                                                                                                          
+  open apps/seal-explorer-web/index.html                                                                                                                     
+                                                                
+  # 8. Interactive demos                                                                                                                                     
+  cargo run -p seal-cli -- demo        # multi-app deployment
+  cargo run -p seal-cli -- wallet      # TUI wallet                                                                                                          
+  cargo run -p seal-marketplace        # marketplace REPL                                                                                                    
+  cargo run -p seal-notes              # encrypted notes REPL
+                                                                                                                                                             
+  # 9. Grafana (optional, needs Docker)                                                                                                                      
+  cd monitoring && docker-compose -f docker-compose.monitoring.yml up -d                                                                                     
+  open http://localhost:3000            # admin/admin                                                                                                        
+                                                                
+  # 10. Multi-node                                                                                                                                           
+  cargo run -p seal-node -- --slots 0 --rpc-port 8546 --port 4002 \
+    --bootstrap-peers /ip4/127.0.0.1/tcp/4001 --data-dir node2                                                                                               
+                                                                                                                                                             
+  # 11. Full test suite
+  cargo test              
+
+==
+===
+=====
+
+Status
+
+  Branch: main, clean, pushed. Rust: 1.94.1. Tests: 810+, zero failures. Testnet: ready to run.
+
+  Done (complete)
+
+  ┌────────────────────────────────────────────────────────────────┬────────────────────┐
+  │                              Area                              │       Status       │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ Consensus (VRF + committee)                                    │ Done               │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ SQL engine (PostgreSQL subset)                                 │ Done               │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ Merkle B-tree + proofs                                         │ Done               │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ #STORAGE-FORGET (salts, leases, invoicing, pruning, SPEC.md)   │ Done               │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ Token economics (balances, staking, DEX, emission)             │ Done               │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ RLS (row-level security, token-gated)                          │ Done               │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ P2P networking (libp2p + ML-KEM)                               │ Done               │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ VRF (PqVrf/LavVrf/HmacVrf, switchable)                         │ Done               │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ Threshold sigs (Ringtail scaffold, real NTT, 56 tests)         │ Scaffold           │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ ZK provers (RISC Zero + SP1 vendored, guest ELF compiled)      │ Ready (simulation) │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ Namespace persistence + committee messages                     │ Done               │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ Monitoring (/health, /metrics, /status, Grafana, web explorer) │ Done               │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ Formal (TLA+ consensus+bridge, Lean 4 zero sorries)            │ Done               │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ Testing guide (32 sections)                                    │ Done               │
+  ├────────────────────────────────────────────────────────────────┼────────────────────┤
+  │ STATUS.md, QA.md, operator guide                               │ Done               │
+  └────────────────────────────────────────────────────────────────┴────────────────────┘
+
+  Remaining TODOs
+
+  Blocked on external
+
+  ┌─────────────────────────────────┬───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │              Item               │                                                  Blocker                                                  │
+  ├─────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Full STARK prove()              │ Guest I/O mismatch (sys_input vs env::read). Needs risc0 v5 stable tooling or serde+build-std nightly fix │
+  ├─────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ AES-256-GCM at-rest encryption  │ XOR placeholder, needs aes-gcm crate                                                                      │
+  ├─────────────────────────────────┼───────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ ChaCha20-Poly1305 P2P transport │ Custom SHA3-CTR, needs chacha20poly1305 crate                                                             │
+  └─────────────────────────────────┴───────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  Code-actionable (next priorities)
+
+  ┌─────┬────────────────────────────────────────────────────────────────┬─────────────┐
+  │  #  │                              Item                              │   Effort    │
+  ├─────┼────────────────────────────────────────────────────────────────┼─────────────┤
+  │ 1   │ Demo apps — social.seal, kyc.seal, auction, copy trading       │ Medium each │
+  ├─────┼────────────────────────────────────────────────────────────────┼─────────────┤
+  │ 2   │ Browser extension wallet — WASM crypto, provider API           │ Large       │
+  ├─────┼────────────────────────────────────────────────────────────────┼─────────────┤
+  │ 3   │ Desktop wallet dApp connector — inject provider into web pages │ Medium      │
+  ├─────┼────────────────────────────────────────────────────────────────┼─────────────┤
+  │ 4   │ Real bridge deployments — Solana/Stellar testnet               │ Medium      │
+  ├─────┼────────────────────────────────────────────────────────────────┼─────────────┤
+  │ 5   │ Ringtail audit prep — document security assumptions            │ Small       │
+  ├─────┼────────────────────────────────────────────────────────────────┼─────────────┤
+  │ 6   │ Kani harnesses — get all 60 green                              │ Medium      │
+  ├─────┼────────────────────────────────────────────────────────────────┼─────────────┤
+  │ 7   │ Extended fuzz — 24h per target                                 │ Time only   │
+  └─────┴────────────────────────────────────────────────────────────────┴─────────────┘
+
+  Launch checklist (all unchecked, external deps)
+
+  - Security audits (Veridise)
+  - Bug bounty (Immunefi, 4+ weeks)
+  - Incentivized testnet (4 phases, 72h chaos)
+  - Genesis (30+ validators, token distribution)
+  - Release (v1.0.0, binaries, Docker)
+  - Infrastructure (3+ bootstrap nodes US/EU/APAC)
+  - Documentation (validator guide, SDK docs, API reference)
+
+
+Computing on PQC-Encrypted Data – with Dr. Kurt Rohloff of Duality Technologies - YouTube
+Inbox
+
+Renaud BECHADE <renaudb1999@gmail.com>
+2:54 PM (22 minutes ago)
+to me
+
+https://m.youtube.com/watch?v=cKli001w7VI&pp=iggCQAE%3D => Seal/ next 
+Attachments area
+Preview YouTube video Computing on PQC-Encrypted Data – with Dr. Kurt Rohloff of Duality TechnologiesPreview YouTube video Computing on PQC-Encrypted Data – with Dr. Kurt Rohloff of Duality Technologies
+
+
+https://formal.land/docs/learn/start
+>>> https://github.com/anyvm-org/anyvm to check it runs everywhere ~
+
+https://github.com/mit-plv/fiat-crypto
+
+===
+Both feature variants build. Now run the real STARK prove+verify under local-prover with RISC0_DEV_MODE=1.
+dev mode proof? and check with metal [why asking all the time, le. con]
+
+❯ 1. Real Output digest in guest                                                                                                                       
+  2. Ringtail hardening + audit                                                                                                                        
+  3. Solana/Stellar bridge transfers                                                                                                     ⧉ In zzz.txt  
+  4. MPC hardening                                                                                                                                     
+  5. Kani 60/60                                                                                                                                        
+  6. Miri coverage                                                                                                                                     
+  7. Non-dev-mode STARK proving        
+
+===
+
+ In-session engineering (can do now):                                                                                            
+  - Algebraic Ringtail verify on Solana BPF (~weeks)                                                                                                   
+  - Algebraic Ringtail verify on Soroban (~weeks)                                                                                                      
+  - Ethereum bridge (~2–3 months)                
+  - Bitcoin bridge (~3–6 months)                                                                                                                       
+  - Metal segment-prover DIY Option A (~1 day if kernels complete, else 1–6 weeks)
+  - Smart-contract execution-model decision (SQL procs vs WASM) — needs user input                                                                     
+  - Browser-extension wallet (manifest v3, WASM ML-DSA)                                                                                                
+  - Demo apps: social.seal, kyc.seal, sealed-bid auction, copy-trading, Kindle-style, x402-style payment                                               
+  - Wire DEX matching into block production (per-block batch auction)                                                                                  
+  - Token-gated SQL RLS (connect TokenManager → RlsManager token_checker)                                                                              
+  - Multi-chain bridge dashboard in wallet apps                                                                                                        
+  - Transfer fees configurable per custom token                                                                                                        
+  - Seal Wallet app icon                                                                                                                               
+                                                                                                                                                       
+  Blocked on hardware:                                                                                                                                 
+  - CUDA STARK proving validation (needs x86_64 Linux + NVIDIA)  
+
+  ===
+                                                                                                                                                       
+⏺ 7 commits landed this session. Here's what shipped:             
+                                                                                                                                                       
+  ADR-001 — SQL stored procs default (LANGUAGE sql), WASM opt-in (LANGUAGE wasm). PostgreSQL multi-language CREATE FUNCTION as model. SPEC.md §4.1 +   
+  §13.3 updated.                                                                                                                                       
+                                                                                                                                                       
+  Ringtail BPF/Soroban foundation — new seal-ringtail-verify crate (no_std + alloc): 48-bit prime field, Cooley-Tukey DIT NTT, SHA3 challenge          
+  expansion, full verify predicate. 20 unit + 3 cross-check tests. Feature-gated into both Anchor and Soroban bridges.                                 
+                                                                                                                                                       
+  Transfer-fee RPCs — seal_setTransferFee / seal_getTransferFee; seal_listTokens now reports transfer_fee_bps.                                         
+  
+  Docs — TODOS.md + STATUS.md synced. Test count 834 → 887.                                                                                            
+                                                                                                                                                     
+  Known blockers surfaced: (a) seal-threshold signer commits D_i = r_i + e_i rather than D_i = A*r_i + e_i, blocking end-to-end Ringtail sign→verify   
+  cross-check; (b) Anchor/Soroban CU measurement needs their CLIs installed. Both tracked in TODOS.md.                                               
+                                                                                                                                                       
+✻ Crunched for 29m 8s                                                                                                                                
+                                                                                                                                  
+※ recap: Continuing the Seal DAO todos: landed 7 commits this session (ADR-001 on SQL/WASM procs, Ringtail BPF/Soroban verifier foundation,            
+  transfer-fee RPCs, doc sync; test count 834→887). Next: pick the following backlog item to work on. (disable recaps in /config)       
+
+==== explanation ====
+
+Blocker (a) — the signer/verifier mismatch                                                                                                           
+                                                                                                                                                       
+  Ringtail is a Schnorr-style identification scheme lifted to lattices. It has three things that must all agree:                                       
+                                                                                                                                                       
+  1. Commitment D_i that each party broadcasts in round 1                                                                                              
+  2. Response z_i = r_i + c·sk_i that each party sends in round 2                                                                                      
+  3. Verify equation that the on-chain verifier runs                                                                                                   
+                                                                                                                                                       
+  For the math to close, these three must satisfy:                                                                                                     
+                                                                                                                                                       
+  D = A·z − c·t          (what the verifier recomputes)                                                                                                
+    = A·(r + c·s) − c·(A·s + e)                                                                                                                        
+    = A·r − c·e          (cancels out s, leaves an error term)                                                                                         
+                                                                                                                                                       
+  So the correct commitment the signer must broadcast is D_i = A·r_i − c·e_i — or equivalently some variant involving A·r_i. The verifier then checks c
+   == H(Σ D_i ‖ m).                                                                                                                                    
+                                                                                                                                                       
+  What seal-threshold actually does today: in crates/seal-threshold/src/ringtail.rs:228 the signer computes                                            
+   
+  let commitment_poly = self.ring.add(&r_i, &e_i);   // D_i = r_i + e_i                                                                                
+                                                                                                                                                       
+  with a comment literally saying "simplified: we use r_i + e_i directly; full implementation would do matrix-vector multiply with public A". No A·r_i 
+  anywhere. So when the aggregated signature reaches verify_signature_full, the verifier recomputes A·z − c·t (which equals A·r − c·e) and hashes that,
+   but the signer's challenge was computed from r + e. The two hashes don't match, verify fails.                                                       
+                  
+  Consequence for the BPF crate: I can't write an end-to-end test that does "sign with seal-threshold → verify with seal-ringtail-verify" because no   
+  signature the signer can currently produce will pass the algebraic predicate. I proved this empirically: the test valid_signature_accepted_by_both
+  failed with host verifier rejected a signature we just constructed for it, and I marked it #[ignore] with that exact reason.                         
+                  
+  Fix scope: add the public matrix A to RingtailParty::new, change round1 to D_i = A·r_i − c·e_i (or the paper's variant), recalibrate norm bounds,    
+  re-verify the 4 Kani harnesses. Not a one-line change — you're touching the core protocol. Ought to be done with the Ringtail paper (ePrint
+  2024/1113) open next to the editor.                                                                                                                  
+                  
+  Blocker (b) — CU measurement needs the Solana/Stellar CLIs                                                                                           
+   
+  Solana and Stellar contracts don't compile under plain cargo test. They target different ISAs entirely:                                              
+                  
+  - Solana: sbf-solana-solana target, built via cargo build-sbf (a subcommand that ships with solana-cli / Agave). Produces a .so ELF that the runtime 
+  JITs to BPF bytecode. CU cost is measured by running a test transaction through solana-test-validator or bankrun and reading the consumed CU from the
+   logs.                                                                                                                                               
+  - Stellar: wasm32-unknown-unknown, built via cargo build --target wasm32v1-none + Soroban's optimizer. Instructions are measured by stellar contract 
+  invoke --cost against stellar-core in local mode.                                                                                                    
+   
+  Neither toolchain is installed on this machine. cargo build -p seal-bridge from the Anchor directory fails with no matching package named            
+  'anchor-lang' found because our workspace root pins [source.crates-io] replace-with = "vendored-sources" and vendor/ doesn't include the Solana crate
+   stack.                                                                                                                                              
+                  
+  So I can write the on-chain code and I can unit-test the seal-ringtail-verify host side (which I did — 20 tests green), but I can't tell you "verify 
+  consumes 412 000 CU on Solana" or "9.8 M instructions on Soroban" until a dev with solana-cli + stellar-cli runs the test programs. My 300–500K CU
+  estimate for Solana is theoretical: 16 poly-muls × 3 NTTs × ~256 butterflies × ~20 CU/butterfly, plus SHA3 challenge expansion. Could be off by 2× in
+   either direction.
+
+  Why this matters before turning the feature on: Solana's per-transaction default CU budget is 200 000, and the hard ceiling is 1 400 000. If we're at
+   500 000, we're fine but would have to call ComputeBudgetInstruction::set_compute_unit_limit(500_000) explicitly. If we're at 1 800 000, the verify
+  never fits in a single transaction and we'd have to split it — a much bigger redesign. Measurement tells us which world we're in.                    
+                  
+  Fix: install solana-cli (or Agave 2.x), anchor-cli 0.30, then cd bridges/solana && anchor build && anchor test --features ringtail-verify. Same shape
+   for Stellar with stellar-cli.
+
+===
+===
+===
+- app icon bordel
+- check the dex ... 
+- proper wallet vault, might have to update the rust-secure-memory package first ~ [with VDF style KD function]
+- DEX: list the *** trades
+- some warnings ~
+
+===
+
+- **Metal GPU kernels**: stub-patched in `vendor/risc0-sys/build.rs` because
+  full Xcode (not just Command Line Tools) is needed for `xcrun metal`.
+  CPU-only proving works.
+- **Guest `out_state` digest**: halts with a stub non-zero value so the
+  executor does not drop the journal. Real `Output::digest` needs
+  risc0-zkvm's guest env (see BUILD.md for why it won't compile under
+  `-Zbuild-std` alone).
+=> build that for fuck sake *** + test on linux 
+
+ Metal GPU kernels: not stubbed today. vendor/risc0-sys-5.0.0-rc.1/build.rs:38-44 unconditionally calls build_metal_kernels() on macOS, and           
+  vendor/risc0-build-kernel-5.0.0-rc.1/src/lib.rs:224 still shells out to xcrun metal / metallib. What the earlier note really captured was a          
+  prerequisite, not a skip: full Xcode 16 + the MetalToolchain component. CPU-only proving still works without any of that. The long-form state is in  
+  crates/seal-zk/METAL.md — the recursion HAL is Metal-wired via risc0-zkvm/metal, but the segment HAL remains CPU/CUDA-only upstream (that's a DIY  
+  path, not a stub).
+
+  Guest out_state digest: done. crates/seal-zk/guest/src/main.rs:281 calls compute_output_digest(&journal) before sys_halt, using sys_sha_buffer on the
+   tagged struct ("risc0.Output", [SHA256(journal), ZERO], LE u16 = 2). STATUS.md:154 marks the row as Done and notes the non-dev-mode prove/verify
+  round-trip validates the byte ordering (any slip would fail ClaimDigestMismatch).                                                                    
+                                                                                      
+=> go for DIY work on the vendored version ~
+
+!! app icon merde 
+wallet: send as well as account balance [all modalities: tui, gui, phone, browser]
+reorganize wallet screen ~~~> tabs etc. 
++ add plugin screen for apps [some of them ...]
+
+add decent handling of disconnection
+make sure faucet CANNOT work with prod (cryptographic impossibility?)
+sealt1w2unmfah6llu99trwrp8r0t72t8ase0ldn59empw7qh9jk4v0crskazdfj
+transfer_fee_bps etc. 
+
+Answer to your direct question — faucet with a key file:                                                                                             
+                                                                                                                                                       
+  # Regenerate the key (old file had a stale address format):
+  cargo run -p seal-cli -- keygen --output key.json                                                                                                    
+                                                                                                                                                     
+  # Fund it via the faucet (node needs --dev-faucet):                                                                                                  
+  ADDR=$(jq -r .address key.json)                                                                                                                    
+  curl -s -X POST http://localhost:8545 -H 'content-type: application/json' \                                                                          
+    -d "$(jq -cn --arg a "$ADDR" \                                                                                                                     
+          '{jsonrpc:"2.0",id:1,method:"seal_faucet",params:{address:$a}}')" | jq
+                                                                                                                                                       
+  # Confirm:                                                                                                                                         
+  curl -s -X POST http://localhost:8545 -H 'content-type: application/json' \                                                                          
+    -d "$(jq -cn --arg a "$ADDR" \                                                                                                                   
+          '{jsonrpc:"2.0",id:2,method:"seal_getBalance",params:{address:$a}}')" | jq                                                                   
+                                                                                                                                                       
+  # Then sign mutating SQL with it:                                                                                                                    
+  cargo run -p seal-cli -- sql "INSERT …" --node http://localhost:8545 --key key.json  
+  
+=> proper list of apps with proper specs ~~~~
+=> crowdfunding etc. 
+
+===
+legal and llm-ish censorship ~ <=== TODO
+
+===
+
+Yes — it works.
+
+  The forward leg completed end-to-end on both chains:
+  - Solana: lock tx → observer ingested → deposit visible on Seal
+  - Stellar: lock_xlm tx (618adc74…) → soroban event observed → [ok] Stellar deposit visible on Seal
+  - Final [ok] bridge e2e round trip complete is the pass line from main's full case after both round trips succeed.
+
+  The two ==> TODO: lines you saw are pre-existing markers in solana_round_trip and stellar_round_trip for the reverse legs (burn → unlock_tokens
+  on Solana, burn → unlock_xlm on Stellar). Those are gated on Ringtail committee-signature wiring — not blocked by anything we touched this
+  session, and the script never attempted them. Forward-leg success is the contracted "round trip complete" signal.
+
+  So: the full chain works. Six fixes landed this session, in order:
+  1. SEAL_PORT_1/2/3 derived from $SEAL_RPC instead of hardcoded 8545-8547.
+  2. register_observer_verified (fail-loud + raw-response logging).
+  3. any_node_has_deposit (poll_until accepts any of the 3 nodes).
+  4. catch_unwind in poll_bridges_once (panic in observer code no longer wipes the observer set).
+  5. stack_up does docker compose down -v first (clears the persisted bridge-committee-key.hex from prior runs).
+  6. Per-node 4-phase readiness pipeline (wait_for_bridge_node_ready + wait_for_all_bridge_nodes_ready).
+
+  Plus the rotation smoke is opt-in (RUN_ROTATION_SMOKE=1) since its rotate-back failure is a separate bug that doesn't gate the round trip.
+
+  If you want, I can commit the current state — the readiness pipeline + rotation-smoke-opt-in + the down -v fix aren't in e4eb541f1 yet.
+
+  RPC methods cited — every one still exists by name in crates/seal-node/src/rpc.rs:
+
+  ┌───────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │       │   seal_listBridgeObservers · seal_pollBridges · seal_getBridgeStatus · seal_getBridgeDeposits · seal_getBridgeWrappedBalance ·     │
+  │ §17.1 │               seal_addBridgeObserver · seal_listBridgeDepositsByRecipient · seal_listBridgeWithdrawalsByInitiator ·                │
+  │       │                                      seal_listBridgeWrappedBalances · seal_listAdminAddresses                                      │
+  ├───────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ §17.2 │ seal_bridgeWithdraw · seal_getBridgeWithdrawal · seal_listBridgeWithdrawals                                                        │
+  ├───────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ §17.3 │ seal_bridgeCouncilAdd / Remove / List · seal_bridgePauseChain / Unpause / ListPaused · seal_bridgeRotateCommitteeKey ·             │
+  │       │ seal_bridgeGetCommitteeKeyStatus · seal_getCouncilMemberByAddress · seal_getValidatorByAddress                                     │
+  └───────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+
+  CLI subcommands — all still wired in crates/seal-cli/src/main.rs: seal bridge-withdraw, seal bridge-get-withdrawal, seal 
+  bridge-list-withdrawals, seal bridge-key-status.
+
+  What I changed
+
+  1. §17.3 opener — rewrote "None of the council RPCs are auth-gated today" with the same two-mode treatment §17.1 has (open mode → curl works;
+  admin mode → seal rpc --key admin.json required). The old text was misleading on both fronts: requires_admin_auth() at rpc.rs:682 actually
+  covers all five council/pause/rotate RPCs.
+  2. §17.3 known-issue callout — flagged the rotate-back failure we hit live this session: second seal_bridgeRotateCommitteeKey in a sequence
+  silently fails the quorum check (first works fine, second's info! log doesn't land). bridge-e2e.sh opts out by default; RUN_ROTATION_SMOKE=1 to
+  enable when debugging. Forward round trip unaffected.
+  3. §17.1 seal_pollBridges field documentation — clarified that observed is "deposits returned by this poll", not observer count (the bug I
+  chased earlier — rpc.rs:4045 returns deposits.len() for that field). Defined all four counters (observed/new/duplicate/processed) inline, plus
+  the "once cursor has advanced, observed:0 doesn't mean no observers" gotcha so the next reader doesn't repeat it.
+
+  What I deliberately didn't change
+
+  - §17 preamble + auth paragraph — already correct from the earlier session edit.
+  - §17.1 register-observer two-mode block — already correct.
+  - §17.2 withdraw flow + canonical-bytes table + reverse-claim handoff — verified against current handler code; numbers and structure match.
+  - §17.3 expected error codes — verified against the handler.
+
+  You should be able to follow §17.1 → §17.2 → §17.3 top-to-bottom on a bridges/docker-compose.testnet.yml stack and have every snippet land. The
+  only thing that will reproducibly fail is the rotate-back in §17.3, and that's now documented as a known issue.
+
+✻ Sautéed for 2m 23s
+
+※ recap: Goal: get bridge-e2e.sh running end-to-end and document §17 of MANUAL-TESTING.md. Current state: forward leg passes on Solana and 
+  Stellar, §17 audited and updated, all changes committed. Next action: pick whether to tackle the rotate-back bug, the reverse-leg TODOs, or 
+  something new.
+
+cd bridges
+docker compose -f docker-compose.testnet.yml up -d
+
+cargo run -p seal-node -- --slots 0 --rpc-port 8545 --dev-faucet
+
+===
+
+ Here's what I found across the planning docs (TODO.md, ROADMAP.md, DEMO-APPLICATIONS.md, PLAN.md, TODOS.md).
+
+  Apps in the plans
+
+  ✅ Built (live in apps/)
+
+  ┌──────────────────────────────┬─────────────────────────┬──────────────────────────────────────────────────────────────────────┐
+  │             App              │          Path           │                                Notes                                 │
+  ├──────────────────────────────┼─────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+  │ Faucet service               │ apps/seal-faucet/       │ axum, ML-DSA-signed transfers, IP/address cooldowns (done            │
+  │                              │                         │ 2026-05-09)                                                          │
+  ├──────────────────────────────┼─────────────────────────┼──────────────────────────────────────────────────────────────────────┤
+  │ Validator registration       │ apps/seal-registration/ │ axum, POST /register with ML-DSA sig verify (done 2026-05-10)        │
+  │ portal                       │                         │                                                                      │
+  └──────────────────────────────┴─────────────────────────┴──────────────────────────────────────────────────────────────────────┘
+
+  🚧 In progress
+
+  ┌───────────────────────┬───────────────────┬─────────────────────────────────────────────┐
+  │          App          │       Path        │                    Notes                    │
+  ├───────────────────────┼───────────────────┼─────────────────────────────────────────────┤
+  │ Seal Wallet (desktop) │ apps/seal-wallet/ │ Electron + WASM crypto — "desktop shipping" │
+  ├───────────────────────┼───────────────────┼─────────────────────────────────────────────┤
+  │ Block explorer        │ egui scaffold     │ read-only SQL queries against node state    │
+  └───────────────────────┴───────────────────┴─────────────────────────────────────────────┘
+
+  📋 Planned — core user-facing (ROADMAP Phase 6)
+
+  - Web block explorer — HTML/JS over RPC; pagination, tx detail, token supply dashboard, DEX charts
+  - DEX trading UI — order book, place/cancel orders, trade history
+  - Token / bridge UI — cross-chain deposit/withdraw, bridge status
+  - Android / iOS wallet — mobile wallet (emulator first)
+  - Browser extension — Firefox/Brave/Safari plugin exposing a JS/TS API; address-bar plugin to load a seal contract's integrated web
+  app
+  - JS/WASM SDK and Python SDK — wallet mgmt, SQL submission, block/tx subscription
+  - seal dev — local 3-node devnet with genesis, faucet, fast slots
+
+  🔮 Deferred / visionary example apps (TODO.md lines 165–220)
+
+  - Kindle-style content marketplace — encrypted blobs gated by token ownership, RLS-gated delivery
+  - Slack-style chat — private encrypted tables, bots as namespace apps, MPC analytics
+  - Secret manager — Shamir M-of-N threshold vault, on-chain audit log
+  - forms.seal — PQC-encrypted surveys with iterated-hash traces for ZK statistics
+  - Auth / 2FA app — ML-DSA identity, SHA3 TOTP/HOTP, ZK age/identity proofs
+  - Decentralized DNS — seal1name.seal → IP/content, Merkle-served static pages
+  - Decentralized NAS / disk manager — chunked, encrypted, erasure-coded file storage
+  - Limited subnetwork consensus — private subnets for enterprise apps (NAS/chat/secret-manager)
+
+  Want me to drill into any one of these — e.g. open the full spec in DEMO-APPLICATIONS.md, or check actual build status of the apps/
+  crates?

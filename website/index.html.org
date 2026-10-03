@@ -505,7 +505,7 @@ cargo build --release -p seal-node
 
 # Start validator
 ./target/release/seal-node --slots 0 --port 4001 --rpc-port 8545 \
-  --bootstrap-peers /dns4/boot1.seal-dao.network/tcp/4001</pre>
+  --bootstrap-peers /dns4/boot1.renoir42.com/tcp/4001</pre>
 </section>
 
 <section>

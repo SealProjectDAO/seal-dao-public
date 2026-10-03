@@ -1,0 +1,30 @@
+ After a docker compose down -v && bridge-e2e.sh run, Solana should now work. Stellar still needs end-to-end verification (the Soroban RPC
+  getEvents fix is new and untested against a live stack).
+
+  Testnet deployment readiness: not yet. Remaining blockers:
+  - Full e2e pass needed (both chains observed)
+  - Unlock flows are commented-out stubs (pending Ringtail/committee-key wiring)
+  - Bridge is one-directional: lock→observe works, but no mint on Seal side or burn→unlock
+
+ recap: Bridge e2e script gets lock events from Solana and Stellar into the Seal nodes. Tests still fail with observed:0 — run docker compose 
+  down -v then bridge-e2e.sh to verify the two committed fixes (confirmed commitment, --build rebuild).
+
+  ====
+
+  Summary of what the plan now specifies for CLI tooling:
+
+  Following the license-system pattern exactly:
+  - Two binaries — sol-bridge.ts and xlm-bridge.ts (not a monolithic "bridge" binary)
+  - Flat process.argv[2] switch — no Commander/yargs/clap, just a switch statement
+  - Hardcoded defaults, env-var overrides — SOL_BRIDGE_RPC, XLM_SOROBAN_RPC, SEAL_RPC, etc. Local stack = set env vars; public testnet = nothing
+  needed
+  - Keypair: path-or-inline — loadKeypair(arg): try existsSync(arg) first, then parse directly (mirrors sol-tool)
+  - Simple printf output — "sig:  <hash>\namount: 0.1 SOL" — no chalk, no spinners
+  - stderr for labels (progress, error), stdout for data (tx hashes, balances — safe to pipe)
+  - parseDecimalToLamports / parseDecimalToStroops helpers — no float arithmetic on money amounts
+  - watch subcommand — polling with seen-set dedup, 5 s sleep (mirrors sol-tool watch)
+
+  Stellar timeout fix (reminder): rebuild containers before re-running the e2e:
+  cd bridges
+  docker compose -f docker-compose.testnet.yml up --build --force-recreate -d --wait
+  ./scripts/bridge-e2e.sh

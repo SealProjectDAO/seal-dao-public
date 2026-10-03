@@ -35,6 +35,39 @@ pub trait RingtailKeySource: Send + Sync {
     fn read_keypair(&self) -> Result<crate::ringtail::RingtailKeypair, String>;
 }
 
+/// On-demand committee signing (KMS mode).
+///
+/// Unlike `CommitteeKeySource` which returns the raw key, this trait
+/// requests a signature directly. The key never leaves the KMS
+/// sidecar.
+pub trait CommitteeSigner: Send + Sync {
+    /// Sign a bridge withdrawal. Returns HMAC-SHA-256 hex string.
+    fn sign_committee(
+        &self,
+        dest_chain: &super::types::Chain,
+        dest_address: &str,
+        amount: u64,
+        nonce: u64,
+    ) -> Result<String, String>;
+}
+
+/// On-demand Ringtail signing (KMS mode).
+///
+/// Unlike `RingtailKeySource` which returns the raw keypair, this
+/// trait requests a signature directly. The key never leaves the
+/// KMS sidecar.
+#[cfg(feature = "ringtail-singleton")]
+pub trait RingtailSigner: Send + Sync {
+    /// Sign a bridge withdrawal. Returns RINGTAIL_SIG_BYTES hex string.
+    fn sign_ringtail(
+        &self,
+        dest_chain: &super::types::Chain,
+        dest_address: &str,
+        amount: u64,
+        nonce: u64,
+    ) -> Result<String, String>;
+}
+
 /// File-backed key source — the testnet default + the
 /// backwards-compatible path for operators not running an HSM.
 /// Holds paths only; reads happen lazily on each call so a

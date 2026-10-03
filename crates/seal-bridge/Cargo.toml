@@ -50,6 +50,11 @@ seal-ringtail-verify = { path = "../seal-ringtail-verify", optional = true }
 # so the default-feature build stays tokio-free.
 tokio = { workspace = true, optional = true }
 
+# KMS sidecar client — Unix socket implementation of CommitteeSigner
+# and RingtailSigner traits. Enables on-demand signing where the key
+# never leaves the KMS sidecar.
+seal-kms-client = { package = "seal-kms-sidecar", path = "../seal-kms-sidecar", optional = true }
+
 [features]
 default = []
 # Enables the host-side helper that produces a 1-of-1 Ringtail
@@ -59,6 +64,8 @@ default = []
 # for the multi-validator path; multi-signer + P2P round 1 / round 2
 # coordination is the next layer.
 ringtail-singleton = ["dep:seal-threshold", "dep:seal-ringtail-verify", "dep:tokio"]
+# KMS sidecar client — Unix socket CommitteeSigner/RingtailSigner
+kms-client = ["dep:seal-kms-client", "dep:tokio"]
 
 [dev-dependencies]
 proptest = { workspace = true }

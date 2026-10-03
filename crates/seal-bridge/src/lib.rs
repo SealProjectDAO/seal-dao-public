@@ -14,6 +14,8 @@ pub mod bridge;
 pub mod error;
 pub mod http;
 pub mod keysource;
+#[cfg(feature = "kms-client")]
+pub mod kms_client;
 pub mod observer;
 pub mod observers;
 #[cfg(feature = "ringtail-singleton")]

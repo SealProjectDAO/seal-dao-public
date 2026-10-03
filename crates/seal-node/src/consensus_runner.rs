@@ -20,7 +20,8 @@ use seal_threshold::simple::SimpleThreshold;
 use seal_threshold::traits::ThresholdScheme;
 use seal_token::orderbook::DexManager;
 use seal_vrf::VrfKeyManager;
-use seal_zk::traits::{StateTransition, ZkProver};
+use seal_zk::traits::{StateTransition, ZkProof, ZkProver, ZkVerifier};
+use seal_zk::ZkError;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::Mutex;
@@ -69,6 +70,9 @@ pub struct ConsensusRunner {
     /// ZK prover (default: RiscZeroProver in simulation mode).
     /// Can be switched to Sp1Prover via `set_prover()`.
     prover: Box<dyn ZkProver + Send + Sync>,
+    /// ZK verifier (default: StubVerifier).
+    /// Used to verify proofs submitted via `seal_submitProof`.
+    verifier: Box<dyn ZkVerifier + Send + Sync>,
     /// Storage lease manager (#STORAGE-FORGET).
     /// Tracks per-table leases and handles expiry-based pruning.
     pub leases: seal_token::LeaseManager,
@@ -93,6 +97,9 @@ pub struct ConsensusRunner {
     /// (`seal_gov*` methods) so callers can propose / vote /
     /// withdraw / tally / execute.
     pub governance: crate::governance::GovernanceModule,
+    /// The genesis configuration used to initialize this node, stored
+    /// after `apply_genesis` so it can be queried via `seal_getGenesis`.
+    pub genesis_config: Option<seal_consensus::genesis::GenesisConfig>,
     /// Per-track vote delegation. Mutated via `seal_govDelegate` /
     /// `seal_govRevokeDelegation` JSON-RPC methods.
     pub delegation: crate::delegation::DelegationManager,
@@ -167,6 +174,7 @@ impl ConsensusRunner {
             nonces: std::collections::HashMap::new(),
             state_root: Hash256::ZERO,
             prover: Box::new(seal_zk::RiscZeroProver::new()),
+            verifier: Box::new(seal_zk::StubVerifier),
             leases: seal_token::LeaseManager::new(),
             dex: Arc::new(Mutex::new(DexManager::new())),
             namespaces: NamespaceRegistry::new(),
@@ -174,6 +182,7 @@ impl ConsensusRunner {
             governance: crate::governance::GovernanceModule::new(),
             delegation: crate::delegation::DelegationManager::new(),
             snapshots: seal_storage::SnapshotIndex::new(),
+            genesis_config: None,
         }
     }
 
@@ -216,6 +225,7 @@ impl ConsensusRunner {
             nonces: std::collections::HashMap::new(),
             state_root: Hash256::ZERO,
             prover: Box::new(seal_zk::RiscZeroProver::new()),
+            verifier: Box::new(seal_zk::StubVerifier),
             leases: seal_token::LeaseManager::new(),
             dex: Arc::new(Mutex::new(DexManager::new())),
             namespaces: NamespaceRegistry::new(),
@@ -223,6 +233,7 @@ impl ConsensusRunner {
             governance: crate::governance::GovernanceModule::new(),
             delegation: crate::delegation::DelegationManager::new(),
             snapshots: seal_storage::SnapshotIndex::new(),
+            genesis_config: None,
         }
     }
 
@@ -320,15 +331,23 @@ impl ConsensusRunner {
         &mut self,
         genesis: &seal_consensus::genesis::GenesisConfig,
     ) -> Result<u64, seal_token::TokenError> {
-        genesis.apply_balances(&mut self.balances)
+        let credited = genesis.apply_balances(&mut self.balances)?;
+        self.genesis_config = Some(genesis.clone());
+        Ok(credited)
     }
 
-    /// Switch the ZK prover backend.
+    /// Switch the ZK prover backend (also resets verifier to match).
     pub fn set_prover(&mut self, backend: ProverBackend) {
         self.prover = match backend {
             ProverBackend::RiscZero => Box::new(seal_zk::RiscZeroProver::new()),
             ProverBackend::Sp1 => Box::new(seal_zk::Sp1Prover::new()),
         };
+        self.verifier = Box::new(seal_zk::StubVerifier);
+    }
+
+    /// Verify a ZK proof of a state transition.
+    pub fn verify_proof(&self, proof: &ZkProof) -> Result<(), ZkError> {
+        self.verifier.verify(proof)
     }
 
     /// Ensure the block seed is set for the current pending block height.
@@ -1336,11 +1355,11 @@ mod tests {
 
         runner
             .governance
-            .vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 800, Conviction::X1)
+            .vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 800, Conviction::X1, None)
             .unwrap();
         runner
             .governance
-            .vote_with_conviction(id, "bob".into(), VoteChoice::No, 100, Conviction::X1)
+            .vote_with_conviction(id, "bob".into(), VoteChoice::No, 100, Conviction::X1, None)
             .unwrap();
 
         // Force the epoch forward past the vote period and tally.
@@ -1374,7 +1393,7 @@ mod tests {
         );
         runner
             .governance
-            .vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 500, Conviction::X1)
+            .vote_with_conviction(id, "alice".into(), VoteChoice::Yes, 500, Conviction::X1, None)
             .unwrap();
         runner.governance.withdraw_vote(id, "alice").unwrap();
 
@@ -1927,6 +1946,24 @@ mod tests {
         // Spot-check: first testnet allocation lands under its address.
         let first = &genesis.allocations[0];
         assert_eq!(runner.balances.available(&first.address), first.amount);
+    }
+
+    #[test]
+    fn test_genesis_config_stored_after_apply() {
+        let mut runner = ConsensusRunner::new(ConsensusConfig::default());
+
+        // Precondition: no genesis config set.
+        assert!(runner.genesis_config.is_none());
+
+        let genesis = seal_consensus::genesis::GenesisConfig::testnet(3, 10_000_000_000);
+        runner.apply_genesis(&genesis).unwrap();
+
+        // Post-condition: genesis config is stored and queryable.
+        let stored = runner.genesis_config.as_ref().expect("genesis config should be stored");
+        assert_eq!(stored.chain_id, "seal-testnet");
+        assert_eq!(stored.validators.len(), 3);
+        assert_eq!(stored.allocations.len(), 1); // testnet single faucet allocation
+        assert_eq!(stored.initial_supply, 1_000_000_000_000_000_000); // hard-coded in testnet()
     }
 
     /// New runners start with an empty snapshot roster — there's

@@ -1,0 +1,82 @@
+# .dockerignore — what NOT to ship into the docker build context.
+#
+# Before this file: every `docker compose --build` shipped ~20+ GB of
+# build outputs (target/, bridges/*/target/, node_modules/, ...),
+# which docker layer-cached but still re-transferred on every cache
+# miss. Cargo's incremental build state isn't reusable across host
+# / container anyway — better to rebuild fresh inside the container.
+#
+# vendor/ IS shipped — .cargo/config.toml redirects crates.io to it,
+# so the container's `cargo build` needs the vendored sources.
+
+# Cargo build outputs at the workspace + bridge / example roots. We
+# can NOT use `**/target/` because some vendored crates have a real
+# source directory named `src/target/` (cc-1.2.60 ships parser.rs
+# there). Enumerate the actual build outputs instead.
+target/
+fuzz/target/
+bridges/solana/target/
+bridges/stellar/target/
+bridges/solana/programs/seal-bridge/target/
+crates/seal-zk/guest/target/
+apps/seal-wallet-android/target/
+apps/seal-wallet/target/
+sdks/wasm/target/
+examples/*/target/
+
+# Chain-state directories that accumulate hundreds of MB of local
+# RocksDB / ledger data per testnet run. The container image does
+# not need any of this — `--data-dir /data` mounts a fresh volume
+# per node at runtime.
+testnet-data/
+seal-data/
+
+# Android Studio outputs (Gradle, NDK builds — hundreds of MB). The
+# Rust workspace doesn't depend on any of it; the seal-wallet-android
+# top-level crate is built host-side and the artifact never enters
+# the seal-node image.
+apps/seal-wallet-android/android/
+
+# Bridge build logs (the *.log fixtures, not Rust target/).
+bridges/build.log
+bridges/solana/programs/seal-bridge/build-sbf.log
+
+# Fuzz corpora — kept under git LFS for reproducibility but not
+# needed for the runtime image; they're already partially excluded
+# via fuzz/artifacts + fuzz/corpus + fuzz/coverage below, but make
+# the intent explicit at the directory level.
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/
+
+# Node modules (Anchor / Soroban / Electron). Same scoping reasoning
+# as target/: keep narrow so vendored crates with `node_modules/` in
+# fixture data (none today, but future-proof) survive.
+node_modules/
+apps/seal-wallet/node_modules/
+apps/seal-wallet-extension/node_modules/
+bridges/solana/node_modules/
+sdks/wasm/node_modules/
+examples/*/node_modules/
+
+# Git history. The build doesn't need git metadata; large repos can
+# add hundreds of MB to the context.
+.git/
+
+# Editor / OS noise.
+.DS_Store
+*.swp
+.idea/
+.vscode/
+
+# Local docker state (kept in tree by some compose runs).
+bridges/seal-data/
+
+# Test artifacts.
+fuzz/artifacts/
+fuzz/corpus/
+fuzz/coverage/
+
+# Documentation builds (if any).
+book/
+mdbook/

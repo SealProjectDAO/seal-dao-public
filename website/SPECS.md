@@ -1,6 +1,6 @@
 # Seal DAO Website Specification
 
-Target: [https://seal-dao.network](https://seal-dao.network)
+Target: [https://renoir42.com/](https://renoir42.com/)
 
 ---
 
@@ -313,7 +313,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 cargo install seal-cli
 
 # Or download the binary
-curl -sSL https://seal-dao.network/install.sh | sh
+curl -sSL https://renoir42.com/install.sh | sh
 ```
 
 **Start a local node**
@@ -399,7 +399,7 @@ Three cards for Rust, JavaScript/WASM, and Python SDKs.
 ```rust
 use seal_sdk::Client;
 
-let client = Client::connect("https://rpc.seal-dao.network").await?;
+let client = Client::connect("https://rpc.renoir42.com").await?;
 let app = client.app("my_blog").await?;
 let posts = app.query("SELECT * FROM posts LIMIT 10").await?;
 ```
@@ -408,7 +408,7 @@ let posts = app.query("SELECT * FROM posts LIMIT 10").await?;
 ```typescript
 import { SealClient } from '@seal-dao/sdk';
 
-const client = new SealClient('https://rpc.seal-dao.network');
+const client = new SealClient('https://rpc.renoir42.com');
 const app = await client.app('my_blog');
 const posts = await app.query('SELECT * FROM posts LIMIT 10');
 ```
@@ -417,7 +417,7 @@ const posts = await app.query('SELECT * FROM posts LIMIT 10');
 ```python
 from seal_sdk import Client
 
-client = Client("https://rpc.seal-dao.network")
+client = Client("https://rpc.renoir42.com")
 app = client.app("my_blog")
 posts = app.query("SELECT * FROM posts LIMIT 10")
 ```
@@ -745,7 +745,7 @@ Read CLAUDE.md in the repo for coding conventions.
 | Styling | Tailwind CSS | Utility-first, custom theme via `tailwind.config.ts` |
 | Syntax highlighting | Shiki | Build-time highlighting, no runtime JS |
 | Deployment | Cloudflare Pages | Global CDN, free tier sufficient |
-| Domain | `seal-dao.network` | Already registered |
+| Domain | `renoir42.com` | Already registered |
 | Analytics | Plausible (self-hosted) or none | No Google Analytics. Privacy-first. |
 
 ### 3.2 Performance Targets

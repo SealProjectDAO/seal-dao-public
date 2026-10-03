@@ -3,10 +3,10 @@ seeds = false
 skip-lint = false
 
 [programs.localnet]
-seal_bridge = "FaYr7yXwC3QnZapqTKkYU1Fgy6zwGUzoFjvyKQVXypyD"
+seal_bridge = "FrZimXzrJpCEWoPqTgpduG3RGwYxa5k4JQAHsXpwJPL9"
 
 [programs.devnet]
-seal_bridge = "FaYr7yXwC3QnZapqTKkYU1Fgy6zwGUzoFjvyKQVXypyD"
+seal_bridge = "FrZimXzrJpCEWoPqTgpduG3RGwYxa5k4JQAHsXpwJPL9"
 
 [registry]
 url = "https://api.apr.dev"

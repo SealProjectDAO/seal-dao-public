@@ -27,6 +27,7 @@ pub mod rounding;
 pub mod simple;
 pub mod snark_agg;
 pub mod traits;
+pub mod vss;
 
 pub use error::ThresholdError;
 pub use ringtail::RingtailThreshold;

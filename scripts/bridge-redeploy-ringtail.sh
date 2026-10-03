@@ -12,11 +12,16 @@
 # deploy + a fresh seal_addBridgeObserver, not an "upgrade" of the
 # existing program.
 #
-# Usage:
+# Usage (GPG-wrapped keys):
+#   scripts/solana-gpg-wrapper.sh install && scripts/stellar-gpg-wrapper.sh install
 #   ./scripts/bridge-redeploy-ringtail.sh \
-#       --solana-keypair $HOME/.config/solana/id.json \
-#       --stellar-account G... \
+#       --solana-keypair ~/.config/solana/id.json \
+#       --stellar-account "$(scripts/stellar-gpg-wrapper.sh keys address seal-bridge-deployer --network testnet)" \
 #       --seal-rpc http://127.0.0.1:8645
+#   scripts/solana-gpg-wrapper.sh wipe && scripts/stellar-gpg-wrapper.sh wipe
+#
+# Deployer keys are shared with bridge-deploy-devnet.sh.
+# See docs/RUNBOOK-TESTNET-OPERATOR.md §0 for generation instructions.
 #
 # All args are forwarded to scripts/bridge-deploy-devnet.sh with
 # `--features ringtail-verify` injected. See that script's --help

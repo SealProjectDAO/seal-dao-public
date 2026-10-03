@@ -1,0 +1,169 @@
+# Seal DAO -- Bridge nodes for public testnets (Solana devnet + Stellar testnet)
+#
+# Brings up only the 3 Seal validator nodes. Source-chain observers
+# are registered at runtime via `seal_addBridgeObserver` RPC calls
+# pointing at public testnet endpoints.
+#
+# Usage:
+#   cd bridges
+#   docker compose -f docker-compose.testnet-public.yml up -d
+#   docker compose -f docker-compose.testnet-public.yml down
+#
+# Exposed ports (on localhost):
+#   Seal bridge node 1 RPC :8645   (also P2P bootstrap :4101)
+#   Seal bridge node 2 RPC :8646
+#   Seal bridge node 3 RPC :8647
+
+services:
+  # ── Seal validators ─────────────────────────────────────────
+  # Dockerfile at repo root builds seal-node. The binary reads CLI
+  # flags only (no env-var parsing), so all config is in `command:`.
+  # `--slots 0` runs forever; default is 10 (demo mode -> exits).
+  # `--rpc-port` opens the JSON-RPC server; default 0 = disabled.
+  # `--rpc-external` binds the RPC to 0.0.0.0 so Docker port-mapping
+  # works. The default (without the flag) is 127.0.0.1-only; use that
+  # in production. Here we need external access from the host so the
+  # bridge scripts can reach seal_pollBridges etc.
+  # `--allow-new-recipients` lets the bridge observer fund fresh
+  # Seal addresses minted by the lock->mint flow.
+  # SEAL_VALIDATOR_KEY tells the image's entrypoint to materialize a
+  # persistent validator keyfile in the data volume on first boot, then
+  # pass `--validator-key <path>` to seal-node. Same path on every
+  # restart -> same on-chain ML-DSA identity, same VRF state. Erasing
+  # the named volume (`docker compose down -v`) regenerates the key.
+  #
+  # Committee key management:
+  #   --bridge-committee-key <64-hex>  sets the HMAC-SHA-256 secret
+  #   --clear-committee-key-file       deletes the persisted key file
+  #                                    at <data-dir>/bridge-committee-key.hex
+  #                                    before loading (use after key rotation)
+  #   --bridge-poll-interval-secs 10   enables background auto-poll
+  #
+  # IMPORTANT: DO NOT hardcode the committee key here. It must be set
+  # dynamically per-deployment via the deployment script so each
+  # public testnet run uses a fresh 256-bit random key.
+  seal-1:
+    build: ..
+    container_name: seal-bridge-node-1
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--allow-new-recipients"
+      # Bridge committee key — set dynamically by the deployment
+      # script. The --bridge-committee-key flag accepts a 64-char
+      # hex string (256 bits). For production this key must match
+      # the value the on-chain bridge programs were initialized with.
+      # Without this flag, withdrawal records land with
+      # committee_signature_hex = None.
+      # --clear-committee-key-file removes stale on-disk key so the
+      # --bridge-committee-key CLI flag takes effect (prevents a prior
+      # key from being silently restored on restart).
+      - "--clear-committee-key-file"
+      - "--bridge-committee-key"
+      - "${BRIDGE_COMMITTEE_KEY:-}"
+      # In-process bridge auto-poll. 10 s interval keeps public
+      # testnet observation responsive without driving the source-
+      # chain RPC into rate-limit territory.
+      - "--bridge-poll-interval-secs"
+      - "10"
+      # Bump admin rate limit from the 5 req/min default. The
+      # bridge flow bursts council seating + rotations +
+      # observer registration back-to-back.
+      - "--rpm-admin"
+      - "60"
+    environment:
+      RUST_LOG: "seal_node=info,seal_bridge=debug"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
+    ports:
+      - "8645:8545"
+      - "4101:4001"
+    volumes:
+      - seal-1-data:/data
+    networks:
+      - seal-bridge-net
+
+  seal-2:
+    build: ..
+    container_name: seal-bridge-node-2
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--bootstrap-peers"
+      - "/dns4/seal-1/tcp/4001"
+      - "--allow-new-recipients"
+      - "--clear-committee-key-file"
+      - "--bridge-committee-key"
+      - "${BRIDGE_COMMITTEE_KEY:-}"
+      - "--bridge-poll-interval-secs"
+      - "10"
+      - "--rpm-admin"
+      - "60"
+    environment:
+      RUST_LOG: "seal_node=info,seal_bridge=debug"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
+    ports:
+      - "8646:8545"
+    volumes:
+      - seal-2-data:/data
+    depends_on:
+      - seal-1
+    networks:
+      - seal-bridge-net
+
+  seal-3:
+    build: ..
+    container_name: seal-bridge-node-3
+    command:
+      - "--slots"
+      - "0"
+      - "--port"
+      - "4001"
+      - "--rpc-port"
+      - "8545"
+      - "--rpc-external"
+      - "--data-dir"
+      - "/data"
+      - "--bootstrap-peers"
+      - "/dns4/seal-1/tcp/4001"
+      - "--allow-new-recipients"
+      - "--clear-committee-key-file"
+      - "--bridge-committee-key"
+      - "${BRIDGE_COMMITTEE_KEY:-}"
+      - "--bridge-poll-interval-secs"
+      - "10"
+      - "--rpm-admin"
+      - "60"
+    environment:
+      RUST_LOG: "seal_node=info,seal_bridge=debug"
+      SEAL_VALIDATOR_KEY: "/data/validator-key.json"
+    ports:
+      - "8647:8545"
+    volumes:
+      - seal-3-data:/data
+    depends_on:
+      - seal-1
+    networks:
+      - seal-bridge-net
+
+volumes:
+  seal-1-data:
+  seal-2-data:
+  seal-3-data:
+
+networks:
+  seal-bridge-net:
+    driver: bridge
