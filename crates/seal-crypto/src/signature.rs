@@ -17,7 +17,7 @@ type MLDSA65VerificationKey = libcrux_ml_dsa::ml_dsa_65::MLDSA65VerificationKey;
 type MLDSA65Signature = libcrux_ml_dsa::ml_dsa_65::MLDSA65Signature;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::CryptoError;
 
@@ -27,6 +27,7 @@ pub const VERIFYING_KEY_SIZE: usize = 1952;
 pub const SIGNATURE_SIZE: usize = 3309;
 
 /// ML-DSA-65 signing key (secret). Zeroized on drop.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct SigningKey {
     /// Raw signing key bytes (4032 bytes for ML-DSA-65).
     bytes: Vec<u8>,
@@ -104,12 +105,6 @@ impl SigningKey {
         Ok(SigningKey {
             bytes: bytes.to_vec(),
         })
-    }
-}
-
-impl Drop for SigningKey {
-    fn drop(&mut self) {
-        self.bytes.zeroize();
     }
 }
 

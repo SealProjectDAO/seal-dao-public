@@ -98,7 +98,11 @@ impl StorageLease {
 }
 
 /// Manages storage leases for all tables.
-#[derive(Debug, Default)]
+///
+/// `Clone` is required so the on-block transition can snapshot/restore the
+/// lease state atomically (audit F1) and so the producer and replayer apply
+/// identical lease pruning (audit F3) without leaking partial state.
+#[derive(Clone, Debug, Default)]
 pub struct LeaseManager {
     /// Table name → StorageLease.
     leases: HashMap<String, StorageLease>,

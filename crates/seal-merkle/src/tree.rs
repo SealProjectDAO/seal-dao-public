@@ -33,6 +33,7 @@ use crate::MerkleError;
 use seal_crypto::hash::Hash256;
 
 /// A Merkle B-tree backed by a content-addressed store.
+#[derive(Clone)]
 pub struct MerkleTree<S: NodeStore> {
     root: NodeRef,
     store: S,

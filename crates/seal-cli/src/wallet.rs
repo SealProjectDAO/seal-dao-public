@@ -1345,10 +1345,13 @@ fn mpc_aggregate(wallet: &Option<WalletState>, function: &str, table: &str, colu
             return;
         }
     };
-    match rpc_call(
+    // seal_mpcAggregate is auth-gated (it builds SQL from caller
+    // input), so sign with the wallet key.
+    match signed_rpc_call(
         url,
         "seal_mpcAggregate",
         &serde_json::json!({"function": function, "table": table, "column": column}),
+        &w.wallet,
     ) {
         Ok(resp) => {
             let result = resp.get("result").and_then(|r| r.as_i64()).unwrap_or(0);
@@ -1377,10 +1380,13 @@ fn zk_prove(wallet: &Option<WalletState>, table: &str, statement: &str) {
             return;
         }
     };
-    match rpc_call(
+    // seal_zkProve is auth-gated (it builds SQL from caller input),
+    // so sign with the wallet key.
+    match signed_rpc_call(
         url,
         "seal_zkProve",
         &serde_json::json!({"table": table, "statement": statement}),
+        &w.wallet,
     ) {
         Ok(resp) => {
             let satisfied = resp

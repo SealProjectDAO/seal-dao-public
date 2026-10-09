@@ -119,21 +119,32 @@ impl BalanceStore {
         bincode::serialize(bal).expect("Balance is fixed-size u64 fields, bincode never fails")
     }
 
-    /// Deserialize a HAMT-stored balance. Panics on corrupt data —
-    /// the only way that happens is a bug in this module, not user
-    /// input, so propagating an error wouldn't help recovery.
-    fn decode_balance(bytes: &[u8]) -> Balance {
+    /// Deserialize a HAMT-stored balance. Returns `Err` on corrupt
+    /// bytes — either a bug in this module or a hand-crafted / truncated
+    /// leaf — rather than panicking. A corrupt leaf is not recoverable as
+    /// a real balance, so callers treat it as an absent account: `fetch`
+    /// maps the error to `None` (with a warning), and `all_accounts` skips
+    /// it (with a warning). `restore_from_snapshot` is the one path that
+    /// hard-fails, because there a corrupt entry means "the peer lied."
+    fn decode_balance(bytes: &[u8]) -> Result<Balance, TokenError> {
         bincode::deserialize(bytes)
-            .expect("HAMT-stored balance must be bincode of Balance; bug if not")
+            .map_err(|e| TokenError::Custom(format!("corrupt balance leaf: {e}")))
     }
 
     /// Read a balance by address. Owned because the value is
     /// deserialized from the HAMT's stored bytes; we can't return
     /// a borrow into the trie.
     fn fetch(&self, address: &str) -> Option<Balance> {
-        self.accounts
-            .get(address.as_bytes())
-            .map(Self::decode_balance)
+        match self.accounts.get(address.as_bytes()) {
+            Some(bytes) => match Self::decode_balance(bytes) {
+                Ok(bal) => Some(bal),
+                Err(e) => {
+                    tracing::warn!(%address, %e, "corrupt balance leaf treated as missing account");
+                    None
+                }
+            },
+            None => None,
+        }
     }
 
     /// Write a balance back to the HAMT. Invalidates the cached
@@ -193,12 +204,24 @@ impl BalanceStore {
     }
 
     /// Mint tokens to an address (increases total supply).
+    ///
+    /// Atomic: the balance credit and the `total_supply` bump are each
+    /// validated *before* either is committed, so a `u64` overflow in one
+    /// can't leave the ledger inconsistent (`total_supply` bumped with no
+    /// matching balance, or a balance credited with no supply bump). On
+    /// failure the store is left exactly as it was — audit P1.
     pub fn mint(&mut self, address: &str, amount: u64) -> Result<(), TokenError> {
-        self.total_supply = self
+        // Stage the credit and the supply bump independently; commit only if
+        // both succeed.
+        let mut staged = self.fetch(address).unwrap_or_default();
+        staged.credit(amount)?;
+        let new_supply = self
             .total_supply
             .checked_add(amount)
             .ok_or(TokenError::Overflow)?;
-        self.update_or_create(address, |b| b.credit(amount))
+        self.total_supply = new_supply;
+        self.put(address, &staged);
+        Ok(())
     }
 
     /// Burn tokens from an address (decreases total supply).
@@ -282,13 +305,17 @@ impl BalanceStore {
     pub fn all_accounts(&self) -> Vec<(String, u64)> {
         self.accounts
             .iter()
-            .filter_map(|(k, v)| {
-                let bal = Self::decode_balance(v);
-                if bal.available == 0 {
-                    return None;
+            .filter_map(|(k, v)| match Self::decode_balance(v) {
+                Ok(bal) if bal.available != 0 => {
+                    let addr = std::str::from_utf8(k).ok()?.to_string();
+                    Some((addr, bal.available))
                 }
-                let addr = std::str::from_utf8(k).ok()?.to_string();
-                Some((addr, bal.available))
+                Ok(_) => None,
+                Err(e) => {
+                    let key = std::str::from_utf8(k).unwrap_or("<binary>");
+                    tracing::warn!(%key, %e, "corrupt balance leaf skipped in all_accounts");
+                    None
+                }
             })
             .collect()
     }
@@ -362,6 +389,26 @@ impl BalanceStore {
         store.root_cache.set(None);
         Ok(store)
     }
+
+    /// Reconstruct a `BalanceStore` from a `snapshot_dump` while
+    /// keeping the caller-supplied totals instead of re-deriving
+    /// `total_supply` from the per-account sums and resetting
+    /// `total_burned`.
+    ///
+    /// Used by the local `balances.bin` persistence path (seal-node),
+    /// where the totals are known exactly at dump time and
+    /// re-deriving them would drift (the burn counter in particular
+    /// is non-state by design and only the live store knows it).
+    pub fn restore_with_totals(
+        entries: Vec<(Vec<u8>, Vec<u8>)>,
+        total_supply: u64,
+        total_burned: u64,
+    ) -> Result<Self, String> {
+        let mut store = Self::restore_from_snapshot(entries)?;
+        store.total_supply = total_supply;
+        store.total_burned = total_burned;
+        Ok(store)
+    }
 }
 
 #[cfg(test)]
@@ -380,6 +427,24 @@ mod tests {
         b.debit(300).unwrap();
         assert_eq!(b.available, 1200);
         assert_eq!(b.total, 1200);
+    }
+
+    /// Regression: a corrupt balance leaf must surface as an `Err`, not a
+    /// panic. `decode_balance` is the single choke point every HAMT read
+    /// goes through (`fetch`, `all_accounts`); before the fix, garbage
+    /// bytes here hit `.expect` and took the whole node down.
+    #[test]
+    fn decode_balance_rejects_corrupt_leaf() {
+        // Valid round-trip.
+        let good = BalanceStore::encode_balance(&Balance::new(5));
+        let bal = BalanceStore::decode_balance(&good).expect("valid balance decodes");
+        assert_eq!(bal.available, 5);
+
+        // Truncated garbage (not enough bytes for 3 u64 fields).
+        assert!(BalanceStore::decode_balance(&[0xff, 0xff, 0xff]).is_err());
+        // Valid bincode but the wrong shape (a lone u64, not a Balance).
+        let not_a_balance = bincode::serialize(&42u64).unwrap();
+        assert!(BalanceStore::decode_balance(&not_a_balance).is_err());
     }
 
     #[test]
@@ -427,6 +492,41 @@ mod tests {
         assert_eq!(store.total_supply(), 1200);
         assert_eq!(store.total_burned(), 300);
         assert_eq!(store.available("alice"), 700);
+    }
+
+    #[test]
+    fn test_mint_overflow_leaves_store_unchanged() {
+        // P1: a `u64` overflow during a mint must leave the store exactly as it
+        // was — neither `total_supply` bumped with no matching balance, nor a
+        // balance credited with no supply bump. Pre-fix, `total_supply` was
+        // committed before the balance credit, so a credit overflow leaked a
+        // supply bump (total_supply != sum of balances).
+        let mut store = BalanceStore::new();
+        store.mint("alice", 100).unwrap();
+        assert_eq!(store.total_supply(), 100);
+
+        // A near-overflow account: available == u64::MAX so credit(+1) overflows.
+        let mut big = Balance::default();
+        big.available = u64::MAX;
+        big.total = u64::MAX;
+        store.put("big", &big);
+        let supply_before = store.total_supply();
+
+        assert!(
+            store.mint("big", 1).is_err(),
+            "minting onto a u64::MAX balance must error"
+        );
+        // Store unchanged: no leaked supply bump, balance intact.
+        assert_eq!(
+            store.total_supply(),
+            supply_before,
+            "total_supply leaked on credit overflow"
+        );
+        assert_eq!(
+            store.get("big").unwrap().available,
+            u64::MAX,
+            "balance must not change on a failed mint"
+        );
     }
 
     #[test]
@@ -630,7 +730,8 @@ mod tests {
         );
         // Each value must round-trip through decode_balance.
         for (_, v) in &dump {
-            let bal = BalanceStore::decode_balance(v);
+            let bal = BalanceStore::decode_balance(v)
+                .expect("a freshly encoded balance must decode");
             assert!(bal.available > 0);
         }
     }
@@ -669,6 +770,34 @@ mod tests {
         assert_eq!(original.get("seal1alice"), restored.get("seal1alice"));
         assert_eq!(original.get("seal1bob"), restored.get("seal1bob"));
         assert_eq!(original.get("seal1carol"), restored.get("seal1carol"));
+    }
+
+    /// `restore_with_totals` is the `balances.bin` persistence
+    /// inverse: dump → restore keeps the EXACT live totals (including
+    /// the burn counter, which `restore_from_snapshot` deliberately
+    /// cannot know) instead of re-deriving them.
+    #[test]
+    fn restore_with_totals_round_trip() {
+        let mut original = BalanceStore::new();
+        original.mint("seal1alice", 1_000).unwrap();
+        original.mint("seal1bob", 2_000).unwrap();
+        // Burn so total_burned > 0 and total_supply < account sum
+        // never happens (burn removes from supply too) — the point
+        // is the restored store must keep BOTH numbers as-is.
+        original.burn("seal1bob", 250).unwrap();
+
+        let dump = original.snapshot_dump();
+        let supply = original.total_supply();
+        let burned = original.total_burned();
+        assert_eq!(burned, 250);
+
+        let restored = BalanceStore::restore_with_totals(dump, supply, burned).unwrap();
+
+        assert_eq!(original.state_root_hash(), restored.state_root_hash());
+        assert_eq!(restored.total_supply(), supply);
+        assert_eq!(restored.total_burned(), burned);
+        assert_eq!(original.get("seal1alice"), restored.get("seal1alice"));
+        assert_eq!(original.get("seal1bob"), restored.get("seal1bob"));
     }
 
     /// Restoring from a stream that includes a malformed bincode

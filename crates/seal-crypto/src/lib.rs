@@ -18,7 +18,7 @@ pub mod signature;
 
 pub use address::SealAddress;
 pub use error::CryptoError;
-pub use hash::{sha3_256, Sha3Hasher};
+pub use hash::{merkle_root, sha3_256, Sha3Hasher};
 pub use hybrid_kem::{
     HybridEncapsulation, HybridKemKeypair, HybridKemPublicKey, HybridKemSharedSecret,
 };

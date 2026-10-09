@@ -1,5 +1,50 @@
 # Changelog
 
+## Unreleased — 2026-09-28 security fixes
+
+⚠️ **Hard break: wipe your data directory on this upgrade.**
+`BlockHeader` gained a `proposer_signature` field. bincode is
+positional, so persisted chains from before this change no longer
+deserialize; the node fails block replay at block 1 and re-seeds.
+Delete `<data-dir>` before upgrading.
+
+- **Blocks are now signed by their proposer.** Producers ML-DSA-sign
+  the canonical (empty-signature) serialization of the header and store
+  it in `BlockHeader.proposer_signature`; `verify_and_apply_block`
+  rejects blocks with a missing or non-matching signature. Combined
+  with the VRF election check, a received block must now be provably
+  produced by the elected validator's key holder.
+- **The VRF secret key is no longer gossiped.** Validator records and
+  RPC endpoints serve the real VRF *public* key; election evaluation
+  takes the local secret explicitly.
+- **RPC auth hardening.** Unsigned `seal_querySql` is restricted to a
+  single SELECT statement; `seal_mpcAggregate`, `seal_zkProve`, and the
+  six previously open-mode-privileged bridge methods
+  (`seal_bridgeCouncilAdd/Remove`, `seal_bridgePauseChain`,
+  `seal_bridgeUnpauseChain`, `seal_bridgeRotateCommitteeKey`,
+  `seal_addBridgeObserver`) now require a valid signature. CLI and
+  Android wallet call sites were switched to signed calls.
+- `PqRpcSession`'s `Debug` impl no longer prints the full session key.
+- **Balances survive restarts; the genesis mint is idempotent.**
+  Balance state is persisted to `<data-dir>/balances.bin` (atomic
+  temp-then-rename) after boot, after every produced block, and on
+  clean exit. Boot replays the on-disk chain first; if replay breaks
+  partway, the store is restored from `balances.bin`. The genesis
+  mint now fires only when the store holds no accounts, so restarts
+  can no longer double-mint genesis supply or reset balances.
+- **Money transactions are nonce-stamped.** `seal_transfer` and other
+  money-movement types carry an 8-byte LE sender nonce; the consensus
+  runner rejects out-of-order or duplicate nonces, and `replay_block`
+  re-applies `Transfer` transactions so a replayer converges to the
+  same balances.
+- **Epoch transitions are signed and verified.** Crossing an epoch
+  boundary stashes an `EpochTransitionMsg` (epoch, prev seed, VRF
+  output, new seed) signed by the transitioning validator; peers
+  re-derive the seed from local chain state and verify the signature
+  against an active validator before applying it. The old format —
+  an unsigned 8-byte epoch number that let any peer rewrite the epoch
+  seed — is rejected.
+
 ## Unreleased — 2026-05-16 "no excuse bordel" session
 
 P1#5 layer 4 closed the testnet blocker and several pre-deferred items

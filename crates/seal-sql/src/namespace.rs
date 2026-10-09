@@ -273,6 +273,48 @@ impl NamespaceRegistry {
         sql: &str,
         requesting_app: &str,
     ) -> Result<crate::engine::QueryResult, SqlError> {
+        // Enforce the documented read-only contract up front. Read visibility
+        // (PUBLIC/SHARED) authorizes reading ONE granted table, nothing more. The
+        // SQL engine executes *every* statement in a string and the target engine
+        // can see the whole namespace, so the guard must pin the query down:
+        //   - no `;` — otherwise a trailing INSERT/UPDATE/DELETE/DDL would run on
+        //     the target (same rule as `is_read_only_sql` in seal-node/rpc.rs);
+        //   - first token SELECT (WITH/CTE and every non-SELECT rejected);
+        //   - no JOIN — a cross-app read is from a single table;
+        //   - the table the query names must be exactly the granted `table_name`,
+        //     so a read grant on one public table can't be used to read a PRIVATE
+        //     one in the same namespace.
+        let trimmed = sql.trim();
+        if trimmed.is_empty() {
+            return Err(SqlError::Execution("cross-app query: empty SQL".to_string()));
+        }
+        if trimmed.contains(';') {
+            return Err(SqlError::Execution(
+                "cross-app queries must be a single statement (no ';')".to_string(),
+            ));
+        }
+        let upper = trimmed.to_uppercase();
+        let first = trimmed.split_whitespace().next().unwrap_or("");
+        if !first.eq_ignore_ascii_case("select") {
+            return Err(SqlError::Execution(
+                "cross-app queries must be read-only (SELECT)".to_string(),
+            ));
+        }
+        if upper.split_whitespace().any(|w| w == "JOIN") {
+            return Err(SqlError::Execution(
+                "cross-app queries are single-table (no JOIN)".to_string(),
+            ));
+        }
+        let referenced = extract_table_name(trimmed).ok_or_else(|| {
+            SqlError::Execution("cross-app query: no single target table in SELECT".to_string())
+        })?;
+        if referenced != table_name.to_lowercase() {
+            return Err(SqlError::Execution(format!(
+                "cross-app query: references '{}' but the read grant is on '{}'",
+                referenced, table_name
+            )));
+        }
+
         // Check the target app exists
         let target = self
             .namespaces
@@ -691,5 +733,181 @@ mod tests {
             "stranger.seal",
         );
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_cross_app_query_write_rejected() {
+        let mut registry = NamespaceRegistry::new();
+        registry
+            .deploy_app(
+                "blog.seal".into(),
+                "owner".into(),
+                "CREATE TABLE posts (id BIGINT PRIMARY KEY, body TEXT)",
+            )
+            .unwrap();
+        let blog = registry.get_mut("blog.seal").unwrap();
+        blog.set_visibility("posts", Visibility::Public);
+
+        // Read visibility must NOT imply write access: an app that can read the
+        // public table cannot INSERT into it.
+        let err = registry
+            .cross_app_query(
+                "blog.seal",
+                "posts",
+                "INSERT INTO posts (id, body) VALUES (2, 'xss')",
+                "market.seal",
+            )
+            .expect_err("cross-app write must be rejected");
+        assert!(
+            err.to_string().contains("read-only"),
+            "expected read-only rejection, got: {err}"
+        );
+
+        // The target table must be unchanged (still zero rows).
+        let result = registry
+            .cross_app_query("blog.seal", "posts", "SELECT * FROM posts", "market.seal")
+            .unwrap();
+        assert_eq!(result.rows.len(), 0, "cross-app write must not land");
+
+        // Same for UPDATE and DELETE.
+        assert!(registry
+            .cross_app_query(
+                "blog.seal",
+                "posts",
+                "UPDATE posts SET body = 'pwned' WHERE id = 1",
+                "market.seal",
+            )
+            .is_err());
+        assert!(registry
+            .cross_app_query(
+                "blog.seal",
+                "posts",
+                "DELETE FROM posts WHERE id = 1",
+                "market.seal",
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn test_cross_app_query_ddl_rejected() {
+        let mut registry = NamespaceRegistry::new();
+        registry
+            .deploy_app(
+                "blog.seal".into(),
+                "owner".into(),
+                "CREATE TABLE posts (id BIGINT PRIMARY KEY, body TEXT)",
+            )
+            .unwrap();
+        let blog = registry.get_mut("blog.seal").unwrap();
+        blog.set_visibility("posts", Visibility::Public);
+
+        // DDL through a read-visibility grant must also be rejected.
+        assert!(registry
+            .cross_app_query(
+                "blog.seal",
+                "posts",
+                "DROP TABLE posts",
+                "market.seal",
+            )
+            .is_err());
+        assert!(registry
+            .cross_app_query(
+                "blog.seal",
+                "posts",
+                "ALTER TABLE posts ADD COLUMN secret TEXT",
+                "market.seal",
+            )
+            .is_err());
+
+        // The table must still exist.
+        assert!(registry.get("blog.seal").unwrap().table_names().contains(&"posts"));
+    }
+
+    #[test]
+    fn test_cross_app_query_multistatement_rejected() {
+        let mut registry = NamespaceRegistry::new();
+        registry
+            .deploy_app(
+                "blog.seal".into(),
+                "owner".into(),
+                "CREATE TABLE posts (id BIGINT PRIMARY KEY, body TEXT)",
+            )
+            .unwrap();
+        let blog = registry.get_mut("blog.seal").unwrap();
+        blog.set_visibility("posts", Visibility::Public);
+        blog.execute_as("INSERT INTO posts (id, body) VALUES (1, 'ok')", "owner")
+            .unwrap();
+
+        // A sacrificial leading SELECT must not unlock a trailing write/DDL — the
+        // engine executes every `;`-separated statement, so a `;` is rejected up
+        // front. (Regression for the multi-statement bypass: F1.)
+        for bad in [
+            "SELECT * FROM posts; DROP TABLE posts",
+            "SELECT * FROM posts; INSERT INTO posts (id, body) VALUES (999, 'pwned')",
+            "SELECT * FROM posts; UPDATE posts SET body = 'pwned' WHERE id = 1",
+            "SELECT * FROM posts; DELETE FROM posts WHERE id = 1",
+        ] {
+            assert!(
+                registry
+                    .cross_app_query("blog.seal", "posts", bad, "market.seal")
+                    .is_err(),
+                "multi-statement query must be rejected: {bad}"
+            );
+        }
+
+        // The target must be untouched: still present, still exactly 1 row.
+        let result = registry
+            .cross_app_query("blog.seal", "posts", "SELECT * FROM posts", "market.seal")
+            .unwrap();
+        assert_eq!(result.rows.len(), 1, "multi-statement write must not land");
+        assert!(registry.get("blog.seal").unwrap().table_names().contains(&"posts"));
+    }
+
+    #[test]
+    fn test_cross_app_query_crosstable_rejected() {
+        let mut registry = NamespaceRegistry::new();
+        registry
+            .deploy_app(
+                "bank.seal".into(),
+                "owner".into(),
+                "CREATE TABLE balances (id BIGINT PRIMARY KEY, amt BIGINT);
+                 CREATE TABLE api_keys (id BIGINT PRIMARY KEY, key TEXT)",
+            )
+            .unwrap();
+        let bank = registry.get_mut("bank.seal").unwrap();
+        // `balances` is public; `api_keys` stays Private by default.
+        bank.set_visibility("balances", Visibility::Public);
+        bank.execute_as("INSERT INTO balances (id, amt) VALUES (1, 100)", "owner")
+            .unwrap();
+        bank.execute_as("INSERT INTO api_keys (id, key) VALUES (1, 'sk_live_supersecret')", "owner")
+            .unwrap();
+
+        // A read grant on the public `balances` table must not be used to read the
+        // private `api_keys` table in the same namespace — the query must name the
+        // granted table exactly. (Regression for cross-table read: F2.)
+        let err = registry
+            .cross_app_query("bank.seal", "balances", "SELECT * FROM api_keys", "market.seal")
+            .expect_err("cross-table read must be rejected");
+        assert!(
+            !err.to_string().contains("sk_live_supersecret"),
+            "error must not leak the private data: {err}"
+        );
+
+        // A JOIN reaching the private table is also rejected.
+        assert!(registry
+            .cross_app_query(
+                "bank.seal",
+                "balances",
+                "SELECT * FROM balances JOIN api_keys ON balances.id = api_keys.id",
+                "market.seal",
+            )
+            .is_err());
+
+        // The granted table still reads fine (sanity: the guard is precise, not
+        // over-broad).
+        let ok = registry
+            .cross_app_query("bank.seal", "balances", "SELECT * FROM balances", "market.seal")
+            .unwrap();
+        assert_eq!(ok.rows.len(), 1);
     }
 }

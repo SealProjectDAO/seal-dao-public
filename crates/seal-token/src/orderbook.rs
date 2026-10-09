@@ -76,8 +76,10 @@ pub struct OrderBook {
     bids: BTreeMap<std::cmp::Reverse<u64>, VecDeque<Order>>,
     /// Asks sorted by price ascending (lowest first).
     asks: BTreeMap<u64, VecDeque<Order>>,
-    /// All orders by ID for fast lookup/cancel.
-    orders: HashMap<u64, (Side, u64)>, // id → (side, price)
+    /// All orders by ID for fast lookup/cancel. The owner is stored in
+    /// the index (not just on the `Order`) so `cancel_order` can verify
+    /// `caller == owner` in O(1) without scanning the price queues.
+    orders: HashMap<u64, (Side, u64, String)>, // id → (side, price, owner)
     /// Next order ID.
     next_order_id: u64,
     /// Next trade ID.
@@ -133,15 +135,17 @@ impl OrderBook {
 
         match side {
             Side::Bid => {
+                let owner = order.owner.clone();
+                self.orders.insert(id, (Side::Bid, price, owner));
                 self.bids
                     .entry(std::cmp::Reverse(price))
                     .or_default()
                     .push_back(order);
-                self.orders.insert(id, (Side::Bid, price));
             }
             Side::Ask => {
+                let owner = order.owner.clone();
+                self.orders.insert(id, (Side::Ask, price, owner));
                 self.asks.entry(price).or_default().push_back(order);
-                self.orders.insert(id, (Side::Ask, price));
             }
         }
 
@@ -149,11 +153,28 @@ impl OrderBook {
     }
 
     /// Cancel an order. Returns the cancelled order if found.
-    pub fn cancel_order(&mut self, order_id: u64) -> Result<Order, TokenError> {
-        let (side, price) = self
+    ///
+    /// Only the order's owner may cancel it: `caller` must equal the
+    /// owner stored when the order was placed. The check runs before any
+    /// state is mutated, so a caller who does not own the order can neither
+    /// cancel it nor disturb the book. (Audit: `cancel_order` took only an
+    /// `order_id`, so any caller could cancel anyone else's resting order.)
+    pub fn cancel_order(&mut self, order_id: u64, caller: &str) -> Result<Order, TokenError> {
+        let (side, price, owner) = self
             .orders
-            .remove(&order_id)
+            .get(&order_id)
+            .map(|(s, p, o)| (*s, *p, o.clone()))
             .ok_or_else(|| TokenError::Custom(format!("order {} not found", order_id)))?;
+
+        if owner != caller {
+            return Err(TokenError::Custom(format!(
+                "caller is not the owner of order {}",
+                order_id
+            )));
+        }
+
+        // Ownership confirmed — drop the index entry and remove from the queue.
+        self.orders.remove(&order_id);
 
         match side {
             Side::Bid => {
@@ -597,7 +618,22 @@ mod tests {
         let mut book = OrderBook::new("GOLD".into(), "SEAL".into());
         let id = book.place_order("alice".into(), Side::Ask, 100, 10, OrderType::Limit, 1);
         assert_eq!(book.open_order_count(), 1);
-        book.cancel_order(id).unwrap();
+        book.cancel_order(id, "alice").unwrap();
+        assert_eq!(book.open_order_count(), 0);
+    }
+
+    /// A caller who does not own the order cannot cancel it — the order
+    /// must remain in the book and the caller gets an error (regression for
+    /// the audit finding that `cancel_order` took only `order_id`).
+    #[test]
+    fn test_cancel_order_rejects_non_owner() {
+        let mut book = OrderBook::new("GOLD".into(), "SEAL".into());
+        let id = book.place_order("alice".into(), Side::Ask, 100, 10, OrderType::Limit, 1);
+        // bob is not the owner → rejected, order stays open.
+        assert!(book.cancel_order(id, "bob").is_err());
+        assert_eq!(book.open_order_count(), 1, "order must survive a failed cancel");
+        // The rightful owner can still cancel.
+        book.cancel_order(id, "alice").unwrap();
         assert_eq!(book.open_order_count(), 0);
     }
 

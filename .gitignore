@@ -46,3 +46,16 @@ dist/
 alice.json
 bob.json
 creator.json
+# Compromised BIP-39 wallet (2026-09-28) — never committed; rotate it.
+seal-key.json
+# Generated bridge-e2e ML-DSA keypair (scripts/bridge-e2e.sh creates it on
+# first run); a bare `git add -A` on a dev box would otherwise ship a
+# real private key (2026-09-27 inspection §2.3-F).
+bridges/.seal-e2e-*
+
+# macOS Finder metadata
+.DS_Store
+# Vendor crates contain source dirs literally named target/ (cc, gdbstub);
+# the top-level target/ pattern above would drop them on git add.
+!vendor/*/src/target/
+!vendor/*/src/target/**

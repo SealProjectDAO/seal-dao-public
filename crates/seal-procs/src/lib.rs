@@ -165,6 +165,60 @@ pub fn compute_code_hash(
     bytes
 }
 
+/// Substitute positional `$N` placeholders in `body` with the corresponding
+/// entries of `args`, in a single pass.
+///
+/// Anchored: after a `$` the *maximal run of digits* is consumed as the index,
+/// so `$1` never corrupts the prefix of `$10` (the old `body.replace("$1", …)`
+/// loop turned a `$10` slot into `arg1` followed by a stray `0`, silently
+/// dropping the 10th argument of any procedure with ≥10 parameters). Single
+/// pass: a substituted value is appended to the output and never re-scanned,
+/// so an argument whose text itself contains `$2` is not re-substituted.
+///
+/// Pure and deterministic — the same `(body, args)` always yields the same
+/// bytes on every node, which matters because `CALL` is executed inside the
+/// on-block transition. A `$` not followed by a digit, or a `$N` whose `N` is
+/// out of range (≤0 or > args.len()), is emitted verbatim, matching the
+/// previous behavior for anything that was already working.
+pub fn substitute_positional(body: &str, args: &[String]) -> String {
+    let mut out = String::with_capacity(
+        body.len() + args.iter().map(String::len).sum::<usize>(),
+    );
+    let mut chars = body.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '$' {
+            out.push(c);
+            continue;
+        }
+        // Consume the maximal run of digits following the `$`.
+        let mut digits = String::new();
+        while let Some(&d) = chars.peek() {
+            if d.is_ascii_digit() {
+                digits.push(d);
+                chars.next();
+            } else {
+                break;
+            }
+        }
+        let substituted = digits
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| {
+                let idx = n.checked_sub(1)?;
+                args.get(idx).cloned()
+            });
+        match substituted {
+            Some(value) => out.push_str(&value),
+            // Bare `$`, or an out-of-range `$N`: emit verbatim.
+            None => {
+                out.push('$');
+                out.push_str(&digits);
+            }
+        }
+    }
+    out
+}
+
 /// In-memory registry of procedure definitions.
 ///
 /// Real on-chain code lives in the SQL engine's namespace storage;
@@ -269,14 +323,11 @@ where
                 actual: args.len(),
             });
         }
-        // Naive `$1`, `$2`, ... substitution. Good enough for the
-        // ADR-001 milestone; the real PL/pgSQL parser will handle
-        // declared variables, control flow, and quoting properly.
-        let mut body = proc.body.clone();
-        for (i, value) in args.iter().enumerate() {
-            let placeholder = format!("${}", i + 1);
-            body = body.replace(&placeholder, value);
-        }
+        // Single-pass, anchored `$N` substitution (see `substitute_positional`)
+        // so `$1`/`$10` don't collide and substituted values aren't re-scanned.
+        // Full parameter binding / quoting is a follow-up behind the real
+        // PL/pgSQL parser.
+        let body = substitute_positional(&proc.body, args);
         (self.exec)(&body)
     }
 }
@@ -505,5 +556,56 @@ mod tests {
             err,
             ProcError::LanguageNotImplemented(ProcedureLanguage::Wasm)
         ));
+    }
+
+    #[test]
+    fn substitute_positional_ten_args_no_collision() {
+        // Regression: the old `replace("$1", …)` loop corrupted the `$10` slot
+        // into `arg1` + a stray `0`, dropping the 10th argument.
+        let args: Vec<String> = (1..=10).map(|i| format!("a{}", i)).collect();
+        let got = substitute_positional("SELECT $1, $10", &args);
+        assert_eq!(got, "SELECT a1, a10", "$1 must not eat the $10 prefix");
+    }
+
+    #[test]
+    fn substitute_positional_value_not_rescanned() {
+        // An argument whose text contains a later placeholder must be inserted
+        // literally, not re-substituted on a following iteration.
+        let args = vec!["$2".to_string(), "B".to_string()];
+        let got = substitute_positional("[$1][$2]", &args);
+        assert_eq!(got, "[$2][B]");
+    }
+
+    #[test]
+    fn substitute_positional_out_of_range_and_bare_dollar_verbatim() {
+        let args = vec!["A".to_string()];
+        assert_eq!(
+            substitute_positional("SELECT $1, $5", &args),
+            "SELECT A, $5",
+            "out-of-range $N is left verbatim"
+        );
+        assert_eq!(
+            substitute_positional("price $ today", &[]),
+            "price $ today",
+            "a bare $ with no following digit is preserved"
+        );
+    }
+
+    #[test]
+    fn sql_engine_ten_args_no_collision() {
+        // End-to-end through the engine. The other call site (seal-sql's
+        // `execute_call`) shares this helper, so this also guards that path.
+        let mut engine = SqlProcEngine::new(|sql: &str| Ok(sql.as_bytes().to_vec()));
+        let args: Vec<ProcedureArg> = (1..=10).map(|i| arg(&format!("x{}", i), "INT")).collect();
+        let proc = Procedure::new(
+            "ten".into(),
+            args,
+            Some("INT".into()),
+            ProcedureLanguage::Sql,
+            "SELECT $1 + $10".into(),
+        );
+        let vals: Vec<String> = (1..=10).map(|i| i.to_string()).collect();
+        let result = engine.invoke(&proc, &vals).unwrap();
+        assert_eq!(result, b"SELECT 1 + 10");
     }
 }

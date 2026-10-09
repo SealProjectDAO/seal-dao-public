@@ -130,21 +130,34 @@ pub fn process_block_fees_with_emission(
             continue;
         }
 
-        // Deduct fee from sender
-        balances.burn(sender, fee)?;
+        // F7: deduct the fee, but a sender who can't cover it (no account, or
+        // underfunded — e.g. several same-block txs whose combined fees exceed
+        // the balance) must NOT abort the whole pass. The old `?` stopped the
+        // loop here, silently skipping every later sender's fee AND skipping the
+        // proposer-reward mint below — one bad tx zeroed the proposer's share for
+        // the entire block. Skip that sender and continue. Deterministic: the
+        // set of fundable senders is a pure function of (pre-state, txs), so
+        // every node skips exactly the same senders.
+        if balances.burn(sender, fee).is_err() {
+            continue;
+        }
         total_fees = total_fees.saturating_add(fee);
 
         let burn = fee_config.burn_amount(fee);
         total_burned = total_burned.saturating_add(burn);
     }
 
-    // Reward proposer with the non-burned portion + emission reward
+    // Reward proposer with the non-burned portion of the fees actually
+    // collected + the emission reward. Best-effort: the collected fees are
+    // already burned from the senders, so a failed proposer-reward mint
+    // (overflow) must not abort the pass. The transition ignores this result
+    // (`let _ =`), and the storage-burn step uses the same idiom.
     let fee_reward = total_fees.saturating_sub(total_burned);
     let emission = emission_reward.unwrap_or(0);
     let proposer_total = fee_reward.saturating_add(emission);
 
     if proposer_total > 0 {
-        balances.mint(proposer_address, proposer_total)?;
+        let _ = balances.mint(proposer_address, proposer_total);
     }
 
     Ok((total_fees, total_burned, proposer_total))
@@ -234,14 +247,59 @@ mod tests {
     }
 
     #[test]
-    fn test_fees_insufficient_balance() {
+    fn test_fees_unpayable_sender_does_not_void_block_fees() {
+        // F7 regression: one underfunded sender must NOT abort the whole
+        // block's fee accounting. Before the fix, `balances.burn(sender, fee)?`
+        // stopped the loop at the first unpayable sender, so (a) every later
+        // sender's fee was silently skipped and (b) the proposer-reward mint
+        // below never ran — a single bad tx zeroed the proposer's share for the
+        // entire block. Now the unpayable sender's fee is skipped and the rest
+        // of the block is charged and rewarded normally.
         let mut balances = BalanceStore::new();
-        balances.mint("poor", 5).unwrap(); // Only 5 micro-SEAL
+        balances.mint("poor", 5).unwrap(); // can't cover a 1000-micro fee
+        balances.mint("rich", 100_000).unwrap(); // can cover its 1000-micro fee
         let config = FeeConfig::default();
 
-        let txs = vec![("poor".to_string(), 100)]; // fee = 1000, balance = 5
+        let txs = vec![
+            ("poor".to_string(), 100), // fee = 1000, balance = 5 -> unpayable
+            ("rich".to_string(), 100), // fee = 1000, balance = 100_000
+        ];
 
-        assert!(process_block_fees(&mut balances, &config, &txs, "proposer").is_err());
+        let (total, burned, reward) =
+            process_block_fees(&mut balances, &config, &txs, "proposer")
+                .expect("an unpayable sender must not abort the fee pass");
+
+        // poor's fee is skipped; rich's 1000 is still collected.
+        assert_eq!(total, 1000);
+        assert_eq!(burned, 500); // 50% of the collected 1000
+        assert_eq!(reward, 500); // proposer's 50%
+        // rich paid its fee; poor was not over-drafted and is untouched.
+        assert_eq!(balances.available("rich"), 99_000);
+        assert_eq!(balances.available("poor"), 5);
+        // the proposer still got its share despite the bad tx.
+        assert_eq!(balances.available("proposer"), 500);
+    }
+
+    #[test]
+    fn test_fees_unpayable_sender_returns_ok() {
+        // F7: the fee pass no longer surfaces a per-sender shortfall as an
+        // error (the transition ignores the result anyway, but the old `?`
+        // aborted mid-loop). A block whose every sender is unpayable collects
+        // zero fees and still credits the emission-only reward, returning Ok.
+        let mut balances = BalanceStore::new();
+        balances.mint("poor", 5).unwrap(); // fee = 1000, balance = 5
+        let config = FeeConfig::default();
+        let txs = vec![("poor".to_string(), 100)];
+
+        let (total, burned, reward) =
+            process_block_fees_with_emission(&mut balances, &config, &txs, "proposer", Some(42))
+                .expect("unpayable sender must not error the fee pass");
+
+        assert_eq!(total, 0);
+        assert_eq!(burned, 0);
+        assert_eq!(reward, 42); // emission still credited
+        assert_eq!(balances.available("poor"), 5);
+        assert_eq!(balances.available("proposer"), 42);
     }
 
     #[test]

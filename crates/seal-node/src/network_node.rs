@@ -24,7 +24,7 @@ use crate::consensus_runner::{ConsensusRunner, FinalizedBlock};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex as TokioMutex;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 /// A network-connected Seal node.
 pub struct NetworkNode {
@@ -144,7 +144,7 @@ impl NetworkNode {
             verifying_key,
             vrf_manager,
             validator_set,
-        );
+        )?;
 
         info!(%peer_id, "Network node started with validator set");
 
@@ -174,6 +174,22 @@ impl NetworkNode {
 
         // 3. Advance consensus slot
         let block = self.runner.advance_slot();
+
+        // 3b. If this slot crossed an epoch boundary, broadcast the
+        // signed transition announcement (audit B.8: peers verify
+        // signature + seed derivation before applying it).
+        if let Some(transition) = self.runner.take_pending_epoch_transition() {
+            match bincode::serialize(&transition) {
+                Ok(data) => {
+                    if let Err(e) = self.p2p.broadcast_epoch_transition(data).await {
+                        warn!("Failed to broadcast epoch transition: {}", e);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to serialize epoch transition: {}", e);
+                }
+            }
+        }
 
         // 4. If we produced a block, broadcast it
         if let Some(ref finalized) = block {
@@ -671,8 +687,10 @@ impl NetworkNode {
     /// Checks:
     /// 1. Height is sequential (next expected height)
     /// 2. Parent hash matches our latest block
-    /// 3. VRF proof is valid (proposer was legitimately elected)
-    /// 4. Replaying transactions produces the claimed state root
+    /// 3. Proposer signature is valid (ML-DSA over the empty-sig header
+    ///    serialization, verified against `header.proposer`)
+    /// 4. VRF proof is valid (proposer was legitimately elected)
+    /// 5. Replaying transactions produces the claimed state root
     pub fn verify_and_apply_block(&mut self, block: &Block) -> Result<(), String> {
         let expected_height = self.runner.height() + 1;
         if block.header.height != expected_height {
@@ -691,6 +709,73 @@ impl NetworkNode {
             if block.header.parent_hash != expected_parent {
                 return Err("parent hash mismatch".into());
             }
+        }
+
+        // Bind the transaction set to the signed header. Without this, a
+        // relayer could inject, remove, or modify a no-op transaction
+        // (DexMatch, token/bridge/stake) in a validly-signed block and every
+        // node would commit it: no-op txs affect neither `state_root` (the F2
+        // root check) nor the header signature, so neither would catch them.
+        // Recomputing the Merkle root from the received transactions and
+        // comparing it to the signed `header.tx_root` closes that gap for
+        // every transaction type (design:
+        // audits/2026-10-08-dexmatch-txroot-design.md).
+        let recomputed_tx_root =
+            seal_storage::block_store::transactions_root(&block.transactions);
+        if recomputed_tx_root != block.header.tx_root {
+            return Err(
+                "transaction root mismatch: block transactions were modified after signing"
+                    .into(),
+            );
+        }
+
+        // Verify the proposer's ML-DSA signature over the canonical
+        // (empty-sig) header serialization. A block without a signature
+        // cannot be attributed to a real key holder and is rejected.
+        if block.header.proposer_signature.is_empty() {
+            return Err("block is missing the proposer signature".into());
+        }
+        let proposer_vk = seal_crypto::signature::VerifyingKey::from_bytes(
+            &block.header.proposer,
+        )
+        .map_err(|e| format!("invalid proposer key: {}", e))?;
+        let mut unsigned_header = block.header.clone();
+        unsigned_header.proposer_signature.clear();
+        let sign_bytes = bincode::serialize(&unsigned_header)
+            .map_err(|e| format!("serialize error: {}", e))?;
+        let sig = seal_crypto::signature::Signature::from_bytes(
+            block.header.proposer_signature.clone(),
+        );
+        proposer_vk
+            .verify(&sign_bytes, &sig)
+            .map_err(|e| format!("proposer signature verification failed: {}", e))?;
+
+        // The proposer must be a registered validator. The signature above
+        // only proves the block came from SOME key holder; it is verified
+        // against `header.proposer`, a key the proposer names in the header
+        // itself, so a forger can name their own key and sign the header.
+        // Binding the proposer to the validator set is what stops an
+        // arbitrary key holder from gossipping a self-signed block with
+        // empty VRF fields (which skips the election check below) and moving
+        // funds out of any account. Without this, any peer could fabricate a
+        // validly-signed block debiting a funded account and every node would
+        // apply it (audit finding F1).
+        //
+        // The check fires only on a node *enrolled* in an explicit validator
+        // set. A node that booted with the isolated single-validator set
+        // (`new` / `new_with_keypair`) has no shared set to check against —
+        // it is single-validator local dev, where there are no peer proposers
+        // to forge — so it keeps the legacy self-attested behaviour and does
+        // not start rejecting every block from another isolated node. Full
+        // F1 protection requires every peer in a network to be enrolled in
+        // the same validator set (validator-set bootstrap, a follow-up).
+        if self.runner.enrolled && self
+            .runner
+            .validator_set
+            .find_by_pubkey(&block.header.proposer)
+            .is_none()
+        {
+            return Err("block proposer is not a registered validator".into());
         }
 
         // Verify VRF proof if present (proves proposer was legitimately elected)
@@ -730,14 +815,14 @@ impl NetworkNode {
             // If proposer not in our validator set, skip VRF check (they may have rotated)
         }
 
-        // Replay transactions and verify state root
-        let replayed_root = self.runner.replay_block(block)?;
-        if replayed_root != block.header.state_root {
-            return Err(format!(
-                "state root mismatch after replay: expected {}, got {}",
-                block.header.state_root, replayed_root
-            ));
-        }
+        // Verify the replayed state root BEFORE committing the block, and drop
+        // the finalized txs from the pending pool (audits F2 + F5). A root
+        // mismatch or a transition error rolls the node back to its pre-replay
+        // state, so a forged/modified block cannot advance the height or mutate
+        // the ledger.
+        self.runner
+            .apply_block_verified(block)
+            .map_err(|e| format!("replay/verify failed: {}", e))?;
 
         info!(
             height = block.header.height,
@@ -871,12 +956,114 @@ mod tests {
         );
     }
 
+    /// Two *enrolled* nodes sharing a two-validator set: node A (the
+    /// producer) is active, node B (the receiver) is inactive.
+    ///
+    /// Both nodes are built via `start_with_validators`, so each is
+    /// *enrolled* and the proposer-membership check in
+    /// `verify_and_apply_block` is live on both. The receiver therefore
+    /// only accepts blocks from a registered validator — exactly the
+    /// behaviour the tests exercise.
+    ///
+    /// The producer is the only *active* validator, so on its side
+    /// `active_count() == 1` and it produces a block on **every** slot
+    /// (the `Committee` fallback in `advance_slot`), making the tests
+    /// deterministic. The receiver is inactive so that ticking it — to
+    /// keep its slot in step with the producer — never makes it produce a
+    /// block of its own: the VRF check in `verify_and_apply_block`
+    /// verifies a block against the *verifier's own* current slot, so the
+    /// receiver must be at the same slot the block was proposed in.
+    ///
+    /// Both entries carry their REAL VRF public key (captured before the
+    /// key managers are moved into the nodes): the receiver verifies the
+    /// producer's election proof against the `vrf_public_key` recorded here.
+    async fn start_validator_pair() -> (NetworkNode, NetworkNode) {
+        use seal_consensus::validator::ValidatorInfo;
+        use seal_crypto::hash::sha3_256;
+        use seal_vrf::VrfKeyManager;
+
+        let (sk_a, vk_a) = SigningKey::generate();
+        let (sk_b, vk_b) = SigningKey::generate();
+        let vrf_a = VrfKeyManager::new(sha3_256(b"test_node_a").0);
+        let vrf_b = VrfKeyManager::new(sha3_256(b"test_node_b").0);
+        // Real epoch-0 public keys. Tests stay within epoch 0, so these are
+        // the keys the election proofs are generated (and verified) with.
+        let vrf_a_pk = vrf_a.public_key().to_vec();
+        let vrf_b_pk = vrf_b.public_key().to_vec();
+
+        let set = ValidatorSet::new(vec![
+            ValidatorInfo {
+                public_key: vk_a.to_bytes(),
+                vrf_public_key: vrf_a_pk,
+                stake: 1_000_000_000,
+                active: true,
+            },
+            ValidatorInfo {
+                public_key: vk_b.to_bytes(),
+                vrf_public_key: vrf_b_pk,
+                stake: 1_000_000_000,
+                // Inactive so the receiver never produces on its own while
+                // we tick it to stay slot-synced with the producer.
+                active: false,
+            },
+        ]);
+        let a = NetworkNode::start_with_validators(
+            ConsensusConfig::default(),
+            NodeConfig::default(),
+            sk_a,
+            vk_a,
+            vrf_a,
+            set.clone(),
+        )
+        .await
+        .unwrap();
+        let b = NetworkNode::start_with_validators(
+            ConsensusConfig::default(),
+            NodeConfig::default(),
+            sk_b,
+            vk_b,
+            vrf_b,
+            set,
+        )
+        .await
+        .unwrap();
+        (a, b)
+    }
+
+    /// Apply `chain` to `node` the way the live receive path does: step the
+    /// node forward one slot at a time until it reaches each block's
+    /// proposal slot, then verify + apply that block.
+    ///
+    /// `verify_and_apply_block` checks a block's VRF proof against the
+    /// *verifier's own* current slot, so a node catching up on historical
+    /// blocks must advance its slot to each block's slot first. (The batch
+    /// `sync_blocks` helper cannot do that — it applies a whole slice at one
+    /// fixed slot, which the current-slot VRF check rejects for older
+    /// blocks; storing the proposal slot in the header so catch-up verifies
+    /// correctly is a follow-up.) In these tests the producer is the only
+    /// active validator, so it produces every slot and block height ==
+    /// proposal slot. Returns the number of blocks applied.
+    async fn apply_chain_live(node: &mut NetworkNode, chain: &[Block]) -> usize {
+        let mut node_slot = node.runner.current_slot.number;
+        let mut applied = 0usize;
+        for block in chain {
+            let target = block.header.height;
+            while node_slot < target {
+                node.tick().await;
+                node_slot += 1;
+            }
+            if node.verify_and_apply_block(block).is_ok() {
+                applied += 1;
+            }
+        }
+        applied
+    }
+
     #[tokio::test]
     async fn test_verify_and_apply_block() {
-        // Producer node
-        let mut producer = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
-            .await
-            .unwrap();
+        // Producer + receiver share an enrolled two-validator set so the
+        // receiver recognizes the producer as a registered proposer.
+        let (mut producer, mut receiver) = start_validator_pair().await;
 
         producer
             .submit_sql("CREATE TABLE t (id BIGINT PRIMARY KEY, val TEXT)")
@@ -885,9 +1072,12 @@ mod tests {
             .submit_sql("INSERT INTO t (id, val) VALUES (1, 'hello')")
             .unwrap();
 
-        // Produce a block
+        // Produce a block, ticking the receiver in lockstep so it stays at
+        // the same slot the producer proposes in (the VRF check verifies
+        // against the receiver's own current slot).
         let mut block = None;
         for _ in 0..100 {
+            receiver.tick().await;
             if let Some(b) = producer.tick().await {
                 block = Some(b);
                 break;
@@ -896,16 +1086,36 @@ mod tests {
         let block = block.expect("should produce a block");
 
         // Receiver node verifies and applies the block
-        let mut receiver = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
-            .await
-            .unwrap();
-
         receiver.verify_and_apply_block(&block.block).unwrap();
         assert_eq!(receiver.height(), 1);
 
         // Data should be queryable after applying the block
         let result = receiver.query_sql("SELECT * FROM t").unwrap();
         assert_eq!(result.rows.len(), 1);
+    }
+
+    /// A block whose proposer is not in the receiver's validator set must be
+    /// rejected, even though it is a well-formed, correctly-signed block. This
+    /// is the anti-forgery gate: without it any key holder could name
+    /// themselves as `proposer`, sign the header, and move arbitrary funds.
+    #[tokio::test]
+    async fn test_verify_rejects_unknown_proposer() {
+        // `producer` has its own isolated single-validator set, so its key is
+        // not in the receiver's shared set.
+        let mut producer = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
+            .await
+            .unwrap();
+        let block = produce_one_block(&mut producer).await;
+        assert!(!block.header.proposer.is_empty());
+
+        let (mut receiver, _other) = start_validator_pair().await;
+        let result = receiver.verify_and_apply_block(&block);
+        assert!(
+            result.is_err(),
+            "block from a proposer outside the validator set must be rejected"
+        );
+        // Nothing was applied.
+        assert_eq!(receiver.height(), 0);
     }
 
     #[tokio::test]
@@ -924,6 +1134,8 @@ mod tests {
                 proposer: vec![],
                 vrf_output: vec![],
                 vrf_proof: vec![],
+                proposer_signature: vec![],
+                tx_root: Hash256::ZERO,
             },
             transactions: vec![],
         };
@@ -932,14 +1144,71 @@ mod tests {
         assert!(result.is_err(), "should reject block with wrong height");
     }
 
+    /// Produce one real (signed) block on a producer node.
+    async fn produce_one_block(producer: &mut NetworkNode) -> Block {
+        producer
+            .submit_sql("CREATE TABLE t (id BIGINT PRIMARY KEY)")
+            .unwrap();
+        let mut produced = None;
+        for _ in 0..100 {
+            if let Some(b) = producer.tick().await {
+                produced = Some(b.block);
+                break;
+            }
+        }
+        produced.expect("should produce a block")
+    }
+
+    /// A block whose proposer signature has been stripped must be rejected.
+    #[tokio::test]
+    async fn test_verify_rejects_missing_proposer_signature() {
+        let mut producer = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
+            .await
+            .unwrap();
+        let mut block = produce_one_block(&mut producer).await;
+        assert!(!block.header.proposer_signature.is_empty());
+
+        block.header.proposer_signature.clear();
+
+        let mut receiver = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
+            .await
+            .unwrap();
+        let result = receiver.verify_and_apply_block(&block);
+        assert!(
+            result.is_err(),
+            "block without a proposer signature must be rejected"
+        );
+    }
+
+    /// A block whose header was modified after signing must be rejected.
+    #[tokio::test]
+    async fn test_verify_rejects_tampered_proposer_signature() {
+        let mut producer = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
+            .await
+            .unwrap();
+        let mut block = produce_one_block(&mut producer).await;
+
+        // Tamper with the state root after the fact — the signature no
+        // longer covers the header content.
+        block.header.state_root = Hash256::ZERO;
+
+        let mut receiver = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
+            .await
+            .unwrap();
+        let result = receiver.verify_and_apply_block(&block);
+        assert!(
+            result.is_err(),
+            "block with a header that doesn't match its signature must be rejected"
+        );
+    }
+
     /// End-to-end test: producer creates blocks, receiver verifies and applies them.
     /// Both nodes end up with the same state.
     #[tokio::test]
     async fn test_multi_node_sync() {
-        // Producer node
-        let mut producer = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
-            .await
-            .unwrap();
+        // Producer + receiver share a two-validator set so the receiver
+        // recognizes the producer as a registered proposer.
+        let (mut producer, mut receiver) = start_validator_pair().await;
 
         // Deploy schema + insert data on producer
         producer
@@ -957,11 +1226,17 @@ mod tests {
             .submit_sql("INSERT INTO items (id, name, price) VALUES (3, 'Doohickey', 75)")
             .unwrap();
 
-        // Produce blocks on producer
+        // Produce blocks on the producer and verify them live on the
+        // receiver, ticking the receiver in lockstep so it checks each
+        // block at the slot the producer proposed it in (the VRF check
+        // uses the receiver's own current slot).
         let mut produced_blocks = Vec::new();
         for _ in 0..200 {
-            if let Some(block) = producer.tick().await {
-                produced_blocks.push(block.block.clone());
+            let block = producer.tick().await;
+            receiver.tick().await;
+            if let Some(fb) = block {
+                produced_blocks.push(fb.block.clone());
+                receiver.verify_and_apply_block(&fb.block).unwrap();
                 if produced_blocks.len() > 1 {
                     break;
                 }
@@ -985,18 +1260,6 @@ mod tests {
 
         let producer_height = producer.height();
         let producer_state = *producer.state_root();
-
-        // Receiver node starts fresh
-        let mut receiver = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
-            .await
-            .unwrap();
-
-        assert_eq!(receiver.height(), 0);
-
-        // Receiver applies all blocks from producer
-        for block in &produced_blocks {
-            receiver.verify_and_apply_block(block).unwrap();
-        }
 
         // Both nodes should be at the same state
         assert_eq!(
@@ -1024,12 +1287,356 @@ mod tests {
         assert!(!result.rows.is_empty(), "should find expensive items");
     }
 
+    /// F3 — the core no-fork regression, SQL variant. A **non-origin**
+    /// proposer must stamp a `state_root` that its replayers reproduce.
+    ///
+    /// The SQL write is authored by a third, off-network identity and gossiped
+    /// to the producer, so the producer never executed it itself: its
+    /// committed engine lacks the table until the on-block transition runs.
+    /// Pre-fix, the producer stamped a root from that (pre-write) store while
+    /// the replayer re-executed the write on replay and computed a different
+    /// root — `verify_and_apply_block` rejected the block. Post-fix the
+    /// producer and every replayer run the same `apply_block_transition`, so
+    /// the root is a pure function of (committed pre-state, block) and all
+    /// nodes agree. `verify_and_apply_block(...).unwrap()` below is the F3
+    /// assertion itself (a mismatched root is an `Err`).
+    #[tokio::test]
+    async fn test_f3_non_origin_proposer_sql() {
+        // Node A is the only active validator (proposes every slot); node B is
+        // the inactive receiver that stays slot-synced so its VRF slot matches
+        // the proposal slot.
+        let (mut producer, mut receiver) = start_validator_pair().await;
+
+        // Author + sign a SQL write as an off-network identity (fresh key),
+        // exactly as a peer would before gossiping it.
+        let (sk_origin, vk_origin) = SigningKey::generate();
+        let sql = "CREATE TABLE gossip (id BIGINT PRIMARY KEY, v TEXT)";
+        let payload = sql.as_bytes().to_vec();
+        let signature = sk_origin
+            .sign(&payload)
+            .unwrap()
+            .to_bytes()
+            .to_vec();
+        let tx = Transaction {
+            tx_type: seal_storage::block_store::TxType::SqlExec,
+            payload,
+            sender: vk_origin.to_bytes(),
+            signature,
+        };
+
+        // Gossip it to the (non-origin) producer. `accept_transaction` enqueues
+        // it in the producer's pool without touching the committed engine —
+        // the producer's committed store still lacks the table (the fork
+        // source, pre-fix).
+        producer
+            .runner
+            .accept_transaction(tx)
+            .expect("producer should accept the gossiped SQL write");
+
+        // The producer proposes a block containing the gossiped write; the
+        // receiver ticks in lockstep so its slot matches the proposal slot.
+        let mut block = None;
+        for _ in 0..100 {
+            receiver.tick().await;
+            if let Some(b) = producer.tick().await {
+                block = Some(b);
+                break;
+            }
+        }
+        let block = block
+            .expect("producer should propose a block with the gossiped tx");
+
+        // The gossiped write must be in the block the producer proposed.
+        assert!(
+            block
+                .block
+                .transactions
+                .iter()
+                .any(|t| t.tx_type == seal_storage::block_store::TxType::SqlExec),
+            "block should contain the gossiped SQL write"
+        );
+
+        // THE F3 assertion: the receiver (replayer) must reproduce the
+        // producer's stamped state_root. Pre-fix this returned `Err` (root
+        // mismatch); post-fix the shared transition makes the root a pure
+        // function of (committed pre-state, block).
+        receiver
+            .verify_and_apply_block(&block.block)
+            .expect("replayer must reproduce the non-origin proposer's state root (F3)");
+
+        assert_eq!(
+            *producer.state_root(),
+            *receiver.state_root(),
+            "non-origin proposer's state root must equal every replayer's (F3)"
+        );
+        assert_eq!(
+            producer.height(),
+            receiver.height(),
+            "producer and receiver heights should match"
+        );
+
+        // The receiver can query the gossiped table (proving the write landed
+        // on the replayer's committed state, not just the producer's).
+        let result = receiver.query_sql("SELECT * FROM gossip").unwrap();
+        assert_eq!(result.rows.len(), 0, "CREATE TABLE only: no rows yet");
+    }
+
+    /// T1 (DEX forgeability, relayer vector): a peer who takes a validly-signed
+    /// block and injects a fabricated `DexMatch` transaction — no re-sign needed,
+    /// since neither the header signature nor `state_root` covers
+    /// `transactions` — must be stopped. Pre-`tx_root` the injected no-op
+    /// committed (it affects no root); the signed `tx_root` makes the
+    /// transaction set tamper-evident, so the recomputed root differs and the
+    /// block is rejected. (Design: audits/2026-10-08-dexmatch-txroot-design.md.)
+    #[tokio::test]
+    async fn test_dexmatch_injected_tx_rejected_on_replay() {
+        use seal_token::orderbook::{OrderType, Side, Trade};
+
+        let (mut producer, mut receiver) = start_validator_pair().await;
+
+        // Pre-load crossing orders so the producer emits a real DexMatch.
+        {
+            let mut dex = producer
+                .runner
+                .dex
+                .try_lock()
+                .expect("uncontended lock at setup");
+            dex.create_pair("FAKE".into(), "SEAL".into()).unwrap();
+            let book = dex.get_book_mut("FAKE/SEAL").unwrap();
+            // Bid 100 / ask 90 cross; matched at block time at the ask price.
+            book.place_order("attacker".into(), Side::Bid, 100, 1, OrderType::Limit, 0);
+            book.place_order("attacker".into(), Side::Ask, 90, 1, OrderType::Limit, 0);
+        }
+
+        // Produce a block carrying a real DexMatch, ticking the receiver in
+        // lockstep so its VRF slot matches the proposal slot.
+        let mut finalized = None;
+        for _ in 0..100 {
+            receiver.tick().await;
+            if let Some(b) = producer.tick().await {
+                finalized = Some(b);
+                break;
+            }
+        }
+        let finalized =
+            finalized.expect("producer should propose a block within 100 slots");
+        assert!(
+            finalized
+                .block
+                .transactions
+                .iter()
+                .any(|t| t.tx_type == seal_storage::block_store::TxType::DexMatch),
+            "block must carry a real DexMatch before we tamper with it"
+        );
+
+        // FORGE (T1): a third party appends a fabricated DexMatch to a copy of
+        // the validly-signed block. The header (and its `tx_root` + signature)
+        // is untouched.
+        let mut forged = finalized.block.clone();
+        let fake: Vec<(String, Vec<Trade>)> = vec![(
+            "FAKE/SEAL".to_string(),
+            vec![Trade {
+                id: 9_999_999,
+                maker_order_id: 1,
+                taker_order_id: 2,
+                price: 1,
+                quantity: 1_000_000,
+                maker: "attacker".into(),
+                taker: "victim".into(),
+                side: Side::Bid,
+                timestamp: 0,
+            }],
+        )];
+        forged.transactions.push(Transaction {
+            tx_type: seal_storage::block_store::TxType::DexMatch,
+            payload: bincode::serialize(&fake).expect("serialize forged payload"),
+            sender: forged.header.proposer.clone(),
+            signature: Vec::new(),
+        });
+
+        // The receiver must reject the tampered block and stay put.
+        let result = receiver.verify_and_apply_block(&forged);
+        assert!(
+            result.is_err(),
+            "a validly-signed block with an injected DexMatch must be rejected: {:?}",
+            result
+        );
+        assert_eq!(
+            receiver.height(),
+            0,
+            "a forged block must not advance the receiver"
+        );
+    }
+
+    /// F3 — native money transfer variant. A non-origin proposer must stamp a
+    /// `state_root` that reproduces the movement its replayers apply on replay.
+    ///
+    /// The transfer is authored off-network and gossiped to the producer, so
+    /// the producer's committed ledger has NOT applied the debit/credit (the
+    /// pre-fix fork source). Post-fix the shared on-block transition moves the
+    /// balance identically on the producer and every replayer, so their roots
+    /// agree — and both ledgers reflect the movement.
+    #[tokio::test]
+    async fn test_f3_non_origin_proposer_transfer() {
+        let (mut producer, mut receiver) = start_validator_pair().await;
+
+        // Fund the sender on BOTH nodes: both run the same transition, so both
+        // need `from` solvent for the movement to apply (a failing transfer
+        // aborts the whole transition).
+        let from = "seal1f3sender";
+        let to = "seal1f3recv";
+        let amount = 100u64;
+        producer
+            .runner
+            .balances
+            .mint(from, 1_000)
+            .expect("fund sender on producer");
+        receiver
+            .runner
+            .balances
+            .mint(from, 1_000)
+            .expect("fund sender on receiver");
+
+        // Author + sign a Transfer as an off-network identity (fresh key).
+        let (sk_origin, vk_origin) = SigningKey::generate();
+        let body = crate::consensus_runner::MoneyPayload {
+            from: from.into(),
+            to: to.into(),
+            amount,
+        };
+        let payload =
+            crate::consensus_runner::encode_money_payload(0, &body).expect("encode transfer");
+        let signature = sk_origin.sign(&payload).unwrap().to_bytes().to_vec();
+        let tx = Transaction {
+            tx_type: seal_storage::block_store::TxType::Transfer,
+            payload,
+            sender: vk_origin.to_bytes(),
+            signature,
+        };
+
+        // Gossip to the (non-origin) producer: enqueued, not yet applied.
+        producer
+            .runner
+            .accept_transaction(tx)
+            .expect("producer should accept the gossiped transfer");
+
+        let mut block = None;
+        for _ in 0..100 {
+            receiver.tick().await;
+            if let Some(b) = producer.tick().await {
+                block = Some(b);
+                break;
+            }
+        }
+        let block = block.expect("producer should propose a block with the gossiped transfer");
+
+        assert!(
+            block
+                .block
+                .transactions
+                .iter()
+                .any(|t| t.tx_type == seal_storage::block_store::TxType::Transfer),
+            "block should contain the gossiped transfer"
+        );
+
+        // THE F3 assertion: the replayer reproduces the producer's root.
+        receiver
+            .verify_and_apply_block(&block.block)
+            .expect("replayer must reproduce the non-origin proposer's state root (F3)");
+        assert_eq!(
+            *producer.state_root(),
+            *receiver.state_root(),
+            "non-origin proposer's state root must equal every replayer's (F3)"
+        );
+
+        // Both ledgers reflect the movement identically (the fee is charged to
+        // the sender's vk-derived address, not `from`, so `from`/`to` see only
+        // the transfer).
+        assert_eq!(producer.runner.balances.available(from), 1_000 - amount);
+        assert_eq!(receiver.runner.balances.available(from), 1_000 - amount);
+        assert_eq!(producer.runner.balances.available(to), amount);
+        assert_eq!(receiver.runner.balances.available(to), amount);
+    }
+
+    /// F3 — funded SQL write: per-byte storage burn + per-tx fee applied
+    /// identically on the producer and every replayer.
+    ///
+    /// Pre-fix these balance effects were produce-only, so a funded block's
+    /// replayer ledger diverged from the proposer's. Post-fix the shared
+    /// transition charges both from the same (committed pre-state, block), so
+    /// the sender loses the same amount on every node and the roots agree.
+    #[tokio::test]
+    async fn test_f3_funded_sql_fee_storage() {
+        let (mut producer, mut receiver) = start_validator_pair().await;
+
+        // The write's sender is billed the storage burn + fee off its
+        // vk-derived address. Fund that address on both nodes so the burns
+        // actually apply (an unfunded sender burns nothing, hiding the
+        // produce/replay drift) and the divergence is observable.
+        let (sk_origin, vk_origin) = SigningKey::generate();
+        let sender_addr = hex::encode(&vk_origin.to_bytes()[..16]);
+        producer
+            .runner
+            .balances
+            .mint(&sender_addr, 100_000)
+            .expect("fund sender on producer");
+        receiver
+            .runner
+            .balances
+            .mint(&sender_addr, 100_000)
+            .expect("fund sender on receiver");
+
+        let sql = "CREATE TABLE charged (id BIGINT PRIMARY KEY, v TEXT)";
+        let payload = sql.as_bytes().to_vec();
+        let signature = sk_origin.sign(&payload).unwrap().to_bytes().to_vec();
+        let tx = Transaction {
+            tx_type: seal_storage::block_store::TxType::SqlExec,
+            payload,
+            sender: vk_origin.to_bytes(),
+            signature,
+        };
+        producer
+            .runner
+            .accept_transaction(tx)
+            .expect("accept the gossiped SQL write");
+
+        let mut block = None;
+        for _ in 0..100 {
+            receiver.tick().await;
+            if let Some(b) = producer.tick().await {
+                block = Some(b);
+                break;
+            }
+        }
+        let block = block.expect("producer should propose a block with the gossiped tx");
+
+        receiver
+            .verify_and_apply_block(&block.block)
+            .expect("replayer must reproduce the producer's root (F3 fee/storage)");
+        assert_eq!(
+            *producer.state_root(),
+            *receiver.state_root(),
+            "non-origin proposer's state root must equal every replayer's (F3 fee/storage)"
+        );
+
+        // The storage burn (>= 1 micro-SEAL per written byte) was charged to
+        // the funded sender, identically on producer and replayer.
+        let burned_producer = 100_000 - producer.runner.balances.available(&sender_addr);
+        let burned_receiver = 100_000 - receiver.runner.balances.available(&sender_addr);
+        assert!(
+            burned_producer > 0,
+            "storage burn should have charged the funded sender"
+        );
+        assert_eq!(
+            burned_producer, burned_receiver,
+            "storage/fee burn must match on producer and replayer (F3)"
+        );
+    }
+
     /// Test: produce multiple blocks, sync, then produce more on receiver.
     #[tokio::test]
     async fn test_sync_then_continue() {
-        let mut producer = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
-            .await
-            .unwrap();
+        let (mut producer, mut receiver) = start_validator_pair().await;
 
         producer
             .submit_sql("CREATE TABLE counter (id BIGINT PRIMARY KEY, val BIGINT)")
@@ -1038,20 +1645,20 @@ mod tests {
             .submit_sql("INSERT INTO counter (id, val) VALUES (1, 0)")
             .unwrap();
 
-        // Produce first block
+        // Produce the first block, keeping the receiver slot-synced so it
+        // can verify at the block's proposal slot.
         let mut blocks = Vec::new();
         for _ in 0..100 {
-            if let Some(block) = producer.tick().await {
-                blocks.push(block.block.clone());
+            let block = producer.tick().await;
+            receiver.tick().await;
+            if let Some(fb) = block {
+                blocks.push(fb.block.clone());
                 break;
             }
         }
         assert_eq!(blocks.len(), 1);
 
         // Sync to receiver
-        let mut receiver = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
-            .await
-            .unwrap();
         for block in &blocks {
             receiver.verify_and_apply_block(block).unwrap();
         }
@@ -1068,9 +1675,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_blocks() {
-        let mut producer = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
-            .await
-            .unwrap();
+        let (mut producer, mut joiner) = start_validator_pair().await;
 
         producer
             .submit_sql("CREATE TABLE data (id BIGINT PRIMARY KEY, val TEXT)")
@@ -1099,15 +1704,12 @@ mod tests {
 
         let chain = producer.get_chain();
 
-        // New node syncs
-        let mut joiner = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
-            .await
-            .unwrap();
-
         assert!(joiner.is_behind(producer.height()));
         assert_eq!(joiner.blocks_behind(producer.height()), producer.height());
 
-        let applied = joiner.sync_blocks(&chain).unwrap();
+        // Catch up the way the live receive path does (step the joiner to
+        // each block's slot, then verify + apply).
+        let applied = apply_chain_live(&mut joiner, &chain).await;
         assert!(applied >= 2);
         assert_eq!(joiner.height(), producer.height());
         assert!(!joiner.is_behind(producer.height()));
@@ -1119,9 +1721,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_sync_skips_existing_blocks() {
-        let mut producer = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
-            .await
-            .unwrap();
+        let (mut producer, mut receiver) = start_validator_pair().await;
         producer
             .submit_sql("CREATE TABLE t (id BIGINT PRIMARY KEY)")
             .unwrap();
@@ -1134,15 +1734,14 @@ mod tests {
         let chain = producer.get_chain();
         assert!(!chain.is_empty());
 
-        let mut receiver = NetworkNode::start(ConsensusConfig::default(), NodeConfig::default())
-            .await
-            .unwrap();
-
-        // First sync
-        let applied1 = receiver.sync_blocks(&chain).unwrap();
+        // First sync: catch up live (step the receiver to each block's slot,
+        // then verify + apply).
+        let applied1 = apply_chain_live(&mut receiver, &chain).await;
         assert!(applied1 > 0);
 
-        // Second sync with same blocks — should skip all
+        // Second sync with the same blocks — every height is already at or
+        // behind the receiver's tip, so `sync_blocks` skips them all before
+        // ever reaching verification.
         let applied2 = receiver.sync_blocks(&chain).unwrap();
         assert_eq!(applied2, 0, "should skip already-applied blocks");
     }

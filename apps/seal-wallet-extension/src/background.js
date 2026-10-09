@@ -103,10 +103,23 @@ browserApi.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             sendResponse({ ok: false, error: "origin not connected" });
             return;
           }
+          const messageHex = msg.message_hex;
+          // The message is rendered in the popup and signed by the user's
+          // key. Reject anything that isn't even-length hex up front so a
+          // dApp can't push a malformed payload into the pending-request
+          // queue (the popup displays it, and it's what gets signed).
+          if (
+            typeof messageHex !== "string" ||
+            messageHex.length % 2 !== 0 ||
+            !/^[0-9a-fA-F]*$/.test(messageHex)
+          ) {
+            sendResponse({ ok: false, error: "message_hex must be even-length hex" });
+            return;
+          }
           const result = await enqueueRequest({
             kind: "sign",
             origin,
-            messageHex: msg.message_hex,
+            messageHex,
             address: msg.address,
           });
           sendResponse(result);
@@ -114,6 +127,12 @@ browserApi.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         case "seal:popup:listRequests": {
+          // Popup-only: reject anything from a web page (`sender.tab` set)
+          // or another extension (`sender.id` mismatch). The content script
+          // relays page postMessages, and request IDs are a small enumerable
+          // counter, so an unguarded handler lets any page enumerate — and
+          // then resolve — a signature request the user never approved.
+          if (sender.id !== browserApi.runtime.id || sender.tab) return;
           const out = [];
           for (const [id, { req }] of pendingRequests) {
             out.push({ id, ...req });
@@ -123,6 +142,9 @@ browserApi.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
 
         case "seal:popup:resolveRequest": {
+          // Popup-only, same guard as listRequests: only the extension's own
+          // popup may settle a pending request.
+          if (sender.id !== browserApi.runtime.id || sender.tab) return;
           const entry = pendingRequests.get(msg.id);
           if (!entry) {
             sendResponse({ ok: false, error: "no such request" });

@@ -3061,6 +3061,7 @@ name = "seal-crypto"
 version = "0.1.0"
 dependencies = [
  "borsh",
+ "curve25519-dalek",
  "hex",
  "libcrux-ml-dsa",
  "libcrux-ml-kem",
@@ -3069,6 +3070,7 @@ dependencies = [
  "sha3",
  "subtle",
  "thiserror 2.0.18",
+ "x25519-dalek",
  "zeroize",
 ]
 
@@ -3205,6 +3207,7 @@ dependencies = [
  "rand 0.8.5",
  "seal-crypto",
  "serde",
+ "sha3",
  "subtle",
  "thiserror 2.0.18",
  "zeroize",

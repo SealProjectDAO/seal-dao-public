@@ -15,6 +15,11 @@ serde = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+# `bincode` is a real (not dev) dependency: `SlashingManager::report_offense`
+# deserializes the double-proposal header evidence and re-serializes each
+# header's canonical (empty-sig) form to verify the proposer's ML-DSA signature.
+bincode = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+bincode = { workspace = true }

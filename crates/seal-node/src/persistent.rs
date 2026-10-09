@@ -25,12 +25,17 @@ impl PersistentNode {
 
         let mut runner = ConsensusRunner::new(config);
 
-        // Replay any existing blocks to reconstruct state
+        // Replay any existing blocks to reconstruct state. Verify-before-commit
+        // (audit F2, second pass): use the root-checked wrapper so a stored
+        // block whose replayed state root differs from its header is rejected
+        // and the node refuses to start on a corrupt/adversarial chain, rather
+        // than silently committing it (the low-level `replay_block` appends
+        // without checking the header root).
         let mut height = 1u64;
         let mut replayed = 0;
         while let Some(block) = block_store.get_block(height) {
             runner
-                .replay_block(&block)
+                .apply_block_verified(&block)
                 .map_err(|e| format!("replay failed at height {}: {}", height, e))?;
             height += 1;
             replayed += 1;

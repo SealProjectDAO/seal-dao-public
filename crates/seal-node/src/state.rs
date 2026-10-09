@@ -6,7 +6,7 @@ use seal_crypto::signature::{SigningKey, VerifyingKey};
 use seal_sql::engine::Engine as SqlEngine;
 use seal_sql::engine::QueryResult;
 use seal_sql::error::SqlError;
-use seal_storage::block_store::{Block, BlockHeader, Transaction, TxType};
+use seal_storage::block_store::{Block, BlockHeader, Transaction, TxType, transactions_root};
 use seal_vrf::pq_vrf::PqVrf;
 use seal_vrf::traits::Vrf;
 use seal_vrf::VrfKeypair;
@@ -99,19 +99,43 @@ impl NodeState {
         // Compute state root from actual SQL engine state
         self.state_root = self.sql_engine.state_root();
 
-        let block = Block {
-            header: BlockHeader {
-                height: self.current_height,
-                parent_hash,
-                state_root: self.state_root,
-                timestamp: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs())
-                    .unwrap_or(0),
-                proposer: self.verifying_key.to_bytes(),
-                vrf_output: vec![],
-                vrf_proof: vec![],
+        let mut header = BlockHeader {
+            height: self.current_height,
+            parent_hash,
+            state_root: self.state_root,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            proposer: self.verifying_key.to_bytes(),
+            vrf_output: vec![],
+            vrf_proof: vec![],
+            proposer_signature: Vec::new(),
+            // Root over the pending txs that become this block's transactions
+            // (taken below), keeping the legacy producer consistent with the
+            // consensus runner's signed-`tx_root` convention.
+            tx_root: transactions_root(&self.pending_txs),
+        };
+
+        // Sign the canonical (empty-sig) header serialization so
+        // verifiers can attribute this block to its proposer.
+        // Signing effectively cannot fail (valid key), but if it did
+        // we'd rather produce an unsigned block for the demo path than
+        // panic — verify_and_apply_block rejects such blocks.
+        match bincode::serialize(&header) {
+            Ok(sign_bytes) => match self.signing_key.sign(&sign_bytes) {
+                Ok(sig) => header.proposer_signature = sig.to_bytes().to_vec(),
+                Err(e) => {
+                    tracing::error!("proposer header signing failed: {}", e);
+                }
             },
+            Err(e) => {
+                tracing::error!("proposer header serialization failed: {}", e);
+            }
+        }
+
+        let block = Block {
+            header,
             transactions: std::mem::take(&mut self.pending_txs),
         };
         self.blocks.push(block.clone());

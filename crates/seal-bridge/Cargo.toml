@@ -37,6 +37,18 @@ subtle = { workspace = true }
 # hashes is built from the decoded payload + the SCV_ADDRESS
 # discriminant; see `compute_committee_mac` (Chain::Stellar branch).
 data-encoding = "2"
+# ed25519 for the k-of-n committee member signing path (Solana multisig).
+# Each committee member holds an ed25519 keypair whose 32-byte public key is
+# a registered entry in `bridge_state.committee_members` on the Solana bridge
+# program; the on-chain `unlock_tokens` is authorized by >= `unlock_threshold`
+# of these members co-signing the transaction (runtime-verified, zero program
+# cost). The node holds the member signing keys to expose the member pubkeys
+# (program config) and to produce the Seal-side committee authorization record
+# — each member's ed25519 signature over the canonical unlock payload. This is
+# the same ed25519 (RFC 8032) Solana transaction signers use. Already vendored
+# (ed25519-dalek 2.2.0, via libp2p-identity); classical, so fine in bridge
+# modules per CLAUDE.md.
+ed25519-dalek = "2.2"
 
 # Ringtail (PQ threshold) signing — only pulled in when the
 # `ringtail-singleton` feature is enabled. Opt-in to keep the bridge

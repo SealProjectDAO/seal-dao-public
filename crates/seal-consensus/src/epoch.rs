@@ -91,6 +91,49 @@ impl Slot {
     }
 }
 
+/// Signed epoch transition announcement, broadcast by the node that
+/// crosses an epoch boundary and verified by peers in
+/// `ConsensusRunner::accept_epoch_transition`.
+///
+/// Without this message (audit B.8) any peer could inject an arbitrary
+/// epoch number and rewrite the epoch seed, derandomizing all subsequent
+/// VRF leader elections. The fields are anchored to the sender's chain
+/// state (`prev_seed` + `vrf_output` deterministically yield `seed`),
+/// and the transition is only accepted when signed by an active
+/// validator over [`Self::canonical_bytes`].
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EpochTransitionMsg {
+    /// Epoch being entered (must be the receiver's current epoch + 1).
+    pub epoch: u64,
+    /// Seed of the previous epoch (`epoch - 1`).
+    pub prev_seed: Hash256,
+    /// VRF input that derived the new seed — the transitioning node's
+    /// last finalized block state root (or `b"genesis"` on an empty
+    /// chain), exactly as fed to `Epoch::next_epoch`.
+    pub vrf_output: Vec<u8>,
+    /// New epoch seed: `Epoch { number: epoch - 1, seed: prev_seed }
+    /// .next_epoch(vrf_output)`.
+    pub seed: Hash256,
+    /// Signer's ML-DSA public key — must name an active member of the
+    /// receiver's validator set.
+    pub signer: Vec<u8>,
+    /// ML-DSA signature over `sha3_256(Self::canonical_bytes)`.
+    pub signature: Vec<u8>,
+}
+
+impl EpochTransitionMsg {
+    /// Canonical signed byte string:
+    /// `epoch (8 LE) || prev_seed (32) || vrf_output || seed (32)`.
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + 32 + self.vrf_output.len() + 32);
+        out.extend_from_slice(&self.epoch.to_le_bytes());
+        out.extend_from_slice(self.prev_seed.as_ref());
+        out.extend_from_slice(&self.vrf_output);
+        out.extend_from_slice(self.seed.as_ref());
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +217,50 @@ mod tests {
         let seed2 = sha3_256(b"seed_2");
         let slot = Slot::from_absolute(5, &ConsensusConfig::default());
         assert_ne!(slot.vrf_input(&seed1), slot.vrf_input(&seed2));
+    }
+
+    #[test]
+    fn test_epoch_transition_canonical_bytes_layout() {
+        let epoch0 = Epoch::genesis();
+        let epoch1 = epoch0.next_epoch(b"vrf_abc");
+        let msg = EpochTransitionMsg {
+            epoch: epoch1.number,
+            prev_seed: epoch0.seed,
+            vrf_output: b"vrf_abc".to_vec(),
+            seed: epoch1.seed,
+            signer: vec![1, 2, 3],
+            signature: vec![9],
+        };
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&1u64.to_le_bytes());
+        expected.extend_from_slice(epoch0.seed.as_ref());
+        expected.extend_from_slice(b"vrf_abc");
+        expected.extend_from_slice(epoch1.seed.as_ref());
+        assert_eq!(msg.canonical_bytes(), expected);
+
+        // Field order is part of the wire contract: swapping vrf_output
+        // and seed must change the signed bytes.
+        let swapped = EpochTransitionMsg {
+            seed: epoch0.seed,
+            ..msg.clone()
+        };
+        assert_ne!(msg.canonical_bytes(), swapped.canonical_bytes());
+    }
+
+    #[test]
+    fn test_epoch_transition_bincode_round_trip() {
+        let epoch0 = Epoch::genesis();
+        let epoch1 = epoch0.next_epoch(b"rt");
+        let msg = EpochTransitionMsg {
+            epoch: epoch1.number,
+            prev_seed: epoch0.seed,
+            vrf_output: b"rt".to_vec(),
+            seed: epoch1.seed,
+            signer: vec![7; 16],
+            signature: vec![8; 32],
+        };
+        let bytes = bincode::serialize(&msg).expect("serialize");
+        let back: EpochTransitionMsg = bincode::deserialize(&bytes).expect("deserialize");
+        assert_eq!(msg, back);
     }
 }

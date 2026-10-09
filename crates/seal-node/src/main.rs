@@ -43,6 +43,22 @@ async fn main() {
         );
         std::process::exit(2);
     }
+    // F6: --dev-faucet mints SEAL straight into the live ledger, OUTSIDE the
+    // on-block transition. That is only safe on an isolated single node. On a
+    // networked node the faucet's ledger diverges from every replayer, so any
+    // block it proposes is rejected for a state-root mismatch (it self-isolates
+    // via the root check, but the config is still a footgun — and a lone
+    // --dev-faucet node on a testnet would silently never finalize). Require
+    // --no-network so the intent (local faucet, no peers) is explicit.
+    if dev_faucet && !no_network {
+        eprintln!(
+            "error: --dev-faucet is a single-node devnet feature (it mints straight into the \
+             live ledger, outside the on-block transition). Refused on a networked node: its \
+             ledger would diverge from every replayer. Start with `--dev-faucet --no-network` \
+             for a local faucet, or use the on-chain token mechanisms for a networked mint."
+        );
+        std::process::exit(2);
+    }
     let slots = parse_arg(&args, "--slots").unwrap_or(10);
     let port = parse_arg::<u16>(&args, "--port").unwrap_or(4001);
     let rpc_port = parse_arg::<u16>(&args, "--rpc-port").unwrap_or(0);
@@ -164,6 +180,54 @@ async fn main() {
         },
         None => None,
     };
+    // `--bridge-committee-ed25519-key <path>` (repeatable, flag order =
+    // member index) installs the k-of-n committee member ed25519 signing
+    // keys the node uses to produce the per-member authorization record on
+    // Solana withdrawals (the on-chain program authorizes `unlock_tokens`
+    // once >= `unlock_threshold` registered members co-sign the tx). Each
+    // file holds one 32-byte ed25519 seed as a 64-char hex string
+    // (whitespace tolerated) — the same on-disk convention as
+    // `bridge-committee-key.hex` — and derives a deterministic keypair, so a
+    // member stays a stable on-chain `committee_members` identity across
+    // restarts.
+    let bridge_committee_ed25519_key_paths =
+        parse_multi_string_vec(&args, "--bridge-committee-ed25519-key");
+    let mut bridge_committee_ed25519_seeds: Vec<[u8; 32]> = Vec::new();
+    for path in &bridge_committee_ed25519_key_paths {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: --bridge-committee-ed25519-key {path}: {e}");
+                std::process::exit(2);
+            }
+        };
+        let trimmed = contents.trim();
+        match hex::decode(trimmed) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut seed = [0u8; 32];
+                seed.copy_from_slice(&bytes);
+                bridge_committee_ed25519_seeds.push(seed);
+            }
+            Ok(bytes) => {
+                eprintln!(
+                    "error: --bridge-committee-ed25519-key {path} expects a 32-byte hex seed \
+                     (64 hex chars), got {} bytes",
+                    bytes.len()
+                );
+                std::process::exit(2);
+            }
+            Err(e) => {
+                eprintln!("error: --bridge-committee-ed25519-key {path} hex decode failed: {e}");
+                std::process::exit(2);
+            }
+        }
+    }
+    if !bridge_committee_ed25519_seeds.is_empty() {
+        println!(
+            "Bridge committee ed25519 keys loaded: {} member(s) (Solana k-of-n multisig)",
+            bridge_committee_ed25519_seeds.len()
+        );
+    }
     // `--clear-committee-key-file` deletes the persisted committee
     // key file at startup. Use after a key rotation so the new
     // --bridge-committee-key CLI value isn't silently overridden by
@@ -406,12 +470,13 @@ async fn main() {
     // `Seal DAO Node` so they're the last thing the operator sees
     // before the noisy startup spam.
     let mut warnings: Vec<String> = Vec::new();
-    if bridge_committee_key.is_none() {
+    if bridge_committee_key.is_none() && bridge_committee_ed25519_seeds.is_empty() {
         warnings.push(
-            "no --bridge-committee-key and no <data_dir>/bridge-committee-key.hex present: \
-             seal_bridgeWithdraw will land withdrawals with committee_signature_hex=null, \
-             and the on-chain unlock claim cannot proceed until a key is installed via \
-             seal_bridgeRotateCommitteeKey (council-gated)."
+            "no --bridge-committee-key, no <data_dir>/bridge-committee-key.hex, and no \
+             --bridge-committee-ed25519-key: seal_bridgeWithdraw will land withdrawals with \
+             committee_signature_hex=null, and the on-chain unlock claim cannot proceed until \
+             a key is installed via seal_bridgeRotateCommitteeKey (council-gated) or member \
+             keys are passed."
                 .into(),
         );
     }
@@ -511,6 +576,7 @@ async fn main() {
             bootstrap_snapshot_peer,
             validator_keypair,
             bridge_committee_key,
+            bridge_committee_ed25519_seeds,
             #[cfg(feature = "kms-mode")] kms_socket_path,
             bridge_poll_interval_secs,
             bridge_withdrawal_fee,
@@ -742,6 +808,28 @@ fn parse_multi_string(args: &[String], flag: &str) -> HashSet<String> {
     result
 }
 
+/// Like `parse_multi_string` but preserves flag order and keeps duplicate
+/// values, returning a `Vec`. Used for the k-of-n committee member ed25519
+/// keys (`--bridge-committee-ed25519-key <path>`): the install order defines
+/// the member index each key is registered at on-chain as
+/// `bridge_state.committee_members[i]`, so a deduping/unordered `HashSet`
+/// would scramble the committee.
+fn parse_multi_string_vec(args: &[String], flag: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        if args[i] == flag {
+            if let Some(val) = args.get(i + 1) {
+                result.push(val.clone());
+                i += 2;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    result
+}
+
 fn parse_multi_arg(args: &[String], flag: &str) -> Vec<Multiaddr> {
     let mut result = Vec::new();
     let mut i = 0;
@@ -760,6 +848,69 @@ fn parse_multi_arg(args: &[String], flag: &str) -> Vec<Multiaddr> {
         i += 1;
     }
     result
+}
+
+/// On-disk format of the balance persistence file
+/// (`<data-dir>/balances.bin`).
+///
+/// Block replay is the source of truth on restart, but replay can
+/// break partway (corruption, a format hard-break, a missing block).
+/// This file is the last fully-consistent balance state the previous
+/// run persisted — the fallback that keeps funds from being lost when
+/// that happens.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BalancesFile {
+    version: u32,
+    height: u64,
+    state_root: seal_crypto::hash::Hash256,
+    total_supply: u64,
+    total_burned: u64,
+    /// `BalanceStore::snapshot_dump` entries (raw HAMT leaf bytes).
+    entries: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+const BALANCES_FILE_VERSION: u32 = 1;
+
+/// Atomically persist the balance state (temp file + rename).
+/// Failures only warn: worst case this run's fallback snapshot is
+/// stale or missing, and the node keeps running.
+fn write_balances_file(
+    data_dir: &str,
+    height: u64,
+    state_root: &seal_crypto::hash::Hash256,
+    balances: &seal_token::balance::BalanceStore,
+) {
+    let file = BalancesFile {
+        version: BALANCES_FILE_VERSION,
+        height,
+        state_root: *state_root,
+        total_supply: balances.total_supply(),
+        total_burned: balances.total_burned(),
+        entries: balances.snapshot_dump(),
+    };
+    let bytes = match bincode::serialize(&file) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("Warning: failed to serialize balances file: {}", e);
+            return;
+        }
+    };
+    let tmp = PathBuf::from(data_dir).join("balances.bin.tmp");
+    let final_path = PathBuf::from(data_dir).join("balances.bin");
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        eprintln!("Warning: failed to write balances file: {}", e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, &final_path) {
+        eprintln!("Warning: failed to finalize balances file: {}", e);
+    }
+}
+
+/// Read the balance persistence file (the broken-replay fallback).
+fn read_balances_file(data_dir: &str) -> Result<BalancesFile, String> {
+    let path = PathBuf::from(data_dir).join("balances.bin");
+    let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {}", path.display(), e))?;
+    bincode::deserialize(&bytes).map_err(|e| format!("decode balances.bin: {}", e))
 }
 
 // CLI-arg passthrough; not real coupling. Silenced rather than
@@ -785,6 +936,7 @@ async fn run_networked(
         seal_crypto::signature::VerifyingKey,
     )>,
     bridge_committee_key: Option<[u8; 32]>,
+    bridge_committee_ed25519_seeds: Vec<[u8; 32]>,
     #[cfg(feature = "kms-mode")] kms_socket_path: Option<std::path::PathBuf>,
     bridge_poll_interval_secs: u64,
     bridge_withdrawal_fee: u64,
@@ -823,6 +975,158 @@ async fn run_networked(
 
     let peer_id = node.peer_id;
 
+    // Seed the genesis allocations into the balance store BEFORE any
+    // block replay. Replay re-applies each historical `Transfer` as a
+    // live debit/credit, so the source account (funded by the genesis
+    // pool) must already exist for the debit to succeed. Seeding
+    // genesis *after* replay (the old order) made the first transfer
+    // debit fail on an empty ledger, broke replay partway, and left the
+    // node with a truncated chain whose next produced block overwrote
+    // history at `chain.len()+1` (the F2 restart-divergence bug).
+    //
+    // Genesis is a *local* `balances.mint`, never a block transaction,
+    // so replay can never re-mint it: minting it once here and then
+    // replaying supply-conserving transfers is idempotent and keeps
+    // `total_supply` stable across restarts (no double-mint). A
+    // late-joiner bootstrapping from a snapshot already carries its own
+    // balances, so skip the local mint for that path.
+    if bootstrap_snapshot_peer.is_none() && node.runner.balances.account_count() == 0 {
+        use seal_token::params;
+        let balances = &mut node.runner.balances;
+        let _ = balances.mint("seal1validators", params::genesis::VALIDATOR_POOL);
+        let _ = balances.mint("seal1treasury", params::genesis::COMMUNITY_TREASURY);
+        let _ = balances.mint("seal1team", params::genesis::TEAM_ALLOCATION);
+        let _ = balances.mint("seal1ecosystem", params::genesis::ECOSYSTEM_FUND);
+        let _ = balances.mint("seal1public", params::genesis::PUBLIC_DISTRIBUTION);
+        let _ = balances.mint("seal1reserve", params::genesis::RESERVE);
+        println!(
+            "Genesis: {} SEAL minted ({} accounts)",
+            balances.total_supply() / 1_000_000_000,
+            balances.account_count()
+        );
+    }
+
+    // Open disk store for persistence. If prior blocks exist we replay
+    // them now — the genesis pool seeded above is already in the ledger,
+    // so historical transfer debits succeed and the full chain (including
+    // those transfers) reconstructs instead of breaking on the first
+    // debit. (A replay that still breaks partway falls back to the
+    // `balances.bin` snapshot the previous run persisted.)
+    let (disk_store, had_prior_chain) = match DiskStore::open(&PathBuf::from(&data_dir)) {
+        Ok(store) => {
+            let stored_height = store.latest_height().unwrap_or(0);
+            let mut replayed_any = false;
+            if stored_height > 0 {
+                println!("Found {} blocks on disk, replaying...", stored_height);
+                let mut replayed = 0u64;
+                let mut replay_complete = true;
+                for h in 1..=stored_height {
+                    match store.get_block(h) {
+                        // Verify-before-commit (audit F2, second pass): the
+                        // restart path must go through the SAME root-checked
+                        // wrapper the network path uses, not the low-level
+                        // `replay_block` (which reconstructs state and appends
+                        // the block WITHOUT comparing against the header root).
+                        // A corrupted or adversarially-edited stored block
+                        // whose replayed root differs from its header is now
+                        // rolled back and stops the replay instead of being
+                        // silently committed.
+                        Ok(Some(block)) => match node.runner.apply_block_verified(&block) {
+                            Ok(_) => replayed += 1,
+                            Err(e) => {
+                                eprintln!("Replay failed at block {}: {}", h, e);
+                                replay_complete = false;
+                                break;
+                            }
+                        },
+                        Ok(None) => {
+                            eprintln!("Block {} missing from disk, stopping replay", h);
+                            replay_complete = false;
+                            break;
+                        }
+                        Err(e) => {
+                            eprintln!("Failed to read block {}: {}", h, e);
+                            replay_complete = false;
+                            break;
+                        }
+                    }
+                }
+                if replayed > 0 {
+                    println!(
+                        "Replayed {} blocks, height={}, state={}",
+                        replayed,
+                        node.height(),
+                        node.state_root()
+                    );
+                    replayed_any = true;
+                }
+                if !replay_complete {
+                    // Block replay broke partway: fall back to the last
+                    // persisted balance snapshot so funds aren't lost.
+                    // A complete replay stays the source of truth.
+                    match read_balances_file(&data_dir) {
+                        Ok(file) => {
+                            match seal_token::balance::BalanceStore::restore_with_totals(
+                                file.entries,
+                                file.total_supply,
+                                file.total_burned,
+                            ) {
+                                Ok(restored) => {
+                                    if file.height != node.height() {
+                                        // Audit F2 (second pass): a balance
+                                        // snapshot from a different height than
+                                        // the SQL chain state would make the
+                                        // next produced block stamp
+                                        // `sha3(sql_root ‖ balance_root)` over
+                                        // two different heights — a root no peer
+                                        // can reproduce and this node has no way
+                                        // to notice (a self-fork). Do NOT install
+                                        // the mismatched snapshot; the
+                                        // partial-replay state (sql_engine and
+                                        // balances at the SAME replayed height)
+                                        // is at least self-consistent.
+                                        eprintln!(
+                                            "Error: balances.bin height {} != replayed chain height {}; \
+                                             refusing to install a height-mismatched balance snapshot \
+                                             (would produce an un-reproducible state root). \
+                                             Continuing with the self-consistent partial replay state.",
+                                            file.height,
+                                            node.height()
+                                        );
+                                    } else {
+                                        node.runner.balances = restored;
+                                        println!(
+                                            "Restored balances from balances.bin ({} account(s), supply {})",
+                                            node.runner.balances.account_count(),
+                                            node.runner.balances.total_supply()
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "Warning: balances.bin restore failed ({}); continuing with partial replay state",
+                                        e
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "Warning: no usable balances.bin ({}); continuing with partial replay state",
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            (Some(store), replayed_any)
+        }
+        Err(e) => {
+            eprintln!("Warning: disk persistence disabled ({})", e);
+            (None, false)
+        }
+    };
+
     // State-sync late-joiner path takes priority over genesis mint:
     // a node that's joining an existing testnet shouldn't overlay
     // the genesis allocations on top of the snapshot it just
@@ -832,7 +1136,10 @@ async fn run_networked(
     // stream, hash mismatch), bail out with a clear error rather
     // than silently falling back to genesis — silently mixing
     // genesis + partial snapshot would diverge state from peers.
-    let bootstrapped_from_snapshot = if let Some(peer_url) = bootstrap_snapshot_peer.as_ref() {
+    // The binding result is unused now that the genesis mint runs
+    // pre-replay (see above); the `if let` body is kept for its
+    // side effects (it fetches the snapshot and overrides `balances`).
+    let _bootstrapped_from_snapshot = if let Some(peer_url) = bootstrap_snapshot_peer.as_ref() {
         println!("Bootstrap-from-snapshot: connecting to {peer_url}…");
         let rpc_client = HttpSnapshotRpc {
             peer_url: peer_url.clone(),
@@ -867,23 +1174,9 @@ async fn run_networked(
         false
     };
 
-    // Initialize genesis balances (30/20/15/15/10/10 distribution).
-    // Only when we're not late-joining via state-sync.
-    if !bootstrapped_from_snapshot {
-        use seal_token::params;
-        let balances = &mut node.runner.balances;
-        let _ = balances.mint("seal1validators", params::genesis::VALIDATOR_POOL);
-        let _ = balances.mint("seal1treasury", params::genesis::COMMUNITY_TREASURY);
-        let _ = balances.mint("seal1team", params::genesis::TEAM_ALLOCATION);
-        let _ = balances.mint("seal1ecosystem", params::genesis::ECOSYSTEM_FUND);
-        let _ = balances.mint("seal1public", params::genesis::PUBLIC_DISTRIBUTION);
-        let _ = balances.mint("seal1reserve", params::genesis::RESERVE);
-        println!(
-            "Genesis: {} SEAL minted ({} accounts)",
-            balances.total_supply() / 1_000_000_000,
-            balances.account_count()
-        );
-    }
+    // Persist the post-boot balance state so a later restart has a
+    // fallback even if the block log breaks partway.
+    write_balances_file(&data_dir, node.height(), node.state_root(), &node.runner.balances);
 
     let node = Arc::new(Mutex::new(node));
 
@@ -923,6 +1216,9 @@ async fn run_networked(
     let mut bridge = seal_bridge::BridgeManager::new(1);
     if let Some(k) = bridge_committee_key {
         bridge.set_committee_key(k);
+    }
+    if !bridge_committee_ed25519_seeds.is_empty() {
+        bridge.set_committee_ed25519_seeds(&bridge_committee_ed25519_seeds);
     }
     // KMS mode: wire up CommitteeSigner (and optionally RingtailSigner)
     #[cfg(feature = "kms-mode")]
@@ -1232,56 +1528,9 @@ async fn run_networked(
         });
     }
 
-    // Open disk store for persistence. If prior blocks exist we replay
-    // them FIRST and skip the demo seed — otherwise the seed's
-    // `CREATE TABLE users` collides with block 1's already-recorded
-    // schema, and the replay dies at block 1 with
-    // `SQL replay failed: table already exists: users`.
-    let (disk_store, had_prior_chain) = match DiskStore::open(&PathBuf::from(&data_dir)) {
-        Ok(store) => {
-            let stored_height = store.latest_height().unwrap_or(0);
-            let mut replayed_any = false;
-            if stored_height > 0 {
-                println!("Found {} blocks on disk, replaying...", stored_height);
-                let mut n = node.lock().await;
-                let mut replayed = 0u64;
-                for h in 1..=stored_height {
-                    match store.get_block(h) {
-                        Ok(Some(block)) => match n.runner.replay_block(&block) {
-                            Ok(_) => replayed += 1,
-                            Err(e) => {
-                                eprintln!("Replay failed at block {}: {}", h, e);
-                                break;
-                            }
-                        },
-                        Ok(None) => {
-                            eprintln!("Block {} missing from disk, stopping replay", h);
-                            break;
-                        }
-                        Err(e) => {
-                            eprintln!("Failed to read block {}: {}", h, e);
-                            break;
-                        }
-                    }
-                }
-                if replayed > 0 {
-                    println!(
-                        "Replayed {} blocks, height={}, state={}",
-                        replayed,
-                        n.height(),
-                        n.state_root()
-                    );
-                    replayed_any = true;
-                }
-                drop(n);
-            }
-            (Some(store), replayed_any)
-        }
-        Err(e) => {
-            eprintln!("Warning: disk persistence disabled ({})", e);
-            (None, false)
-        }
-    };
+    // (DiskStore open + chain replay happens at the top of
+    // `run_networked`, before the genesis mint and the RPC server —
+    // see `had_prior_chain`.)
 
     // Demo seed: only on a fresh chain. Block 1 records this tx; on
     // subsequent runs the replay above reconstitutes the same state.
@@ -1330,6 +1579,15 @@ async fn run_networked(
                         eprintln!("Warning: failed to persist block: {}", e);
                     }
                 }
+                // Refresh the balance fallback snapshot (covers
+                // transfers that moved live balances since the last
+                // block).
+                write_balances_file(
+                    &data_dir,
+                    block.block.header.height,
+                    &block.block.header.state_root,
+                    &n.runner.balances,
+                );
             }
         }
         tokio::time::sleep(slot_duration).await;
@@ -1357,6 +1615,11 @@ async fn run_networked(
     println!("\nChain height: {}", n.height());
     println!("State root: {}", n.state_root());
     println!("Received blocks from peers: {}", n.received_block_count());
+
+    // Final balance snapshot (covers transfers that never made it
+    // into a block before the run ended).
+    write_balances_file(&data_dir, n.height(), n.state_root(), &n.runner.balances);
+
     println!("\n=== Done ===");
 }
 

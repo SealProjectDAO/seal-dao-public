@@ -43,6 +43,22 @@ pub struct BridgeManager {
     /// land with `committee_signature_hex = None` and the on-chain
     /// claim can't proceed.
     committee_key: Option<[u8; 32]>,
+    /// k-of-n committee member ed25519 signing keys (Solana multisig).
+    ///
+    /// Each member's 32-byte public key is a registered entry in
+    /// `bridge_state.committee_members` on the Solana bridge program; the
+    /// on-chain `unlock_tokens` is authorized by >= `unlock_threshold`
+    /// distinct members co-signing the transaction (verified by the runtime
+    /// at zero program cost — there is no message-level signature on-chain).
+    /// The node holds the member *signing* keys so it can (a) expose the
+    /// member public keys for program config
+    /// (`committee_ed25519_public_keys`) and (b) produce the Seal-side
+    /// committee authorization record — each member's ed25519 signature over
+    /// the canonical `build_unlock_payload` — attached to
+    /// `committee_signature_hex`. A `Vec` (not a single shared key) because
+    /// the Solana committee is k-of-n. Empty by default; the HMAC / Ringtail
+    /// paths below remain for the Stellar twin and legacy bring-up.
+    committee_ed25519_keys: Vec<ed25519_dalek::SigningKey>,
     /// Ringtail singleton keypair for the PQ-signed unlock path
     /// (P1#5). When set, `initiate_withdrawal` produces a Ringtail
     /// signature instead of an HMAC. Boxed because `PublicParams`
@@ -101,6 +117,51 @@ impl BridgeManager {
     /// Whether `set_committee_key` has been called.
     pub fn has_committee_key(&self) -> bool {
         self.committee_key.is_some()
+    }
+
+    /// Install the full k-of-n committee member ed25519 signing-key set
+    /// (Solana multisig). Replaces any previously installed set. The member
+    /// public keys (`committee_ed25519_public_keys`) are what the operator
+    /// registers as `bridge_state.committee_members` on the Solana program.
+    /// Solana withdrawals now carry the per-member ed25519 authorization
+    /// record instead of the single-key HMAC.
+    pub fn set_committee_ed25519_keys(&mut self, keys: Vec<ed25519_dalek::SigningKey>) {
+        self.committee_ed25519_keys = keys;
+    }
+
+    /// Append one committee member ed25519 signing key (Solana multisig).
+    pub fn add_committee_ed25519_key(&mut self, key: ed25519_dalek::SigningKey) {
+        self.committee_ed25519_keys.push(key);
+    }
+
+    /// Install the committee member signing keys from raw 32-byte ed25519
+    /// seeds. This is the operator-facing API: `seal-node` reads each
+    /// `--bridge-committee-ed25519-key <path>` file (a 64-char hex seed),
+    /// and hands the seeds here so the `ed25519-dalek` type stays confined
+    /// to this crate (seal-node does not depend on it directly). Each seed
+    /// derives a deterministic keypair, so a fixed seed file is a stable
+    /// member identity across node restarts — exactly what the on-chain
+    /// `bridge_state.committee_members` registration needs.
+    pub fn set_committee_ed25519_seeds(&mut self, seeds: &[[u8; 32]]) {
+        self.committee_ed25519_keys = seeds
+            .iter()
+            .map(ed25519_dalek::SigningKey::from_bytes)
+            .collect();
+    }
+
+    /// The installed member public keys (32-byte ed25519), in install order —
+    /// the values to register as `bridge_state.committee_members` on the
+    /// Solana bridge program.
+    pub fn committee_ed25519_public_keys(&self) -> Vec<[u8; 32]> {
+        self.committee_ed25519_keys
+            .iter()
+            .map(|k| k.verifying_key().to_bytes())
+            .collect()
+    }
+
+    /// Whether any committee member ed25519 keys are installed.
+    pub fn has_committee_ed25519_keys(&self) -> bool {
+        !self.committee_ed25519_keys.is_empty()
     }
 
     /// Install a Ringtail singleton keypair (P1#5). When set, every
@@ -351,10 +412,20 @@ impl BridgeManager {
         Ok(id)
     }
 
-    /// Pick the right signing primitive based on what the operator
-    /// has installed. Ringtail wins over HMAC; neither installed →
-    /// `None`. Hex-encodes the result so the wire format
-    /// (`committee_signature_hex`) carries either flavour.
+    /// Pick the right signing primitive based on what the operator has
+    /// installed, in this priority order:
+    ///
+    /// 1. **Solana member multisig** (k-of-n ed25519) when member keys are
+    ///    installed — the Solana committee model.
+    /// 2. Ringtail (KMS or singleton keypair).
+    /// 3. KMS HMAC signer.
+    /// 4. Legacy single-key HMAC.
+    ///
+    /// If none of 1-4 produces a signature the result is `None`. The chosen
+    /// value is hex-encoded, so `committee_signature_hex` carries whichever
+    /// flavour was used. The Stellar twin keeps the HMAC path (member
+    /// multisig is Solana-only, since that program authorizes unlocks by
+    /// member transaction signatures).
     fn compute_committee_signature(
         &self,
         dest_chain: &Chain,
@@ -362,9 +433,21 @@ impl BridgeManager {
         amount: u64,
         nonce: u64,
     ) -> Option<String> {
+        // Priority 1 (Solana only): k-of-n committee member ed25519
+        // signatures. The on-chain `unlock_tokens` is authorized by the
+        // members' transaction signatures (runtime-verified at zero program
+        // cost); this produces the Seal-side committee authorization record —
+        // each installed member's ed25519 signature over the canonical unlock
+        // payload — so the withdrawal carries a verifiable record of exactly
+        // which members approved it.
+        if *dest_chain == Chain::Solana {
+            if let Some(sig) = self.solana_committee_multisig(dest_address, amount, nonce) {
+                return Some(sig);
+            }
+        }
         #[cfg(feature = "ringtail-singleton")]
         {
-            // Priority 1: KMS Ringtail signer (on-demand threshold)
+            // Priority 2a: KMS Ringtail signer (on-demand threshold)
             if let Some(signer) = &self.ringtail_signer {
                 match signer.sign_ringtail(dest_chain, dest_address, amount, nonce) {
                     Ok(sig) => return Some(sig),
@@ -376,7 +459,7 @@ impl BridgeManager {
                     }
                 }
             }
-            // Priority 2: Legacy Ringtail keypair
+            // Priority 2b: Legacy Ringtail keypair
             if let Some(kp) = self.committee_ringtail_keypair.as_ref() {
                 match crate::ringtail::compute_committee_ringtail_sig(
                     dest_chain,
@@ -413,6 +496,39 @@ impl BridgeManager {
         self.committee_key
             .as_ref()
             .map(|k| compute_committee_mac(dest_chain, k, dest_address, amount, nonce))
+    }
+
+    /// Produce the Solana k-of-n committee member authorization record.
+    ///
+    /// Returns `None` when no member ed25519 keys are installed, so the caller
+    /// falls through to the legacy HMAC path. Otherwise returns the hex of the
+    /// concatenation, over each installed member key, of
+    /// `public_key(32) || signature(64)` where `signature` is that member's
+    /// ed25519 signature over `build_unlock_payload` — the same canonical
+    /// bytes the Stellar twin HMACs. The relayer parses the record to know
+    /// which members approved the unlock; it needs >= `unlock_threshold`
+    /// distinct members to co-sign the actual Solana `unlock_tokens`
+    /// transaction (the on-chain authorization).
+    fn solana_committee_multisig(
+        &self,
+        dest_address: &str,
+        amount: u64,
+        nonce: u64,
+    ) -> Option<String> {
+        use ed25519_dalek::Signer;
+        if self.committee_ed25519_keys.is_empty() {
+            return None;
+        }
+        let payload = build_unlock_payload(&Chain::Solana, dest_address, amount, nonce);
+        // 32 (public key) + 64 (ed25519 signature) per member.
+        let mut out = Vec::with_capacity(self.committee_ed25519_keys.len() * 96);
+        for key in &self.committee_ed25519_keys {
+            let pk = key.verifying_key().to_bytes();
+            let sig = key.sign(&payload);
+            out.extend_from_slice(&pk);
+            out.extend_from_slice(&sig.to_bytes());
+        }
+        Some(hex::encode(out))
     }
 
     /// Attach a committee MAC to an existing withdrawal. Called when
@@ -1589,6 +1705,123 @@ mod tests {
         assert_eq!(sig_hex, &expected);
         // HMAC-SHA-256 is always 32 bytes = 64 hex chars.
         assert_eq!(sig_hex.len(), 64);
+    }
+
+    /// Build `n` deterministic committee member ed25519 signing keys from
+    /// `seed + i`.
+    fn member_keys(seed: u8, n: usize) -> Vec<ed25519_dalek::SigningKey> {
+        (0..n)
+            .map(|i| ed25519_dalek::SigningKey::from_bytes(&[seed + i as u8; 32]))
+            .collect()
+    }
+
+    /// With k-of-n committee member ed25519 keys installed, a Solana
+    /// withdrawal carries the per-member authorization record: hex of
+    /// `public_key(32) || signature(64)` per member, where each signature
+    /// verifies over the canonical `build_unlock_payload` against that
+    /// member's public key. This is the cross-stack contract: the node's
+    /// member signature is exactly the ed25519 the Solana committee verifies
+    /// (same payload, same key scheme).
+    #[test]
+    fn solana_withdrawal_multisig_verifies_per_member() {
+        use ed25519_dalek::Verifier;
+        let mut bridge = BridgeManager::new(1);
+        let keys = member_keys(0x10, 3);
+        let pks: Vec<[u8; 32]> = keys.iter().map(|k| k.verifying_key().to_bytes()).collect();
+        bridge.set_committee_ed25519_keys(keys);
+
+        bridge.observe_deposit(make_deposit("d1", 1000)).unwrap();
+        bridge.confirm_deposit("d1").unwrap();
+        bridge.process_deposit("d1").unwrap();
+
+        let id = bridge
+            .initiate_withdrawal(
+                "seal1alice",
+                Chain::Solana,
+                SOL_ADDR_A,
+                WrappedToken::WSOL,
+                100,
+            )
+            .unwrap();
+        let w = bridge.get_withdrawal(&id).unwrap();
+        let sig_hex = w.committee_signature_hex.as_ref().expect("multisig present");
+        // 3 members * (32 pk + 64 sig) = 288 bytes = 576 hex chars.
+        assert_eq!(sig_hex.len(), 576, "record must be 3 x 96 bytes");
+        let raw = hex::decode(sig_hex).unwrap();
+        assert_eq!(raw.len(), 288);
+
+        // Re-derive the canonical payload and verify every member signature.
+        let payload = build_unlock_payload(&Chain::Solana, SOL_ADDR_A, 100, w.nonce);
+        for (i, pk) in pks.iter().enumerate() {
+            let base = i * 96;
+            assert_eq!(&raw[base..base + 32], pk.as_slice(), "member {i} pubkey mismatch");
+            let sig_bytes: [u8; 64] = raw[base + 32..base + 96]
+                .try_into()
+                .expect("64-byte signature");
+            let sig = ed25519_dalek::Signature::from_bytes(&sig_bytes);
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(pk).unwrap();
+            vk.verify(&payload, &sig)
+                .unwrap_or_else(|e| panic!("member {i} signature must verify: {e}"));
+        }
+    }
+
+    /// `committee_ed25519_public_keys` exposes the installed member public
+    /// keys (32-byte ed25519) in install order — the values to register as
+    /// `bridge_state.committee_members`. Empty until keys are installed;
+    /// `add_committee_ed25519_key` appends.
+    #[test]
+    fn solana_multisig_public_keys_exposed() {
+        let mut bridge = BridgeManager::new(1);
+        assert!(!bridge.has_committee_ed25519_keys());
+        assert!(bridge.committee_ed25519_public_keys().is_empty());
+
+        let keys = member_keys(0x40, 2);
+        let expected: Vec<[u8; 32]> = keys.iter().map(|k| k.verifying_key().to_bytes()).collect();
+        bridge.set_committee_ed25519_keys(keys);
+        assert!(bridge.has_committee_ed25519_keys());
+        assert_eq!(bridge.committee_ed25519_public_keys(), expected);
+
+        let extra = member_keys(0x70, 1).remove(0);
+        let extra_pk = extra.verifying_key().to_bytes();
+        bridge.add_committee_ed25519_key(extra);
+        let pks = bridge.committee_ed25519_public_keys();
+        assert_eq!(pks.len(), 3);
+        assert_eq!(pks[2], extra_pk);
+    }
+
+    /// `set_committee_ed25519_keys` replaces (not appends to) the prior set —
+    /// a committee rotation.
+    #[test]
+    fn solana_multisig_set_replaces_prior() {
+        let mut bridge = BridgeManager::new(1);
+        bridge.set_committee_ed25519_keys(member_keys(0x01, 2));
+        assert_eq!(bridge.committee_ed25519_public_keys().len(), 2);
+        bridge.set_committee_ed25519_keys(member_keys(0x02, 1));
+        let pks = bridge.committee_ed25519_public_keys();
+        assert_eq!(pks.len(), 1);
+        let expected = member_keys(0x02, 1).remove(0).verifying_key().to_bytes();
+        assert_eq!(pks[0], expected);
+    }
+
+    /// `set_committee_ed25519_seeds` (the operator API `seal-node` uses,
+    /// which only has raw 32-byte seed bytes from disk) derives the exact
+    /// same keypair set as constructing `SigningKey`s directly from those
+    /// seeds. Locks the boundary contract: the member public keys the node
+    /// exposes for on-chain `committee_members` registration are
+    /// deterministic in the seed file, stable across restarts.
+    #[test]
+    fn solana_multisig_seed_setter_matches_direct_keys() {
+        let mut from_seeds = BridgeManager::new(1);
+        from_seeds.set_committee_ed25519_seeds(&[[0x10; 32], [0x11; 32], [0x12; 32]]);
+
+        let mut from_keys = BridgeManager::new(1);
+        from_keys.set_committee_ed25519_keys(member_keys(0x10, 3));
+
+        assert_eq!(
+            from_seeds.committee_ed25519_public_keys(),
+            from_keys.committee_ed25519_public_keys()
+        );
+        assert_eq!(from_seeds.committee_ed25519_public_keys().len(), 3);
     }
 
     /// Stellar StrKey decode + XDR serialization, pinned against a

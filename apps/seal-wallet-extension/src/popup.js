@@ -558,29 +558,61 @@ function toggleAddressQR() {
 async function renderRequests() {
   const list = await browserApi.runtime.sendMessage({ type: "seal:popup:listRequests" });
   const ul = document.getElementById("requests");
-  ul.innerHTML = "";
+  ul.textContent = "";
   if (!list || list.length === 0) {
-    ul.innerHTML = "<li>No pending requests.</li>";
+    const li = document.createElement("li");
+    li.textContent = "No pending requests.";
+    ul.appendChild(li);
     return;
   }
   for (const item of list) {
     const li = document.createElement("li");
+
+    // Build the row with createElement / textContent / setAttribute only —
+    // `item.origin` and `item.messageHex` are attacker-controlled (a dApp
+    // supplies them), so interpolating them into `innerHTML` was an XSS sink
+    // and let `data-msg="…"` be broken out of. Text nodes and setAttribute
+    // treat the values as data, never markup.
     if (item.kind === "approve") {
-      li.innerHTML = `
-        <strong>Connect</strong> ${item.origin}
-        <div class="actions">
-          <button data-action="approve" data-id="${item.id}">Approve</button>
-          <button class="secondary" data-action="reject" data-id="${item.id}">Reject</button>
-        </div>`;
+      const strong = document.createElement("strong");
+      strong.textContent = "Connect";
+      li.appendChild(strong);
+      li.appendChild(document.createTextNode(" " + item.origin));
     } else if (item.kind === "sign") {
-      li.innerHTML = `
-        <strong>Sign</strong> from ${item.origin}<br>
-        <code>${item.messageHex.slice(0, 64)}${item.messageHex.length > 64 ? "…" : ""}</code>
-        <div class="actions">
-          <button data-action="sign" data-id="${item.id}" data-msg="${item.messageHex}">Sign</button>
-          <button class="secondary" data-action="reject" data-id="${item.id}">Reject</button>
-        </div>`;
+      const strong = document.createElement("strong");
+      strong.textContent = "Sign";
+      li.appendChild(strong);
+      li.appendChild(document.createTextNode(" from " + item.origin));
+      li.appendChild(document.createElement("br"));
+      const code = document.createElement("code");
+      code.textContent =
+        item.messageHex.slice(0, 64) + (item.messageHex.length > 64 ? "…" : "");
+      li.appendChild(code);
+    } else {
+      continue;
     }
+
+    const actions = document.createElement("div");
+    actions.className = "actions";
+
+    const isApprove = item.kind === "approve";
+    const primary = document.createElement("button");
+    primary.dataset.action = isApprove ? "approve" : "sign";
+    primary.dataset.id = String(item.id);
+    primary.textContent = isApprove ? "Approve" : "Sign";
+    if (!isApprove) {
+      primary.setAttribute("data-msg", item.messageHex);
+    }
+    actions.appendChild(primary);
+
+    const reject = document.createElement("button");
+    reject.className = "secondary";
+    reject.dataset.action = "reject";
+    reject.dataset.id = String(item.id);
+    reject.textContent = "Reject";
+    actions.appendChild(reject);
+
+    li.appendChild(actions);
     ul.appendChild(li);
   }
 }

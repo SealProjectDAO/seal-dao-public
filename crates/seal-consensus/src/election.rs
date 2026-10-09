@@ -28,20 +28,27 @@ pub enum ElectionResult {
 /// proposer threshold (1/committee_size of the committee threshold).
 /// They are elected as committee member if their VRF output is below
 /// the committee threshold.
+///
+/// `vrf_secret` is the **local** node's own VRF secret key (the key
+/// that produced the election proof). It is passed explicitly rather
+/// than read from `validator.vrf_public_key` because that field holds
+/// the *public* key — the value gossiped to peers and served over RPC.
+/// Peers verify the proof with the public key via [`verify_election`].
 pub fn run_election(
     validator: &ValidatorInfo,
     slot: &Slot,
     epoch: &Epoch,
     validator_set: &ValidatorSet,
     config: &ConsensusConfig,
+    vrf_secret: &[u8],
 ) -> ElectionResult {
     if !validator.active {
         return ElectionResult::NotElected;
     }
 
-    // Compute VRF
+    // Compute VRF with the local secret key.
     let vrf_input = slot.vrf_input(&epoch.seed);
-    let (vrf_output, vrf_proof) = match PqVrf::eval(&validator.vrf_public_key, &vrf_input) {
+    let (vrf_output, vrf_proof) = match PqVrf::eval(vrf_secret, &vrf_input) {
         Ok(result) => result,
         Err(_) => return ElectionResult::NotElected,
     };
@@ -50,8 +57,17 @@ pub fn run_election(
     let committee_threshold = validator_set.vrf_threshold(validator, config.committee_size);
 
     // Proposer threshold: 1 proposer expected per slot
-    // = committee_threshold / committee_size (approximately)
-    let proposer_threshold = committee_threshold / config.committee_size as u64;
+    // = committee_threshold / committee_size (approximately).
+    //
+    // Guard the divisor with `.max(1)`: `committee_size == 0` means "never
+    // elect a proposer" (the committee threshold is 0, so the VRF can never
+    // be below it and both branches fall through to `NotElected`). Dividing
+    // by 0 would panic. Clamping only the *divisor* — not `committee_size`
+    // itself — is deliberate: clamping the config value would change the
+    // committee threshold `vrf_threshold` computed above. With a 0 committee
+    // the divisor becomes 1 and `proposer_threshold` stays `committee_threshold`
+    // (0), which is exactly the "never elected" behaviour we want.
+    let proposer_threshold = committee_threshold / config.committee_size.max(1) as u64;
 
     if vrf_output.is_below_threshold(proposer_threshold) {
         ElectionResult::Proposer {
@@ -104,23 +120,25 @@ mod tests {
     use super::*;
     use seal_vrf::traits::Vrf;
 
-    fn make_validator_with_vrf(id: u8, stake: u64) -> (ValidatorInfo, Vec<u8>) {
+    /// Returns (validator info, public key, secret key). The validator
+    /// stores the REAL public key (what peers verify with); the secret
+    /// is returned separately for local `run_election` eval.
+    fn make_validator_with_vrf(id: u8, stake: u64) -> (ValidatorInfo, Vec<u8>, Vec<u8>) {
         let kp = PqVrf::keygen();
-        let verify_key = kp.public_key.clone(); // SHA3(secret_key) for HMAC stub
         let info = ValidatorInfo {
             public_key: vec![id; 32],
-            vrf_public_key: kp.secret_key, // HMAC stub uses secret for eval
+            vrf_public_key: kp.public_key.clone(),
             stake,
             active: true,
         };
-        (info, verify_key)
+        (info, kp.public_key, kp.secret_key)
     }
 
     #[test]
     fn test_election_verifiable() {
         // PqVrf uses ML-DSA with random nonce, so outputs differ per eval.
         // We verify that both evaluations produce VERIFIABLE results.
-        let (v, vk) = make_validator_with_vrf(1, 1000);
+        let (v, vk, sk) = make_validator_with_vrf(1, 1000);
         let vs = ValidatorSet::new(vec![v.clone()]);
         let epoch = Epoch::genesis();
         let config = ConsensusConfig::default();
@@ -128,7 +146,7 @@ mod tests {
         // Run election and verify the result is valid
         for slot_num in 0..10u64 {
             let slot = Slot::from_absolute(slot_num, &config);
-            let result = run_election(&v, &slot, &epoch, &vs, &config);
+            let result = run_election(&v, &slot, &epoch, &vs, &config, &sk);
             match result {
                 ElectionResult::Proposer {
                     vrf_output,
@@ -161,9 +179,36 @@ mod tests {
         }
     }
 
+    /// Regression: `committee_size == 0` must not panic the proposer
+    /// threshold division (it once did `committee_threshold /
+    /// committee_size` with a 0 divisor). A 0 committee means "never
+    /// elect a proposer" — both thresholds are 0, so every slot is
+    /// `NotElected`.
+    #[test]
+    fn election_zero_committee_size_does_not_panic() {
+        let (v, _vk, sk) = make_validator_with_vrf(1, 1000);
+        let vs = ValidatorSet::new(vec![v.clone()]);
+        let epoch = Epoch::genesis();
+        let config = ConsensusConfig {
+            committee_size: 0,
+            ..ConsensusConfig::default()
+        };
+        for slot_num in 0..5u64 {
+            let slot = Slot::from_absolute(slot_num, &config);
+            assert!(
+                matches!(
+                    run_election(&v, &slot, &epoch, &vs, &config, &sk),
+                    ElectionResult::NotElected
+                ),
+                "a zero committee must never elect (slot {})",
+                slot_num
+            );
+        }
+    }
+
     #[test]
     fn test_election_different_slots() {
-        let (v, _vk) = make_validator_with_vrf(1, 1000);
+        let (v, _vk, sk) = make_validator_with_vrf(1, 1000);
         let vs = ValidatorSet::new(vec![v.clone()]);
         let epoch = Epoch::genesis();
         let config = ConsensusConfig::default();
@@ -171,7 +216,7 @@ mod tests {
         let mut elected_count = 0;
         for s in 0..100 {
             let slot = Slot::from_absolute(s, &config);
-            match run_election(&v, &slot, &epoch, &vs, &config) {
+            match run_election(&v, &slot, &epoch, &vs, &config, &sk) {
                 ElectionResult::Proposer { .. } | ElectionResult::Committee { .. } => {
                     elected_count += 1;
                 }
@@ -186,7 +231,7 @@ mod tests {
 
     #[test]
     fn test_inactive_validator_not_elected() {
-        let (mut v, _vk) = make_validator_with_vrf(1, 1000);
+        let (mut v, _vk, sk) = make_validator_with_vrf(1, 1000);
         v.active = false;
         let vs = ValidatorSet::new(vec![v.clone()]);
         let epoch = Epoch::genesis();
@@ -194,21 +239,21 @@ mod tests {
         let config = ConsensusConfig::default();
 
         assert!(matches!(
-            run_election(&v, &slot, &epoch, &vs, &config),
+            run_election(&v, &slot, &epoch, &vs, &config, &sk),
             ElectionResult::NotElected
         ));
     }
 
     #[test]
     fn test_verify_election_valid() {
-        let (v, vk) = make_validator_with_vrf(1, 1000);
+        let (v, vk, sk) = make_validator_with_vrf(1, 1000);
         let vs = ValidatorSet::new(vec![v.clone()]);
         let epoch = Epoch::genesis();
         let config = ConsensusConfig::default();
 
         for s in 0..1000 {
             let slot = Slot::from_absolute(s, &config);
-            match run_election(&v, &slot, &epoch, &vs, &config) {
+            match run_election(&v, &slot, &epoch, &vs, &config, &sk) {
                 ElectionResult::Proposer {
                     vrf_output,
                     vrf_proof,
@@ -237,8 +282,8 @@ mod tests {
 
     #[test]
     fn test_higher_stake_elected_more() {
-        let (v_low, _vk1) = make_validator_with_vrf(1, 10);
-        let (v_high, _vk2) = make_validator_with_vrf(2, 10000);
+        let (v_low, _vk1, sk_low) = make_validator_with_vrf(1, 10);
+        let (v_high, _vk2, sk_high) = make_validator_with_vrf(2, 10000);
         let vs = ValidatorSet::new(vec![v_low.clone(), v_high.clone()]);
         let epoch = Epoch::genesis();
         let config = ConsensusConfig {
@@ -250,13 +295,13 @@ mod tests {
         let mut high_elected = 0;
         for s in 0..1000 {
             let slot = Slot::from_absolute(s, &config);
-            match run_election(&v_low, &slot, &epoch, &vs, &config) {
+            match run_election(&v_low, &slot, &epoch, &vs, &config, &sk_low) {
                 ElectionResult::Proposer { .. } | ElectionResult::Committee { .. } => {
                     low_elected += 1;
                 }
                 _ => {}
             }
-            match run_election(&v_high, &slot, &epoch, &vs, &config) {
+            match run_election(&v_high, &slot, &epoch, &vs, &config, &sk_high) {
                 ElectionResult::Proposer { .. } | ElectionResult::Committee { .. } => {
                     high_elected += 1;
                 }

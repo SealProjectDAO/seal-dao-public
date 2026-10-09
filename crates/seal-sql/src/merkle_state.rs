@@ -15,6 +15,7 @@ use seal_merkle::store::MemoryStore;
 use seal_merkle::tree::MerkleTree;
 
 /// SQL engine with Merkle-tree backed state roots.
+#[derive(Clone)]
 pub struct MerkleEngine {
     /// The underlying SQL engine (handles query execution).
     engine: Engine,
@@ -29,6 +30,15 @@ impl MerkleEngine {
             engine: Engine::new(),
             merkle: MerkleTree::new(MemoryStore::new()),
         }
+    }
+
+    /// Access the inner SQL engine (committed tables/rows without the Merkle
+    /// commitment). Callers that need SQL rows but NOT the state root — e.g.
+    /// `seal-node`'s read-your-writes working set — can clone this instead of a
+    /// full [`MerkleEngine`], which would maintain a Merkle tree that is never
+    /// read (O(n) per write for nothing).
+    pub fn engine(&self) -> &Engine {
+        &self.engine
     }
 
     /// Execute SQL and update the Merkle tree incrementally.
@@ -149,15 +159,26 @@ impl MerkleEngine {
     }
 
     /// Full rebuild (fallback for DDL operations like CREATE/DROP).
+    ///
+    /// Tables are inserted in SORTED name order. `Engine::table_names()`
+    /// iterates a `HashMap` (`schemas.keys()`), whose order is randomized per
+    /// process, and the Merkle B-tree's root hash depends on insertion order
+    /// once the tree exceeds one node (node hashes cover entries *and* child
+    /// references, and splits are position-dependent). Rebuilding in a
+    /// non-deterministic order would give the producer and each replayer a
+    /// different `state_root` for the identical key set — the exact class of
+    /// fork F3 is meant to eliminate (audit finding F4). Sorting makes the
+    /// rebuilt tree — and hence the root — a pure function of the key set.
     fn rebuild_merkle(&mut self) {
         self.merkle = MerkleTree::new(MemoryStore::new());
 
-        let table_names: Vec<String> = self
+        let mut table_names: Vec<String> = self
             .engine
             .table_names()
             .iter()
             .map(|s| s.to_string())
             .collect();
+        table_names.sort();
 
         for table_name in &table_names {
             self.update_table_in_merkle(table_name);
@@ -398,5 +419,35 @@ mod tests {
         // Both proofs verify against the SAME root
         assert!(user_proof.unwrap().verify(&root));
         assert!(post_proof.unwrap().verify(&root));
+    }
+
+    /// Audit §6.8 M2 disproof — a `DROP TABLE` actually removes the table's
+    /// rows from the Merkle commitment. `Engine::execute` resets
+    /// `last_write_log` to `None` before dispatching, and `execute_drop` never
+    /// sets it, so `MerkleEngine::execute` takes the `None` branch:
+    /// `extract_affected_table` yields `None` for a DROP and the full
+    /// `rebuild_merkle()` runs against the post-drop table set. Dropping the
+    /// only table must therefore return the root to the empty-state root.
+    #[test]
+    fn test_drop_table_is_removed_from_merkle_root() {
+        let mut engine = MerkleEngine::new();
+        let empty_root = engine.state_root(); // empty state
+        engine
+            .execute("CREATE TABLE t (id BIGINT PRIMARY KEY, val TEXT)")
+            .unwrap();
+        engine
+            .execute("INSERT INTO t (id, val) VALUES (1, 'hello')")
+            .unwrap();
+        assert_ne!(
+            engine.state_root(),
+            empty_root,
+            "the table's rows must contribute to the root"
+        );
+        engine.execute("DROP TABLE t").unwrap();
+        assert_eq!(
+            engine.state_root(),
+            empty_root,
+            "DROP TABLE must remove the table's rows from the Merkle root"
+        );
     }
 }

@@ -449,6 +449,47 @@ seal_rpc() {
         -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}"
 }
 
+seal_rpc_signed() {
+    # Usage: seal_rpc_signed METHOD [PARAMS_JSON] [--port N]
+    # Like seal_rpc, but signs the request with $SEAL_E2E_KEY. The
+    # bridge-bootstrap methods (addBridgeObserver, councilAdd/Remove,
+    # pause/unpause, rotateCommitteeKey) and the MPC/ZK endpoints
+    # require a signature in all node modes, so the script's
+    # bootstrap calls go through this helper.
+    local method="$1"
+    shift
+    local params="[]"
+    local port="$SEAL_PORT_1"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --port)
+                port="$2"
+                shift 2
+                ;;
+            *)
+                params="$1"
+                shift
+                ;;
+        esac
+    done
+    if [ ! -f "$SEAL_E2E_KEY" ]; then
+        cargo run --quiet -p seal-cli -- keygen --output "$SEAL_E2E_KEY" >/dev/null 2>&1
+    fi
+    local sig
+    sig=$(cargo run --quiet -p seal-cli -- admin-sign \
+        --method "$method" --params "$params" --key "$SEAL_E2E_KEY")
+    local sender signature
+    sender=$(printf '%s' "$sig" | jq -r .sender)
+    signature=$(printf '%s' "$sig" | jq -r .signature)
+    local body
+    body=$(jq -cn --arg m "$method" --argjson p "$params" \
+        --arg s "$signature" --arg sd "$sender" \
+        '{jsonrpc:"2.0", id:1, method:$m, params:$p, signature:$s, sender:$sd}')
+    curl -sS "http://localhost:$port" \
+        -H 'content-type: application/json' \
+        -d "$body"
+}
+
 # ──────────────────────────────────────────────────────────────
 # Per-node readiness pipeline. Canonical phases (in order):
 #
@@ -565,7 +606,7 @@ wait_for_bridge_node_ready() {
     for i in $(seq 1 12); do
         baseline=$(seal_rpc seal_listBridgeObservers '{}' --port "$port" \
             | jq -r '.result.count // 0' 2>/dev/null || echo 0)
-        seal_rpc seal_addBridgeObserver "$sentinel" --port "$port" >/dev/null 2>&1 || true
+        seal_rpc_signed seal_addBridgeObserver "$sentinel" --port "$port" >/dev/null 2>&1 || true
         sleep 1
         post_add=$(seal_rpc seal_listBridgeObservers '{}' --port "$port" \
             | jq -r '.result.count // 0' 2>/dev/null || echo 0)
@@ -636,7 +677,7 @@ wait_for_bridge_nodes_ready() {
         for _ in $(seq 1 12); do
             baseline=$(seal_rpc seal_listBridgeObservers '{}' --port "$port" \
                 | jq -r '.result.count // 0' 2>/dev/null || echo 0)
-            seal_rpc seal_addBridgeObserver "$sentinel" --port "$port" >/dev/null 2>&1 || true
+            seal_rpc_signed seal_addBridgeObserver "$sentinel" --port "$port" >/dev/null 2>&1 || true
             sleep 1
             pre1=$(seal_rpc seal_listBridgeObservers '{}' --port "$port" \
                 | jq -r '.result.count // 0' 2>/dev/null || echo 0)
@@ -685,7 +726,7 @@ register_observer_verified() {
                             # rock-solid once the window has passed.
     local attempt add_resp list_resp count
     for attempt in $(seq 1 "$max_attempts"); do
-        add_resp=$(seal_rpc seal_addBridgeObserver "$params_json" --port "$port" 2>&1 || true)
+        add_resp=$(seal_rpc_signed seal_addBridgeObserver "$params_json" --port "$port" 2>&1 || true)
         list_resp=$(seal_rpc seal_listBridgeObservers '{}' --port "$port" 2>&1 || true)
         count=$(printf '%s' "$list_resp" | jq -r '.result.count // 0' 2>/dev/null || echo 0)
         if [ "$count" -ge 1 ]; then
@@ -769,7 +810,7 @@ verify_committee_key_rotation() {
     # Seat each one. Idempotent — re-add returns success on the
     # alpha-bootstrap path.
     for pk in "${council_keys[@]}"; do
-        seal_rpc seal_bridgeCouncilAdd \
+        seal_rpc_signed seal_bridgeCouncilAdd \
             "{\"pubkey\":\"$pk\",\"name\":\"e2e-council\"}" --port "$SEAL_PORT_1" >/dev/null
     done
 
@@ -778,7 +819,7 @@ verify_committee_key_rotation() {
 
     # Rotate to the test key. Expect success.
     local rot_resp
-    rot_resp=$(seal_rpc seal_bridgeRotateCommitteeKey \
+    rot_resp=$(seal_rpc_signed seal_bridgeRotateCommitteeKey \
         "{\"new_key_hex\":\"$new_key_hex\",\"approvers\":$approvers_json}" \
         --port "$SEAL_PORT_1")
     local rotated
@@ -808,7 +849,7 @@ verify_committee_key_rotation() {
     # actual rotation failure behind a downstream "fingerprint didn't
     # restore" assertion, which gave you the wrong error to chase.
     local back_resp back_rotated back_error
-    back_resp=$(seal_rpc seal_bridgeRotateCommitteeKey \
+    back_resp=$(seal_rpc_signed seal_bridgeRotateCommitteeKey \
         "{\"new_key_hex\":\"$fixture_key_hex\",\"approvers\":$approvers_json}" \
         --port "$SEAL_PORT_1")
     back_rotated=$(printf '%s' "$back_resp" | jq -r '.result.rotated // false')

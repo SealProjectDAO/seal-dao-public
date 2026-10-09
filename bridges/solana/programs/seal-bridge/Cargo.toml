@@ -20,21 +20,6 @@ default = []
 # missing" on `anchor build`.
 idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 
-# Algebraic Ringtail verify (lattice-based, on-chain).
-#
-# When ON, `unlock_tokens` additionally decodes a Ringtail envelope
-# appended to the committee signature and runs the algebraic verify
-# via seal-ringtail-verify. Upgrades the trust model from "committee-
-# MAC with a shared key" to "algebraic Ringtail verify against a
-# public lattice key". Currently gated because:
-#   (1) BPF build size / CU cost needs measurement.
-#   (2) seal-threshold's signer has a known inconsistency with
-#       verify_signature_full (simplified D_i = r_i + e_i vs
-#       D_i = A*r_i + e_i). Separate ticket.
-# Keep OFF for default testnet/mainnet-initial builds until both
-# blockers are resolved.
-ringtail-verify = ["dep:seal-ringtail-verify"]
-
 [dependencies]
 # Anchor 0.31.x brings in a newer solana-program stack whose blake3
 # pulls constant_time_eq ^0.4 — which builds on Solana's shipped
@@ -45,11 +30,11 @@ ringtail-verify = ["dep:seal-ringtail-verify"]
 anchor-lang = "0.31"
 anchor-spl = "0.31"
 
-# no_std-compatible Ringtail verifier. Optional until BPF CU and
-# signer-fix blockers are cleared.
-seal-ringtail-verify = { path = "../../../../crates/seal-ringtail-verify", optional = true }
-
-[dev-dependencies]
-# Reference HMAC-SHA-256 implementation for unit tests. Not linked
-# into the on-chain BPF binary (dev-dependency only).
-sha2 = "0.10"
+# NOTE: no classic-crypto dependencies. Committee authorization is a
+# k-of-n member multisig verified natively by the Solana runtime
+# (tx signer verification), so the program itself performs no
+# signature checks. The earlier ed25519-dalek / HMAC / Ringtail
+# in-BPF verify paths were removed after measurement showed ed25519
+# verification exceeds this runtime's 1.4M CU per-instruction cap and
+# the ed25519 precompile cannot be bound to on-chain committee keys
+# (see module doc in src/lib.rs).

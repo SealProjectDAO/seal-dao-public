@@ -9,6 +9,7 @@
 # 5. Fuzz (short)      (~2 min) — 9 fuzz targets, 15s each
 # 6. Lean 4            (~1 min) — mathematical proofs
 # 7. Rocq              (~1 min) — state machine proofs
+# 8. TLA+ state-root   (~2 min) — F3 no-fork interleaving (SANY + TLC + Apalache)
 #
 # Usage:
 #   ./scripts/ci-formal.sh          # Run everything
@@ -21,6 +22,7 @@
 #   rustup run nightly cargo install cargo-fuzz
 #   # For Lean 4: elan (https://leanprover.github.io/lean4/doc/setup.html)
 #   # For Rocq: opam install coq
+#   # For TLA+ state-root: scripts/install-tla-tools.sh (or set TLA2TOOLS)
 
 set -e
 
@@ -61,7 +63,13 @@ echo ""
 
 # ─── 2. Clippy ────────────────────────────────────
 echo "── Step 2: cargo clippy ──"
-CLIPPY_ERRORS=$(cargo clippy --all-targets 2>&1 | grep "^error" | wc -l)
+# Match ci.sh: lint lib + bins + tests + examples but NOT benches. The
+# `--all-targets` alias also compiles `--benches`, and two benches
+# (seal-token/balance_scale, seal-zk/proving) use `#![feature(test)]`, which
+# only builds on nightly — so `--all-targets` hard-errors on a stable toolchain
+# (E0554) even though the code is fine. Benches are exercised separately on
+# nightly (`cargo +nightly bench`), not by this stable clippy pass.
+CLIPPY_ERRORS=$(cargo clippy --lib --bins --tests --examples 2>&1 | grep "^error" | wc -l)
 if [ "$CLIPPY_ERRORS" -eq 0 ]; then
     pass "cargo clippy"
 else
@@ -95,7 +103,7 @@ fi
 echo ""
 
 if [ "$MODE" = "quick" ]; then
-    echo "── Quick mode: skipping Miri, fuzz, Lean, Rocq ──"
+    echo "── Quick mode: skipping Miri, fuzz, Lean, Rocq, TLA+ ──"
     echo ""
     echo "============================================"
     echo "  Results: $PASS passed, $FAIL failed, $SKIP skipped"
@@ -239,6 +247,29 @@ if command -v coqc > /dev/null 2>&1; then
     cd ../..
 else
     skip "Rocq" "not installed (opam install coq)"
+fi
+echo ""
+
+# ─── 8. TLA+ state-root determinism (F3) ─────────
+#
+# SANY + TLC + Apalache over formal/tlaplus/SealStateRoot.tla. The FIXED
+# design (the shared on-block transition) must satisfy NoMismatchFixed +
+# AgreementFixed; the BUGGY design (a node-local live store) must FAIL
+# NoMismatchBuggy at a non-origin proposer (the exact F3 fork). Skipped
+# unless tla2tools.jar is present — install with scripts/install-tla-tools.sh.
+# The script's own exit code is authoritative (0 = both designs behave as
+# specified), so capture PIPESTATUS rather than the pipe's (tail's) status.
+echo "── Step 8: TLA+ state-root (F3 no-fork) ──"
+if [ -f "${TLA2TOOLS:-$HOME/tools/tla/tla2tools.jar}" ]; then
+    bash scripts/verify-tla-stateroot.sh 2>&1 | tail -15
+    TLA_EXIT=${PIPESTATUS[0]}
+    if [ "$TLA_EXIT" -eq 0 ]; then
+        pass "TLA+ state-root (SANY + TLC + Apalache)"
+    else
+        fail "TLA+ state-root (verification failed, exit $TLA_EXIT)"
+    fi
+else
+    skip "TLA+ state-root" "tla2tools.jar not found (scripts/install-tla-tools.sh)"
 fi
 echo ""
 

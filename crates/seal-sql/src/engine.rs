@@ -38,6 +38,7 @@ pub struct WriteLog {
 }
 
 /// In-memory SQL execution engine.
+#[derive(Clone)]
 pub struct Engine {
     schemas: HashMap<String, Schema>,
     /// Index manager for accelerated WHERE lookups.
@@ -215,12 +216,10 @@ impl Engine {
             )));
         }
 
-        // `$N` substitution is identical across SQL and PL/pgSQL bodies.
-        let mut body = proc.body.clone();
-        for (i, value) in arg_strings.iter().enumerate() {
-            let placeholder = format!("${}", i + 1);
-            body = body.replace(&placeholder, value);
-        }
+        // Single-pass, anchored `$N` substitution shared with the seal-procs
+        // engine (see `seal_procs::substitute_positional`) so `$1`/`$10` don't
+        // collide and substituted values aren't re-scanned.
+        let body = seal_procs::substitute_positional(&proc.body, &arg_strings);
 
         match proc.language {
             seal_procs::ProcedureLanguage::Sql => {
@@ -911,16 +910,15 @@ impl Engine {
             input.trim_start()
         };
         let upper = input.to_uppercase();
-        for kw in &["ALL ", "SELECT ", "INSERT ", "UPDATE ", "DELETE "] {
+        for (kw, action) in [
+            ("ALL ", crate::rls::PolicyAction::All),
+            ("SELECT ", crate::rls::PolicyAction::Select),
+            ("INSERT ", crate::rls::PolicyAction::Insert),
+            ("UPDATE ", crate::rls::PolicyAction::Update),
+            ("DELETE ", crate::rls::PolicyAction::Delete),
+        ] {
             if upper.starts_with(kw) {
-                return Ok(match &kw[..kw.len() - 1] {
-                    "ALL" => crate::rls::PolicyAction::All,
-                    "SELECT" => crate::rls::PolicyAction::Select,
-                    "INSERT" => crate::rls::PolicyAction::Insert,
-                    "UPDATE" => crate::rls::PolicyAction::Update,
-                    "DELETE" => crate::rls::PolicyAction::Delete,
-                    _ => unreachable!(),
-                });
+                return Ok(action);
             }
         }
         Err(SqlError::Parse(

@@ -6,9 +6,14 @@
 //! - AMD SEV-SNP (Secure Encrypted Virtualization — Secure Nested Paging)
 //! - NVIDIA Confidential Computing
 //!
-//! These stubs always accept non-empty quotes. Real implementations will
-//! perform cryptographic verification of the attestation evidence against
-//! the platform vendor's root of trust.
+//! The stubs are **fail-closed**: until real vendor verification is wired,
+//! every quote is rejected (empty → [`TeeError::InvalidQuote`]; non-empty →
+//! [`TeeError::VerificationFailed`]) so an unverified quote can never be
+//! accepted and a TEE gate cannot be bypassed by handing the stub any
+//! non-empty byte string. A real implementation is a drop-in replacement that
+//! performs cryptographic verification of the attestation evidence against the
+//! platform vendor's root of trust in the body of
+//! [`TeeAttestation::verify_quote`].
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -140,15 +145,13 @@ impl TeeAttestation for IntelTdxAttestation {
             return Err(TeeError::InvalidQuote);
         }
 
-        // Stub: accept any non-empty quote as valid.
-        // A real implementation would perform full DCAP verification here.
-        Ok(AttestationResult {
-            valid: true,
-            platform: "Intel TDX".to_string(),
-            measurement: quote.to_vec(),
-            report_data: quote.to_vec(),
-            timestamp: current_unix_timestamp(),
-        })
+        // Fail-closed stub: we cannot actually verify a TDX DCAP quote, so we
+        // refuse to accept one rather than claim validity. A real
+        // implementation replaces this with full DCAP verification (see the
+        // struct docs) and returns an `AttestationResult` only on success.
+        Err(TeeError::VerificationFailed(
+            "Intel TDX (DCAP) quote verification is not implemented; refusing to accept an unverified quote (fail-closed)".into(),
+        ))
     }
 
     fn is_attested(&self) -> bool {
@@ -209,15 +212,13 @@ impl TeeAttestation for AmdSevSnpAttestation {
             return Err(TeeError::InvalidQuote);
         }
 
-        // Stub: accept any non-empty quote as valid.
-        // A real implementation would perform full SEV-SNP report verification.
-        Ok(AttestationResult {
-            valid: true,
-            platform: "AMD SEV-SNP".to_string(),
-            measurement: quote.to_vec(),
-            report_data: quote.to_vec(),
-            timestamp: current_unix_timestamp(),
-        })
+        // Fail-closed stub: we cannot actually verify an SEV-SNP report, so we
+        // refuse to accept one rather than claim validity. A real
+        // implementation replaces this with full report verification (see the
+        // struct docs) and returns an `AttestationResult` only on success.
+        Err(TeeError::VerificationFailed(
+            "AMD SEV-SNP report verification is not implemented; refusing to accept an unverified quote (fail-closed)".into(),
+        ))
     }
 
     fn is_attested(&self) -> bool {
@@ -278,15 +279,13 @@ impl TeeAttestation for NvidiaConfidentialCompute {
             return Err(TeeError::InvalidQuote);
         }
 
-        // Stub: accept any non-empty quote as valid.
-        // A real implementation would perform NVIDIA CC attestation verification.
-        Ok(AttestationResult {
-            valid: true,
-            platform: "NVIDIA CC".to_string(),
-            measurement: quote.to_vec(),
-            report_data: quote.to_vec(),
-            timestamp: current_unix_timestamp(),
-        })
+        // Fail-closed stub: we cannot actually verify an NVIDIA CC attestation,
+        // so we refuse to accept one rather than claim validity. A real
+        // implementation replaces this with full attestation verification (see
+        // the struct docs) and returns an `AttestationResult` only on success.
+        Err(TeeError::VerificationFailed(
+            "NVIDIA Confidential Computing attestation verification is not implemented; refusing to accept an unverified quote (fail-closed)".into(),
+        ))
     }
 
     fn is_attested(&self) -> bool {
@@ -377,6 +376,11 @@ impl Default for ReattestationTimer {
 /// Return the current Unix timestamp in seconds.
 ///
 /// Falls back to 0 if the system clock is before the Unix epoch.
+///
+/// Retained (currently unused) as scaffold: the real, non-stub
+/// `verify_quote` implementations stamp the resulting `AttestationResult`
+/// with this timestamp.
+#[allow(dead_code)]
 fn current_unix_timestamp() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -395,15 +399,15 @@ mod tests {
     // -- Intel TDX --
 
     #[test]
-    fn tdx_verify_valid_quote() {
+    fn tdx_verify_quote_fails_closed() {
         let verifier = IntelTdxAttestation::new();
-        let quote = b"fake-tdx-quote-data";
-        let result = verifier.verify_quote(quote).unwrap();
-        assert!(result.valid);
-        assert_eq!(result.platform, "Intel TDX");
-        assert_eq!(result.measurement, quote.to_vec());
-        assert_eq!(result.report_data, quote.to_vec());
-        assert!(result.timestamp > 0);
+        // A non-empty (even plausible-looking) quote must be REJECTED by the
+        // fail-closed stub — never accepted as valid.
+        let result = verifier.verify_quote(b"fake-tdx-quote-data");
+        match result {
+            Err(TeeError::VerificationFailed(_)) => {} // expected (fail-closed)
+            other => panic!("expected VerificationFailed, got {:?}", other),
+        }
     }
 
     #[test]
@@ -433,13 +437,15 @@ mod tests {
     // -- AMD SEV-SNP --
 
     #[test]
-    fn sevsnp_verify_valid_quote() {
+    fn sevsnp_verify_quote_fails_closed() {
         let verifier = AmdSevSnpAttestation::new();
-        let quote = b"fake-sevsnp-report";
-        let result = verifier.verify_quote(quote).unwrap();
-        assert!(result.valid);
-        assert_eq!(result.platform, "AMD SEV-SNP");
-        assert_eq!(result.measurement, quote.to_vec());
+        // A non-empty (even plausible-looking) report must be REJECTED by the
+        // fail-closed stub — never accepted as valid.
+        let result = verifier.verify_quote(b"fake-sevsnp-report");
+        match result {
+            Err(TeeError::VerificationFailed(_)) => {} // expected (fail-closed)
+            other => panic!("expected VerificationFailed, got {:?}", other),
+        }
     }
 
     #[test]
@@ -469,13 +475,15 @@ mod tests {
     // -- NVIDIA CC --
 
     #[test]
-    fn nvidia_verify_valid_quote() {
+    fn nvidia_verify_quote_fails_closed() {
         let verifier = NvidiaConfidentialCompute::new();
-        let quote = b"fake-nvidia-attestation";
-        let result = verifier.verify_quote(quote).unwrap();
-        assert!(result.valid);
-        assert_eq!(result.platform, "NVIDIA CC");
-        assert_eq!(result.measurement, quote.to_vec());
+        // A non-empty (even plausible-looking) attestation must be REJECTED by
+        // the fail-closed stub — never accepted as valid.
+        let result = verifier.verify_quote(b"fake-nvidia-attestation");
+        match result {
+            Err(TeeError::VerificationFailed(_)) => {} // expected (fail-closed)
+            other => panic!("expected VerificationFailed, got {:?}", other),
+        }
     }
 
     #[test]
@@ -580,8 +588,15 @@ mod tests {
         ];
 
         for verifier in &verifiers {
-            let result = verifier.verify_quote(b"test-quote").unwrap();
-            assert!(result.valid);
+            // Fail-closed: every stub rejects a non-empty quote.
+            assert!(
+                matches!(
+                    verifier.verify_quote(b"test-quote"),
+                    Err(TeeError::VerificationFailed(_))
+                ),
+                "{} must fail closed on an unverified quote",
+                verifier.platform_name()
+            );
             assert!(!verifier.is_attested());
         }
     }

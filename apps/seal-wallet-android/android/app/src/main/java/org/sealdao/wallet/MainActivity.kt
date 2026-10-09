@@ -2,6 +2,7 @@ package org.sealdao.wallet
 
 import android.os.Bundle
 import android.view.View
+import android.view.WindowManager
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -24,6 +25,15 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // The wallet shows the BIP-39 mnemonic (createWallet) and private
+        // key material on screen. FLAG_SECURE keeps this window out of the
+        // app-switcher thumbnail and blocks screenshots / screen recording
+        // while it is visible, so the recovery phrase can't be captured by
+        // a compromised screen-capture path or a photo of the task switcher.
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_SECURE,
+            WindowManager.LayoutParams.FLAG_SECURE
+        )
         setContentView(R.layout.activity_main)
 
         statusBadge = findViewById(R.id.statusBadge)

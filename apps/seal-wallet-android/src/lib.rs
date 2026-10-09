@@ -382,6 +382,32 @@ fn rpc_call(url: &str, method: &str, params: &str) -> Result<String, String> {
     rpc_post(url, &body)
 }
 
+/// Sign an RPC request with the loaded wallet and POST it. Mirrors the
+/// node's `authenticate()`: the signature is over
+/// `SHA3-256(method || params_json)`.
+fn rpc_call_signed(url: &str, method: &str, params: &str) -> Result<String, String> {
+    let guard = WALLET.lock().unwrap();
+    let state = match guard.as_ref() {
+        Some(s) => s,
+        None => return Err("no wallet loaded".into()),
+    };
+    let message = format!("{}{}", method, params);
+    let message_hash = seal_crypto::hash::sha3_256(message.as_bytes());
+    let sig = state
+        .wallet
+        .sign(message_hash.as_ref())
+        .map_err(|e| format!("signing failed: {}", e))?;
+    let vk = state.wallet.verifying_key();
+    let body = format!(
+        "{{\"jsonrpc\":\"2.0\",\"method\":\"{}\",\"params\":{},\"signature\":\"{}\",\"sender\":\"{}\",\"id\":1}}",
+        method,
+        params,
+        hex::encode(sig.to_bytes()),
+        hex::encode(vk.to_bytes())
+    );
+    rpc_post(url, &body)
+}
+
 fn rpc_post(url: &str, body: &str) -> Result<String, String> {
     use std::io::{Read, Write};
     let addr = url.trim_start_matches("http://");
@@ -406,7 +432,9 @@ pub unsafe extern "C" fn seal_rpc_mpc(node_url: *const c_char, function: *const 
     let tbl = cstr_to_str(table);
     let col = cstr_to_str(column);
     let params = format!("{{\"function\":\"{}\",\"table\":\"{}\",\"column\":\"{}\"}}", func, tbl, col);
-    match rpc_call(&url, "seal_mpcAggregate", &params) {
+    // seal_mpcAggregate is auth-gated (it builds SQL from caller
+    // input), so sign with the wallet key.
+    match rpc_call_signed(&url, "seal_mpcAggregate", &params) {
         Ok(resp) => str_to_cstr(&resp),
         Err(e) => str_to_cstr(&format!("{{\"error\":\"{}\"}}", e)),
     }
@@ -419,7 +447,9 @@ pub unsafe extern "C" fn seal_rpc_zk_prove(node_url: *const c_char, table: *cons
     let tbl = cstr_to_str(table);
     let stmt = cstr_to_str(statement);
     let params = format!("{{\"table\":\"{}\",\"statement\":\"{}\"}}", tbl, stmt.replace('"', "\\\""));
-    match rpc_call(&url, "seal_zkProve", &params) {
+    // seal_zkProve is auth-gated (it builds SQL from caller input),
+    // so sign with the wallet key.
+    match rpc_call_signed(&url, "seal_zkProve", &params) {
         Ok(resp) => str_to_cstr(&resp),
         Err(e) => str_to_cstr(&format!("{{\"error\":\"{}\"}}", e)),
     }

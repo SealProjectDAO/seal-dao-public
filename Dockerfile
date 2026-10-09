@@ -27,7 +27,12 @@ RUN cargo build --release -p seal-node -p seal-cli -p seal-registration -p seal-
 
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/* \
+    # Non-root runtime user. The previous image ran the node as root, so a
+    # compromised node process could read/write any root-owned bind-mounted
+    # path. Ports 4001/8545 are unprivileged (>1024); no capability is needed.
+    && groupadd --gid 1000 seal \
+    && useradd --uid 1000 --gid seal --home-dir /home/seal --create-home seal
 
 COPY --from=builder /app/target/release/seal-node /usr/local/bin/seal-node
 COPY --from=builder /app/target/release/seal /usr/local/bin/seal
@@ -44,6 +49,18 @@ COPY --from=builder /app/target/release/seal-faucet /usr/local/bin/seal-faucet
 COPY --from=builder /app/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+# Node data dir: balances.bin, disk store, ringtail-sessions. --data-dir
+# defaults to "seal-data" (CWD-relative); with WORKDIR below it resolves to
+# /home/seal/seal-data, owned by the non-root runtime user. Operators that
+# override --data-dir or bind-mount a volume (e.g. for SEAL_VALIDATOR_KEY)
+# must chown that path to uid 1000, else the entrypoint keygen / disk writes
+# fail on a root-owned mount.
+RUN mkdir -p /home/seal/seal-data && chown -R seal:seal /home/seal
+
+WORKDIR /home/seal
+
 EXPOSE 4001
+
+USER seal
 
 ENTRYPOINT ["entrypoint.sh"]

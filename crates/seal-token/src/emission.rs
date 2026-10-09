@@ -1,6 +1,7 @@
 //! Token emission schedule (SPEC.md §16).
 //!
-//! Emission rates (annual, applied per-block):
+//! Emission rates (annual), applied per epoch — the epoch reward is minted once
+//! at each epoch boundary:
 //! - Year 0–4: linearly decreasing from 10% to 5%
 //! - Year 4–8: linearly decreasing from 5% to 2%
 //! - Year 8+:  2% floor (tail emission for validator security)
@@ -89,6 +90,11 @@ impl EmissionSchedule {
     /// reward = (initial_supply * rate_bp) / (10_000 * blocks_per_year)
     ///
     /// We use u128 intermediates to avoid overflow on the multiplication.
+    ///
+    /// This is the per-BLOCK figure for a reference `BLOCKS_PER_EPOCH`-block
+    /// epoch. The on-chain emission mints [`epoch_reward`] (the whole epoch's
+    /// total), NOT `block_reward × <actual slots per epoch>` — see
+    /// [`epoch_reward`] for why the latter over-emitted (audit F8).
     pub fn block_reward(&self, epoch: u64) -> u64 {
         let rate_bp = self.epoch_emission_rate_bp(epoch);
         let blocks_per_year = EPOCHS_PER_YEAR.saturating_mul(BLOCKS_PER_EPOCH); // 3_363_840
@@ -111,12 +117,46 @@ impl EmissionSchedule {
         }
     }
 
+    /// Per-epoch emission reward for a given epoch.
+    ///
+    /// This is the amount the chain mints ONCE per epoch (at the epoch boundary,
+    /// see `ConsensusRunner::apply_block_transition`), sized so that over
+    /// `EPOCHS_PER_YEAR` epochs the total equals the schedule's annual rate:
+    ///
+    /// `epoch_reward = initial_supply * rate_bp / (10_000 * EPOCHS_PER_YEAR)`
+    ///
+    /// It is **independent of the epoch's slot/block count** (the consensus
+    /// `slots_per_epoch`): emission is an annual rate applied per epoch, so the
+    /// epoch's slot count changes block cadence, not the epoch's total.
+    ///
+    /// Relationship to [`block_reward`]: `block_reward` is the per-BLOCK figure
+    /// for a reference `BLOCKS_PER_EPOCH`-block epoch, so
+    /// `block_reward(epoch) * BLOCKS_PER_EPOCH ≈ epoch_reward(epoch)` (equal up
+    /// to integer truncation). The previous on-chain mint used
+    /// `block_reward * slots_per_epoch`, which with the shipped 256-slot epoch
+    /// (SPEC §consensus) vs `BLOCKS_PER_EPOCH = 128` emitted exactly 2× the
+    /// intended annual rate (audit F8). `epoch_reward` matches the schedule's
+    /// own `total_emitted` cumulative.
+    pub fn epoch_reward(&self, epoch: u64) -> u64 {
+        let rate_bp = self.epoch_emission_rate_bp(epoch);
+        let denominator = 10_000u128.saturating_mul(EPOCHS_PER_YEAR as u128);
+        if denominator == 0 {
+            return 0;
+        }
+        // Use u128 to avoid overflow: initial_supply * rate_bp could exceed u64.
+        let numerator = (self.initial_supply as u128).saturating_mul(rate_bp as u128);
+        let reward = numerator / denominator;
+        if reward > u64::MAX as u128 {
+            u64::MAX
+        } else {
+            reward as u64
+        }
+    }
+
     /// Cumulative emission through the end of `through_epoch` (inclusive).
     ///
-    /// Sums block rewards for each epoch from 0 through `through_epoch`,
-    /// multiplied by BLOCKS_PER_EPOCH.
-    ///
-    /// For efficiency, we compute phase-by-phase rather than epoch-by-epoch.
+    /// Sums the per-epoch reward (`epoch_reward`) for each epoch from 0 through
+    /// `through_epoch` — matching what the chain actually mints.
     pub fn total_emitted(&self, through_epoch: u64) -> u64 {
         let mut total: u128 = 0;
 
@@ -124,8 +164,7 @@ impl EmissionSchedule {
         // For very large epoch counts this could be slow, but in practice
         // 8 years = ~210k epochs which is fine.
         for ep in 0..=through_epoch {
-            let reward_per_block = self.block_reward(ep) as u128;
-            total = total.saturating_add(reward_per_block.saturating_mul(BLOCKS_PER_EPOCH as u128));
+            total = total.saturating_add(self.epoch_reward(ep) as u128);
         }
 
         if total > u64::MAX as u128 {
@@ -310,9 +349,33 @@ mod tests {
     fn test_total_emitted_epoch_0() {
         let schedule = EmissionSchedule::default();
         let emitted = schedule.total_emitted(0);
-        // Should equal exactly block_reward(0) * BLOCKS_PER_EPOCH
-        let expected = schedule.block_reward(0) * BLOCKS_PER_EPOCH;
-        assert_eq!(emitted, expected);
+        // One epoch of emission == the per-epoch reward, which is (up to
+        // integer truncation) block_reward × BLOCKS_PER_EPOCH.
+        assert_eq!(emitted, schedule.epoch_reward(0));
+        let whole_ref_epoch = (schedule.block_reward(0) * BLOCKS_PER_EPOCH) as u128;
+        assert!(
+            (emitted as u128).abs_diff(whole_ref_epoch) < BLOCKS_PER_EPOCH as u128,
+            "one epoch ≈ a reference epoch of block rewards"
+        );
+    }
+
+    #[test]
+    fn test_epoch_reward_preserves_annual_rate() {
+        let schedule = EmissionSchedule::default();
+        let rate_bp = schedule.epoch_emission_rate_bp(0);
+        // Intended year-0 annual emission = initial_supply × rate_bp / 10_000.
+        let annual =
+            (schedule.initial_supply as u128).saturating_mul(rate_bp as u128) / 10_000u128;
+        // A full year of per-epoch mints recovers the annual rate (± one epoch of
+        // integer truncation). This is the property the old
+        // `block_reward × slots_per_epoch` mint violated (2× at the shipped
+        // 256-slot epoch).
+        let year_total =
+            (schedule.epoch_reward(0) as u128).saturating_mul(EPOCHS_PER_YEAR as u128);
+        assert!(
+            (annual as i128 - year_total as i128).abs() < EPOCHS_PER_YEAR as i128,
+            "year_total {year_total} vs annual {annual}"
+        );
     }
 
     #[test]

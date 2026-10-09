@@ -13,6 +13,9 @@ thiserror = { workspace = true }
 # bincode 1 — used by `BalanceStore::state_root_hash` to serialize
 # Balance values into the HAMT for the content-addressed root.
 bincode = { workspace = true }
+# tracing — a corrupt balance leaf (a module bug, or a hand-crafted leaf)
+# is logged as a warning rather than panicking; see `decode_balance`.
+tracing = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

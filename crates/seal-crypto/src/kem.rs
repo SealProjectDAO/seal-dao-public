@@ -8,7 +8,7 @@
 
 use libcrux_ml_kem::mlkem768;
 use rand::RngCore;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::CryptoError;
 
@@ -84,6 +84,7 @@ impl std::fmt::Debug for KemPublicKey {
 }
 
 /// ML-KEM-768 secret key (decapsulation key). Zeroized on drop.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct KemSecretKey {
     bytes: Vec<u8>,
 }
@@ -119,12 +120,6 @@ impl KemSecretKey {
     }
 }
 
-impl Drop for KemSecretKey {
-    fn drop(&mut self) {
-        self.bytes.zeroize();
-    }
-}
-
 /// Ciphertext produced by KEM encapsulation.
 #[derive(Clone, Debug)]
 pub struct KemCiphertext {
@@ -142,6 +137,7 @@ impl KemCiphertext {
 }
 
 /// Shared secret produced by KEM encapsulation/decapsulation.
+#[derive(Zeroize, ZeroizeOnDrop)]
 pub struct KemSharedSecret {
     pub(crate) bytes: Vec<u8>,
 }
@@ -155,12 +151,6 @@ impl std::fmt::Debug for KemSharedSecret {
 impl KemSharedSecret {
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
-    }
-}
-
-impl Drop for KemSharedSecret {
-    fn drop(&mut self) {
-        self.bytes.zeroize();
     }
 }
 

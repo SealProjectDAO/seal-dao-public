@@ -858,6 +858,29 @@ fn authenticate(req: &RpcRequest, testnet: bool) -> Result<Caller, (i32, String)
     Ok(Caller { address })
 }
 
+/// Read-only guard for unsigned `seal_querySql` callers.
+///
+/// The SQL engine executes full PostgreSQL-subset statements — writes
+/// and DDL included — so an unauthenticated caller is restricted to a
+/// single `SELECT`. Mutations already require a signature via
+/// `seal_submitSql`; a signed caller hitting `seal_querySql` keeps full
+/// access (the gate bounds *unauthenticated* reach, not capability).
+fn is_read_only_sql(sql: &str) -> bool {
+    let trimmed = sql.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // No multi-statement.
+    if trimmed.contains(';') {
+        return false;
+    }
+    // First token must be SELECT (case-insensitive). `WITH … SELECT`
+    // common-table expressions are deliberately rejected: unsigned
+    // callers can rewrite the query as a plain SELECT if needed.
+    let first = trimmed.split_whitespace().next().unwrap_or("");
+    first.eq_ignore_ascii_case("select")
+}
+
 /// Check if a method requires authentication.
 fn requires_auth(method: &str) -> bool {
     matches!(
@@ -906,6 +929,28 @@ fn requires_auth(method: &str) -> bool {
             | "seal_govWithdrawVote"
             | "seal_govDelegate"
             | "seal_govRevokeDelegation"
+            // MPC / ZK endpoints build SQL from caller-supplied table
+            // and column names (`format!("SELECT {} FROM {}", …)`).
+            // Unsigned they are SQL injection; signed, they are
+            // privilege-neutral — a signed caller can already run
+            // arbitrary SQL via seal_submitSql.
+            | "seal_mpcAggregate"
+            | "seal_zkProve"
+            // Bridge-bootstrap mutations. These also appear in
+            // `requires_admin_auth`, but that gate is bypassed in
+            // open mode (empty admin_addresses), leaving them fully
+            // unauthenticated on the testnet default. Requiring a
+            // signature in all modes binds the call to a key; admin
+            // membership still applies when the set is populated.
+            // (Seating a malicious council member is otherwise a
+            // 2/3-supermajority path to chain pause + committee-key
+            // rotation.)
+            | "seal_addBridgeObserver"
+            | "seal_bridgeCouncilAdd"
+            | "seal_bridgeCouncilRemove"
+            | "seal_bridgePauseChain"
+            | "seal_bridgeUnpauseChain"
+            | "seal_bridgeRotateCommitteeKey"
     )
 }
 
@@ -918,9 +963,12 @@ fn requires_auth(method: &str) -> bool {
 /// gating closes the "anyone can drive RPC traffic" gap so the call
 /// is at least bound to a known operator key.
 ///
-/// Open-mode (empty `admin_addresses`) preserves the alpha-testnet
-/// behaviour: any signed caller can hit these. Mainnet must populate
-/// the set via genesis config / `--admin-address` CLI flag.
+/// All of these are additionally in `requires_auth`, so a signature
+/// is mandatory in every mode; this function adds the *membership*
+/// requirement. Open-mode (empty `admin_addresses`) preserves the
+/// alpha-testnet behaviour: any signed caller can hit these. Mainnet
+/// must populate the set via genesis config / `--admin-address` CLI
+/// flag.
 fn requires_admin_auth(method: &str) -> bool {
     matches!(
         method,
@@ -1068,10 +1116,11 @@ async fn handle_rpc(
         }
     }
 
-    // Authenticate if required. Admin-gated methods only force auth
-    // when `admin_addresses` is populated — open mode preserves the
-    // alpha-testnet bootstrap flow where `bridge-e2e.sh` and similar
-    // scripts call these RPCs without signing.
+    // Authenticate if required. `requires_auth` methods always need a
+    // signature; admin-gated methods *additionally* need admin-set
+    // membership, but only when `admin_addresses` is populated (open
+    // mode keeps the alpha-testnet bootstrap where any signed
+    // operator can drive the bridge).
     let admin_method = requires_admin_auth(&req.method);
     let admin_gated = admin_method && !state.config.admin_addresses.is_empty();
     let needs_signature = requires_auth(&req.method) || admin_gated;
@@ -1292,7 +1341,9 @@ async fn handle_rpc(
         "seal_placeOrder" => {
             handle_place_order(&state, &req.params, caller_addr.unwrap_or("anonymous")).await
         }
-        "seal_cancelOrder" => handle_cancel_order(&state, &req.params).await,
+        "seal_cancelOrder" => {
+            handle_cancel_order(&state, &req.params, caller_addr.unwrap_or("anonymous")).await
+        }
         "seal_getOrderBook" => handle_get_order_book(&state, &req.params).await,
         "seal_listPairs" => handle_list_pairs(&state).await,
         "seal_listTrades" => handle_list_trades(&state, &req.params).await,
@@ -1450,6 +1501,17 @@ async fn handle_query_sql(
         .get("sql")
         .and_then(|v| v.as_str())
         .ok_or((-32602, "missing 'sql' param".into()))?;
+
+    // Unsigned callers get read-only access: the engine executes full
+    // SQL (writes and DDL included) in both branches below, so
+    // unauthenticated callers are limited to a single SELECT. Signed
+    // callers are unaffected.
+    if caller == "anonymous" && !is_read_only_sql(sql) {
+        return Err((
+            -32004,
+            "unsigned seal_querySql is restricted to a single SELECT statement; sign the request for writes (seal_submitSql, or seal_querySql with a signature)".into(),
+        ));
+    }
 
     let namespace = params.get("namespace").and_then(|v| v.as_str());
 
@@ -2539,10 +2601,25 @@ async fn handle_transfer(
     let recipient_known = node.runner.balances.has_account(to);
     check_recipient_policy(&state.config, params, recipient_known, to)?;
     check_min_opening_balance(&state.config, recipient_known, amount, to)?;
-    node.runner
-        .balances
-        .transfer(caller, to, amount)
-        .map_err(|e| (-32000, format!("transfer failed: {}", e)))?;
+    // Reject overdrafts at submit time WITHOUT mutating the committed ledger.
+    // The on-block transition (`apply_block_transition`) is the single place
+    // that applies transfers, identically for the producer and every replayer
+    // (F3). A live transfer here (the pre-F3 behavior) made the submitter's
+    // balances diverge from non-submitters, forking the state root.
+    let available = node.runner.available_with_pending(caller);
+    if available < amount {
+        return Err((-32000, format!(
+            "insufficient funds: have {}, need {}",
+            available, amount
+        )));
+    }
+
+    // Record the movement as a nonce-stamped money transaction so it lands in
+    // the next block and replaying nodes re-apply it via the shared transition.
+    node
+        .runner
+        .submit_money_tx(seal_storage::block_store::TxType::Transfer, caller, to, amount)
+        .map_err(|e| (-32000, format!("failed to record transfer on chain: {}", e)))?;
 
     Ok(serde_json::json!({
         "from": caller,
@@ -3419,6 +3496,37 @@ async fn handle_create_pair(
     }))
 }
 
+/// Placement-time sufficiency guard for BUY (bid) orders.
+///
+/// A bid obligates the caller to pay `price * quantity` of the native quote
+/// (SEAL). Reject the order if the caller does not hold that much available.
+/// `price * quantity` is computed with checked arithmetic — an overflow means
+/// an order value that is certainly unaffordable, so it is rejected too.
+///
+/// This is a soft pre-filter: it rejects obviously-unaffordable orders at
+/// placement so the book is not filled with orders that could never settle.
+/// The authoritative balance check and the actual transfer happen at on-block
+/// DEX settlement.
+fn check_bid_sufficiency(
+    available: u64,
+    price: u64,
+    quantity: u64,
+) -> Result<(), (i32, String)> {
+    let cost = price.checked_mul(quantity).ok_or((
+        -32602,
+        "order value overflows u64 (price * quantity)".to_string(),
+    ))?;
+    if available < cost {
+        return Err((
+            -32000,
+            format!(
+                "insufficient SEAL balance to cover order: need {cost}, have {available}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 async fn handle_place_order(
     state: &RpcState,
     params: &serde_json::Value,
@@ -3441,6 +3549,21 @@ async fn handle_place_order(
         .get("quantity")
         .and_then(|v| v.as_u64())
         .ok_or((-32602, "missing 'quantity' param".into()))?;
+
+    // Placement-time sufficiency: a BUY (bid) order obligates the caller to
+    // pay `price * quantity` of the native quote (SEAL), so reject it before
+    // it enters the book if the caller does not hold that much. Read the
+    // balance under a brief node lock (dropped before the dex lock below, so
+    // the two locks are never held at once). ASK (sell) orders settle against
+    // the base asset, whose sufficiency — and the actual transfer — is
+    // enforced at on-block DEX settlement, not at placement.
+    if side == seal_token::orderbook::Side::Bid {
+        let available = {
+            let node = state.node.lock().await;
+            node.runner.balances.available(caller)
+        };
+        check_bid_sufficiency(available, price, quantity)?;
+    }
 
     let mut dex = state.dex.lock().await;
     let book = dex
@@ -3475,6 +3598,7 @@ async fn handle_place_order(
 async fn handle_cancel_order(
     state: &RpcState,
     params: &serde_json::Value,
+    caller: &str,
 ) -> Result<serde_json::Value, (i32, String)> {
     let pair = params
         .get("pair")
@@ -3489,7 +3613,9 @@ async fn handle_cancel_order(
     let book = dex
         .get_book_mut(pair)
         .ok_or((-32000, format!("pair '{}' not found", pair)))?;
-    book.cancel_order(order_id)
+    // Only the order's owner may cancel it — `caller` is threaded from the
+    // authenticated session so a caller can't cancel a stranger's order.
+    book.cancel_order(order_id, caller)
         .map_err(|e| (-32000, format!("{}", e)))?;
 
     Ok(serde_json::json!({ "cancelled": order_id }))
@@ -6030,6 +6156,25 @@ mod tests {
         assert!(resp.error.is_none());
     }
 
+    /// Placement-time sufficiency: a bid is rejected unless the caller can
+    /// cover `price * quantity` SEAL; an overflow (price*quantity > u64::MAX)
+    /// is unaffordable and rejected too.
+    #[test]
+    fn test_check_bid_sufficiency() {
+        // Exact coverage is allowed.
+        assert!(check_bid_sufficiency(1000, 100, 10).is_ok());
+        // Just enough.
+        assert!(check_bid_sufficiency(100, 100, 1).is_ok());
+        // Short by one.
+        assert!(check_bid_sufficiency(99, 100, 1).is_err());
+        // Zero balance, nonzero cost.
+        assert!(check_bid_sufficiency(0, 1, 1).is_err());
+        // price*quantity overflowing u64 is unaffordable.
+        assert!(check_bid_sufficiency(u64::MAX, u64::MAX, 2).is_err());
+        // A zero-cost order (quantity 0) is trivially coverable.
+        assert!(check_bid_sufficiency(0, 5, 0).is_ok());
+    }
+
     #[test]
     fn rate_limiter_isolates_groups_per_ip() {
         // P8/§4.1 — expensive-bucket exhaustion must NOT block
@@ -6227,6 +6372,9 @@ mod tests {
         // is a regular auth-gated method — the handler enforces the
         // additional validator-set membership check.
         assert!(requires_auth("seal_bridgeMarkExecuted"));
+        // MPC / ZK endpoints build SQL from caller input — signed only.
+        assert!(requires_auth("seal_mpcAggregate"));
+        assert!(requires_auth("seal_zkProve"));
         // Reads stay open
         assert!(!requires_auth("seal_listTokens"));
         assert!(!requires_auth("seal_listTokensByCreator"));
@@ -6248,13 +6396,43 @@ mod tests {
         assert!(!requires_auth("seal_getCouncilMemberByAddress"));
         assert!(!requires_auth("seal_getTokenBalance"));
         assert!(!requires_auth("seal_isFrozen"));
-        // Admin-gated methods are NOT in `requires_auth` itself —
-        // their auth requirement only kicks in when admin_addresses
-        // is populated, so the alpha-testnet bootstrap (bridge-e2e.sh
-        // sending unsigned RPCs) keeps working.
-        assert!(!requires_auth("seal_addBridgeObserver"));
-        assert!(!requires_auth("seal_bridgeCouncilAdd"));
-        assert!(!requires_auth("seal_bridgePauseChain"));
+        // Admin-gated bridge-bootstrap methods now require a
+        // signature in ALL modes (the open-mode admin bypass would
+        // otherwise let anyone seat council members unsigned). The
+        // admin *membership* requirement still only kicks in when
+        // admin_addresses is populated.
+        assert!(requires_auth("seal_addBridgeObserver"));
+        assert!(requires_auth("seal_bridgeCouncilAdd"));
+        assert!(requires_auth("seal_bridgeCouncilRemove"));
+        assert!(requires_auth("seal_bridgePauseChain"));
+        assert!(requires_auth("seal_bridgeUnpauseChain"));
+        assert!(requires_auth("seal_bridgeRotateCommitteeKey"));
+    }
+
+    #[test]
+    fn test_is_read_only_sql() {
+        // Plain reads pass.
+        assert!(is_read_only_sql("SELECT * FROM accounts"));
+        assert!(is_read_only_sql("  select id from t where x = 1"));
+        assert!(is_read_only_sql("\n\tSELECT 1"));
+        // Writes / DDL rejected.
+        assert!(!is_read_only_sql("INSERT INTO t VALUES (1)"));
+        assert!(!is_read_only_sql("UPDATE t SET x = 1"));
+        assert!(!is_read_only_sql("DELETE FROM t"));
+        assert!(!is_read_only_sql("CREATE TABLE t (id int)"));
+        assert!(!is_read_only_sql("DROP TABLE t"));
+        assert!(!is_read_only_sql("ALTER TABLE t ENABLE ROW LEVEL SECURITY"));
+        assert!(!is_read_only_sql("CALL my_proc()"));
+        // Multi-statement rejected, even when it starts with SELECT.
+        assert!(!is_read_only_sql("SELECT 1; DROP TABLE t"));
+        assert!(!is_read_only_sql("SELECT 1;"));
+        // Empty / junk rejected.
+        assert!(!is_read_only_sql(""));
+        assert!(!is_read_only_sql("   "));
+        // Comments are not special-cased: a leading -- is not SELECT.
+        assert!(!is_read_only_sql("-- hi\nSELECT 1"));
+        // WITH … SELECT is rejected by design (see fn docs).
+        assert!(!is_read_only_sql("WITH x AS (SELECT 1) SELECT * FROM x"));
     }
 
     #[test]

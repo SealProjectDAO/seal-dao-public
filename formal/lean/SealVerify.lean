@@ -3,4 +3,5 @@ import SealVerify.Basic.Hash
 import SealVerify.Basic.MerkleTree
 import SealVerify.Basic.VRF
 import SealVerify.Basic.DEX
+import SealVerify.Basic.StateRoot
 import SealVerify.Aeneas

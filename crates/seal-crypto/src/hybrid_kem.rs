@@ -14,11 +14,14 @@ use x25519_dalek::{EphemeralSecret, PublicKey as X25519PublicKey};
 
 use crate::kem::{KemCiphertext, KemKeypair};
 use crate::CryptoError;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// X25519 secret material (32 bytes, stored raw for serialization compatibility).
-/// Clamping is applied on use via [`x25519_clamp`].
-#[derive(Clone, Copy)]
+/// Clamping is applied on use via [`x25519_clamp`]. Zeroized on drop.
+///
+/// Not `Copy`: a `Copy` type cannot implement `Drop`, and zeroizing this
+/// secret on drop requires `ZeroizeOnDrop`.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct X25519Secret(pub [u8; 32]);
 
 /// X25519 public key material (32 bytes).
@@ -76,10 +79,20 @@ impl HybridKemKeypair {
     }
 }
 
+impl Zeroize for HybridKemKeypair {
+    fn zeroize(&mut self) {
+        // Wipe both halves of the keypair in place. `KemKeypair` has no
+        // `Zeroize` impl of its own, so reach the ML-KEM secret through its
+        // public `secret` field (which implements `Zeroize`); zeroize the
+        // X25519 secret directly.
+        self.mlkem.secret.zeroize();
+        self.x25519.zeroize();
+    }
+}
+
 impl Drop for HybridKemKeypair {
     fn drop(&mut self) {
-        // ML-KEM secret key is zeroized by KemSecretKey::drop.
-        self.x25519.0.zeroize();
+        self.zeroize();
     }
 }
 
@@ -122,7 +135,7 @@ impl std::fmt::Debug for HybridKemPublicKey {
 }
 
 /// Hybrid shared secret (32 bytes, zeroized on drop).
-#[derive(Clone)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct HybridKemSharedSecret {
     bytes: [u8; 32],
 }
@@ -147,12 +160,6 @@ impl HybridKemSharedSecret {
 impl std::fmt::Debug for HybridKemSharedSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "HybridKemSharedSecret(<redacted>)")
-    }
-}
-
-impl Drop for HybridKemSharedSecret {
-    fn drop(&mut self) {
-        self.bytes.zeroize();
     }
 }
 
@@ -313,5 +320,26 @@ mod tests {
 
         assert_eq!(ss_from_ct.as_bytes(), ss_from_enc.as_bytes());
         assert_eq!(ss_from_ct.as_bytes(), encaps.shared_secret.as_bytes());
+    }
+
+    /// Secret key material must implement `Zeroize` and actually wipe the
+    /// bytes (audit item 8). Exercises the leaf `X25519Secret` and the
+    /// composite `HybridKemKeypair::zeroize`.
+    #[test]
+    fn test_secrets_zeroize() {
+        // X25519Secret: explicit zeroize must wipe the 32 bytes.
+        let mut secret = X25519Secret([0xABu8; 32]);
+        secret.zeroize();
+        assert_eq!(secret.0, [0u8; 32], "X25519Secret::zeroize must wipe the bytes");
+
+        // HybridKemKeypair::zeroize must wipe both the ML-KEM and X25519
+        // secrets in place.
+        let mut keypair = HybridKemKeypair::generate();
+        keypair.zeroize();
+        assert_eq!(keypair.x25519.0, [0u8; 32], "keypair zeroize must wipe the X25519 secret");
+        assert!(
+            keypair.mlkem.secret.to_bytes().iter().all(|b| *b == 0),
+            "keypair zeroize must wipe the ML-KEM secret"
+        );
     }
 }

@@ -1,6 +1,7 @@
 #!/bin/bash
-# Update vendored dependencies for the workspace, the fuzz crate, and
-# the seal-wallet-android FFI crate.
+# Update vendored dependencies for the workspace, the fuzz crate, the
+# seal-wallet-android FFI crate, and the standalone Solana bridge
+# program workspace.
 #
 # Usage: ./scripts/vendor-update.sh
 #
@@ -18,13 +19,14 @@ set -euo pipefail
 # The fuzz manifest needs the nightly toolchain because it uses
 # `cargo-fuzz` build metadata, so we run the whole thing under nightly.
 
-echo "── Vendoring (workspace + fuzz + seal-wallet-android) ──"
+echo "── Vendoring (workspace + fuzz + seal-wallet-android + seal-bridge) ──"
 mv .cargo/config.toml .cargo/config.toml.bak
 NIGHTLY_BIN="$(dirname "$(rustup which --toolchain nightly cargo)")"
 PATH="$NIGHTLY_BIN:$PATH" cargo vendor \
     --versioned-dirs \
     --sync fuzz/Cargo.toml \
     --sync apps/seal-wallet-android/Cargo.toml \
+    --sync bridges/solana/programs/seal-bridge/Cargo.toml \
     vendor/ 2>&1 | tail -1
 mv .cargo/config.toml.bak .cargo/config.toml
 echo ""

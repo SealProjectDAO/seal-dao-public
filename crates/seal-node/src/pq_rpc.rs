@@ -9,6 +9,7 @@
 //! 3. Both derive AES-256-GCM session key from shared secret
 //! 4. Subsequent requests to /pq/rpc are encrypted with session key
 
+use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
 use seal_crypto::hash::sha3_256;
 use seal_crypto::kem::{KemKeypair, KemPublicKey};
 use serde::{Deserialize, Serialize};
@@ -16,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Session state for a PQ-encrypted RPC connection.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PqRpcSession {
     /// Session ID (SHA3 of shared secret).
     pub session_id: String,
@@ -24,6 +25,18 @@ pub struct PqRpcSession {
     pub session_key: [u8; 32],
     /// Monotonic nonce counter (prevents replay).
     pub nonce_counter: u64,
+}
+
+impl std::fmt::Debug for PqRpcSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Mask the session key: only the first 4 bytes of hex are printed so
+        // full key material never leaks into logs.
+        f.debug_struct("PqRpcSession")
+            .field("session_id", &self.session_id)
+            .field("session_key", &format!("{}…", hex::encode(&self.session_key[..4])))
+            .field("nonce_counter", &self.nonce_counter)
+            .finish()
+    }
 }
 
 /// Manages PQ-encrypted RPC sessions.
@@ -145,14 +158,17 @@ impl PqRpcManager {
         }
         session.nonce_counter = req.nonce;
 
-        // Decrypt payload (XOR-based placeholder — replace with AES-256-GCM)
+        // Decrypt payload with AES-256-GCM (authenticated). A tampered
+        // ciphertext or wrong key/nonce fails the GCM auth-tag check and is
+        // rejected rather than silently producing a corrupted plaintext —
+        // the guarantee the old XOR keystream placeholder could not give.
         let encrypted = hex::decode(&req.encrypted_payload)
             .map_err(|_| "invalid encrypted payload hex".to_string())?;
         let nonce_bytes = req.nonce.to_le_bytes();
         let mut nonce12 = [0u8; 12];
         nonce12[..8].copy_from_slice(&nonce_bytes);
 
-        let decrypted = xor_decrypt(&encrypted, &session.session_key, &nonce12);
+        let decrypted = aes_gcm_open(&encrypted, &session.session_key, &nonce12)?;
         let plaintext =
             String::from_utf8(decrypted).map_err(|_| "decrypted payload is not UTF-8")?;
 
@@ -160,22 +176,27 @@ impl PqRpcManager {
     }
 
     /// Encrypt an RPC response.
+    ///
+    /// Returns an error rather than an envelope if sealing fails (an
+    /// impossible key-length mismatch for the fixed 32-byte session key), so
+    /// a broken session surfaces loudly instead of emitting a degenerate
+    /// ciphertext.
     pub fn encrypt_response(
         &self,
         session: &PqRpcSession,
         response_json: &str,
         nonce: u64,
-    ) -> EncryptedRpcResponse {
+    ) -> Result<EncryptedRpcResponse, String> {
         let nonce_bytes = nonce.to_le_bytes();
         let mut nonce12 = [0u8; 12];
         nonce12[..8].copy_from_slice(&nonce_bytes);
 
-        let encrypted = xor_decrypt(response_json.as_bytes(), &session.session_key, &nonce12);
+        let encrypted = aes_gcm_seal(response_json.as_bytes(), &session.session_key, &nonce12)?;
 
-        EncryptedRpcResponse {
+        Ok(EncryptedRpcResponse {
             encrypted_payload: hex::encode(&encrypted),
             nonce,
-        }
+        })
     }
 
     /// Get number of active sessions.
@@ -184,19 +205,42 @@ impl PqRpcManager {
     }
 }
 
-/// XOR-based stream cipher (placeholder for AES-256-GCM).
-fn xor_decrypt(data: &[u8], key: &[u8; 32], nonce: &[u8; 12]) -> Vec<u8> {
-    let mut keystream = Vec::with_capacity(data.len());
-    let seed: Vec<u8> = key.iter().chain(nonce.iter()).copied().collect();
-    let mut hash = sha3_256(&seed);
-    while keystream.len() < data.len() {
-        keystream.extend_from_slice(&hash.0);
-        hash = sha3_256(&hash.0);
-    }
-    data.iter()
-        .zip(keystream.iter())
-        .map(|(d, k)| d ^ k)
-        .collect()
+/// Seal `plaintext` with AES-256-GCM under the session key. Returns
+/// `ciphertext || tag` (the 16-byte GCM auth tag is appended to the
+/// ciphertext by the `aes-gcm` crate). This replaces the old XOR keystream
+/// placeholder, which gave confidentiality but no integrity: an attacker
+/// who flipped a ciphertext byte silently flipped the plaintext bit.
+fn aes_gcm_seal(
+    plaintext: &[u8],
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+) -> Result<Vec<u8>, String> {
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|_| "invalid AES-256 session key length".to_string())?;
+    let nonce = Nonce::from_slice(nonce);
+    cipher
+        .encrypt(nonce, plaintext)
+        .map_err(|e| format!("AES-256-GCM seal failed: {e}"))
+}
+
+/// Open an AES-256-GCM seal under the session key. Verifies the GCM auth
+/// tag before returning the plaintext, so any tampering with the ciphertext
+/// (or a wrong key/nonce) is rejected instead of silently decrypting to
+/// garbage.
+fn aes_gcm_open(
+    ciphertext: &[u8],
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+) -> Result<Vec<u8>, String> {
+    let cipher = Aes256Gcm::new_from_slice(key)
+        .map_err(|_| "invalid AES-256 session key length".to_string())?;
+    let nonce = Nonce::from_slice(nonce);
+    cipher
+        .decrypt(nonce, ciphertext)
+        .map_err(|_| {
+            "AES-256-GCM open failed: auth tag mismatch (tampered ciphertext or wrong key)"
+                .to_string()
+        })
 }
 
 #[cfg(test)]
@@ -207,6 +251,23 @@ mod tests {
     fn test_pq_rpc_manager_creation() {
         let mgr = PqRpcManager::new();
         assert_eq!(mgr.session_count(), 0);
+    }
+
+    #[test]
+    fn test_session_debug_masks_key() {
+        let full_key = [0xABu8; 32];
+        let session = PqRpcSession {
+            session_id: "test-session".into(),
+            session_key: full_key,
+            nonce_counter: 7,
+        };
+        let rendered = format!("{:?}", session);
+        // The full 32-byte key hex must never appear in the Debug output.
+        assert!(!rendered.contains(&hex::encode(full_key)));
+        // Only the first 4 bytes, truncated.
+        assert!(rendered.contains(&hex::encode(&full_key[..4])));
+        assert!(rendered.contains("…"));
+        assert!(rendered.contains("nonce_counter: 7"));
     }
 
     #[test]
@@ -244,15 +305,24 @@ mod tests {
             .clone();
 
         let plaintext = r#"{"jsonrpc":"2.0","method":"seal_getHeight","params":{},"id":1}"#;
-        let encrypted_resp = mgr.encrypt_response(&session, plaintext, 1);
+        let encrypted_resp = mgr.encrypt_response(&session, plaintext, 1).unwrap();
         assert!(!encrypted_resp.encrypted_payload.is_empty());
 
-        // Decrypt using the same key
+        // Decrypt using the same key (authenticated — verifies the GCM tag).
         let encrypted_bytes = hex::decode(&encrypted_resp.encrypted_payload).unwrap();
         let mut nonce12 = [0u8; 12];
         nonce12[..8].copy_from_slice(&1u64.to_le_bytes());
-        let decrypted = xor_decrypt(&encrypted_bytes, &session.session_key, &nonce12);
+        let decrypted = aes_gcm_open(&encrypted_bytes, &session.session_key, &nonce12).unwrap();
         assert_eq!(String::from_utf8(decrypted).unwrap(), plaintext);
+
+        // Tamper with a single ciphertext byte — the GCM auth tag must
+        // reject it (the guarantee the old XOR keystream could not give).
+        let mut tampered = encrypted_bytes.clone();
+        tampered[0] ^= 0x01;
+        assert!(
+            aes_gcm_open(&tampered, &session.session_key, &nonce12).is_err(),
+            "a tampered ciphertext must fail the GCM auth tag"
+        );
     }
 
     #[test]
@@ -274,7 +344,7 @@ mod tests {
             .unwrap()
             .clone();
 
-        let encrypted = mgr.encrypt_response(&session, "test", 1);
+        let encrypted = mgr.encrypt_response(&session, "test", 1).unwrap();
 
         let req = EncryptedRpcRequest {
             session_id: resp.session_id.clone(),

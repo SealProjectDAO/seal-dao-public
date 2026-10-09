@@ -20,7 +20,7 @@ pub trait NodeStore {
 }
 
 /// In-memory content-addressed store (for testing and prototyping).
-#[derive(Default, Debug)]
+#[derive(Clone, Default, Debug)]
 pub struct MemoryStore {
     nodes: HashMap<Hash256, Node>,
 }

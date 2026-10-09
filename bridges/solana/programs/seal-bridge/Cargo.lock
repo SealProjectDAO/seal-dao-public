@@ -1305,15 +1305,6 @@ version = "0.1.0"
 dependencies = [
  "anchor-lang",
  "anchor-spl",
- "seal-ringtail-verify",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "seal-ringtail-verify"
-version = "0.1.0"
-dependencies = [
- "sha3",
 ]
 
 [[package]]

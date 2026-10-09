@@ -4,6 +4,13 @@ use seal_crypto::hash::Hash256;
 use serde::{Deserialize, Serialize};
 
 /// Block header with VRF election proof.
+///
+/// **Canonical signing bytes**: `proposer_signature` is an ML-DSA
+/// signature over `bincode(header)` with `proposer_signature` set to
+/// empty. Producers sign the empty-sig serialization; verifiers zero
+/// the field, re-serialize, and verify against `proposer`. (This field
+/// was added after the fact, so persisted data from before it must be
+/// wiped — see CHANGELOG.)
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct BlockHeader {
     pub height: u64,
@@ -18,6 +25,40 @@ pub struct BlockHeader {
     /// VRF proof (ML-DSA signature for PqVrf, ~3.3 KB).
     #[serde(default)]
     pub vrf_proof: Vec<u8>,
+    /// ML-DSA signature of the proposer over the canonical (empty-sig)
+    /// serialization of this header. Verifiers reject blocks with an
+    /// empty signature.
+    pub proposer_signature: Vec<u8>,
+    /// Merkle root over `Block.transactions` (order-sensitive). Added so the
+    /// transaction set is bound to the *signed* header: without it a relayer
+    /// could inject/remove/modify a no-op tx (DexMatch, token/bridge/stake) in
+    /// a validly-signed block and every node would commit it, because no-op txs
+    /// affect neither `state_root` nor the header signature. Producers compute
+    /// this *after* appending the per-block `DexMatch` so the match is covered;
+    /// verifiers recompute it from the received transactions and reject on
+    /// mismatch. Adding this field changes the canonical signing bytes, so
+    /// pre-upgrade headers are invalid — wipe the data dir on upgrade (see
+    /// `audits/2026-10-08-dexmatch-txroot-design.md`).
+    pub tx_root: Hash256,
+}
+
+/// Merkle root over a transaction list (order-sensitive). This is the value
+/// committed to as `BlockHeader.tx_root`. Producers, the legacy `state.rs`
+/// producer, and every replayer call the same function on the same bytes, so
+/// they always agree; a post-signature change to any transaction changes the
+/// recomputed root and fails the header check.
+pub fn transactions_root(txs: &[Transaction]) -> Hash256 {
+    let mut leaves = Vec::with_capacity(txs.len());
+    for tx in txs {
+        // A tx that cannot serialize is a distinct, stable leaf; in practice a
+        // produced/stored block only contains serializable txs, so this arm is
+        // a fail-safe against a panic (no `.unwrap()` in production).
+        match bincode::serialize(tx) {
+            Ok(bytes) => leaves.push(bytes),
+            Err(_) => leaves.push(Vec::new()),
+        }
+    }
+    seal_crypto::hash::merkle_root(&leaves)
 }
 
 /// A block containing header and transactions.
@@ -123,6 +164,8 @@ mod tests {
                 proposer: vec![0u8; 32],
                 vrf_output: vec![],
                 vrf_proof: vec![],
+                proposer_signature: vec![],
+                tx_root: Hash256::ZERO,
             },
             transactions: vec![],
         }
@@ -179,6 +222,8 @@ mod tests {
                 proposer: vec![1u8; 32],
                 vrf_output: vec![],
                 vrf_proof: vec![],
+                proposer_signature: vec![],
+                tx_root: Hash256::ZERO,
             },
             transactions: vec![
                 Transaction {
